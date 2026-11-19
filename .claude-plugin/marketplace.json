@@ -1,0 +1,22 @@
+{
+  "name": "agent-desk",
+  "owner": {
+    "name": "erjand"
+  },
+  "metadata": {
+    "description": "agent-desk's Claude Code plugin: the inbox pane and the skills its agents run"
+  },
+  "plugins": [
+    {
+      "name": "agent-desk",
+      "source": "./inbox",
+      "description": "An inbox pane for agent-desk projects: what each runner works on, PRs to review, decisions, stopped agents, the queue, and chores",
+      "author": {
+        "name": "erjand"
+      },
+      "homepage": "https://github.com/erjand/agent-desk",
+      "repository": "https://github.com/erjand/agent-desk",
+      "license": "MIT"
+    }
+  ]
+}

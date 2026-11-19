@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Runs headless Claude Code agents on a project's issues on this machine, from the local store the desk keeps.
+# See README.md beside bin/. Each command runs from a checkout of the project.
+set -euo pipefail
+
+# Bash reads a running script as it goes, so the work sits in a function bash reads whole before it runs: a
+# file replaced under a running job can't change what the job runs next.
+agent_desk_main() {
+    lib=$(cd "$(dirname "$(readlink -f "$0")")/../lib" && pwd)
+    usage() {
+        cat >&2 <<'USAGE'
+usage: agent-desk <command> [args]
+  --version                     print the version of agent-desk this checkout holds
+  install [<owner/repo>]        set up the current project: its config and its place on this machine and in the store;
+                                name it when its config sets "host": "none" and its origin is a path or missing
+  doctor                        check the machine and the current project, and say how to fix what's missing
+  work-issue <n>                work issue n with a headless agent, as the dispatcher does
+  discuss-idea <n>              answer the newest comment on idea n with a headless agent, changing no code
+  start <n>                     claim issue n for this session, create its worktree, and post the session
+  serial claim <n> | release    take or hand on the slot one serial issue works in at a time
+  worktree <slug> [base]        create ../<repo>-<slug> on agent/<slug> from the local base or main, set up
+  clean <agent/slug> <merged>   clean up after an agent review merges or closes, as the dispatcher does
+  release <n> <cancelled|failure> [--discussion]
+                                hand issue n back after its run ended without a report, as the dispatcher does
+  chores [status | tick]        show the project's chores, or start the most overdue one
+  chores on | off | tick-all    turn the timer that ticks every project's chores on or off, or tick them all
+  chores rename <old> <new> [-R <owner/repo> | --all]
+                                move a chore's runs and ledger to a new skill name, and rename it in the config
+                                through the schedule review, in one project or in every one that names it
+  chore <skill> [n | forever | stop]   start a chore now, n times or until stopped, or stop its queue
+  run-chore <skill>             run a chore with a headless agent, as the dispatcher does
+  work-pr <pr>                  send an agent back to an agent/<slug> review with REQUEST, as the dispatcher does
+  fixes [status | tick]         show the reviews that conflict with main or whose checks main broke, or ask for fixes
+  fix <pr>                      resolve a PR's conflicts with main, or fix its failed checks, with a headless agent
+  merges [status | add <n>... | remove <n>... | tick]   merge queued reviews in local git, each tested against main
+  pushes [status | tick]        show how far main is ahead of origin, or push main and the agent branches
+  shots [--comment] <review> <picture>...   save screenshots for a review and print the Markdown that shows them
+  gpu [--exclusive] -- <command> [args...]
+                                run a command while it holds one of the machine's GPU slots, or with --exclusive all
+  gpu slots [<n>] [--min-free-vram <GB>]
+                                print the GPU slot count, the VRAM a second slot needs, and who holds each slot, or
+                                set them machine-wide
+  gpu status                    print what gpu slots prints, then the last day's waits by checkout
+  issue <verb> [args]           file, view, list, comment on, edit, close, reopen, or delete an issue in the local store
+  review <verb> [args]          open, view, list, comment on, edit, ready, close, or merge a review in the local store
+  label edit <name> --color <hex> | list   set a label's color in the local store, or list the colors
+  queue order [<n> --up | --down | --top | --to <place>]
+                                print the order queued and waiting issues start in, or move issue n up, down, to
+                                the top, or to a place from 1
+  board [--json]                print everything the inbox's board shows of the project, without asking GitHub
+  import <owner/repo>           copy a GitHub project's issues, PRs, comments, labels, and links into the local store
+  cutover [--dry-run] [--issues-off] <owner/repo> | --all
+                                move a project, or every project, from GitHub to the local store for good
+  cutover --undo [--dry-run] <owner/repo>
+                                turn GitHub back on for a project and list what was filed locally since
+  project rename [--dry-run] <owner/repo> <new owner/repo>
+                                move a project's issues, reviews, state, checkout origin, and backup to a new name
+  project remove [--dry-run] <owner/repo>
+                                take a project off this machine's desk: its store rows, state, mode, line in the
+                                projects file, and backup folder, leaving its checkout and worktrees
+  backup [snapshot | install]   commit every item to the backup repository, snapshot the database, or turn on the
+                                timer that does both
+  restore --from <repository | snapshot> --to <state folder>
+                                rebuild the store's database from a backup in a folder that has none
+  dispatch [install | off | status]   turn on or off the service that starts requested runs as systemd units
+  request <kind> <target> [--benchmark]   ask the dispatcher for an agent, chore, or fix run
+  request --cancel <run>        cancel one run request that still waits, leaving every other run alone
+  pause <n> | unpause <n> [-R <owner/repo>]
+                                stop the agent run on issue n and put the issue on hold, or queue a held issue
+                                again at the top of the start order, where its next run takes up the session
+  web [on | off | status | run [<owner/repo>...]]
+                                serve every project's inbox to a browser at http://127.0.0.1:7480, or with run
+                                only the projects named
+  auto | manual | hold [<owner/repo>]
+                                start every new run, start only the issues you pick, or hold new runs, in every
+                                project or in one
+  unpick <n> | --all [<owner/repo>]
+                                drop issue n's Manual pick, in the current project or the one named, so its run
+                                waits for Start again; with --all, every project's picks, or the one named
+  resume                        go back to the mode the desk was in before Hold
+  usage-limit [<0-100> | on | off]
+                                show the weekly plan-usage limit that holds new runs on every project, or set it
+USAGE
+        exit 2
+    }
+
+    command=${1:-}
+    (($#)) && shift
+    case $command in
+        --version) echo "agent-desk $(<"$lib/../VERSION")" ;;
+        install) exec "$lib/install.sh" "$@" ;;
+        doctor) exec "$lib/doctor.sh" "$@" ;;
+        work-issue) exec "$lib/work-issue.sh" "$@" ;;
+        discuss-idea) exec "$lib/discuss-idea.sh" "$@" ;;
+        start) exec "$lib/start.sh" "$@" ;;
+        serial) exec "$lib/serial.sh" "$@" ;;
+        worktree) exec "$lib/worktree.sh" "$@" ;;
+        clean) exec "$lib/clean.sh" "$@" ;;
+        release) exec python3 -B "$lib/release.py" "$@" ;;
+        chores)
+            case ${1:-status} in
+                on | off | tick-all | merges-all) exec "$lib/chores-timer.sh" "$@" ;;
+                rename) shift; exec python3 -B "$lib/chore_rename.py" "$@" ;;
+                *) exec "$lib/chores.sh" "$@" ;;
+            esac
+            ;;
+        chore) exec "$lib/chore.sh" "$@" ;;
+        auto) exec python3 -B "$lib/hold.py" set running "$@" ;;
+        manual) exec python3 -B "$lib/hold.py" set manual "$@" ;;
+        hold) exec python3 -B "$lib/hold.py" set held "$@" ;;
+        unpick) exec python3 -B "$lib/hold.py" unpick "$@" ;;
+        resume) exec python3 -B "$lib/hold.py" resume ;;
+        usage-limit) exec python3 -B "$lib/usage.py" "$@" ;;
+        run-chore) exec "$lib/run-chore.sh" "$@" ;;
+        work-pr) exec "$lib/work-pr.sh" "$@" ;;
+        fixes) exec "$lib/fixes.sh" "$@" ;;
+        fix) exec "$lib/fix.sh" "$@" ;;
+        merges) exec "$lib/merges.sh" "$@" ;;
+        pushes) exec "$lib/pushes.sh" "$@" ;;
+        shots) exec "$lib/shots.sh" "$@" ;;
+        gpu) exec "$lib/gpu.sh" "$@" ;;
+        issue | review | label | queue) exec python3 -B "$lib/store_cli.py" "$command" "$@" ;;
+        board) exec python3 -B "$lib/board.py" "$@" ;;
+        import) exec python3 -B "$lib/import_github.py" "$@" ;;
+        cutover) exec python3 -B "$lib/cutover.py" "$@" ;;
+        project)
+            case ${1:-} in
+                rename) shift; exec python3 -B "$lib/rename.py" "$@" ;;
+                remove) shift; exec python3 -B "$lib/remove.py" "$@" ;;
+            esac
+            exec python3 -B "$lib/store_cli.py" project "$@" ;;
+        backup) exec python3 -B "$lib/backup.py" "$@" ;;
+        restore) exec python3 -B "$lib/backup.py" restore "$@" ;;
+        web) exec "$lib/web.sh" "$@" ;;
+        dispatch) exec "$lib/dispatch.sh" "$@" ;;
+        pause | unpause) exec python3 -B "$lib/dispatch.py" "$command" "$@" ;;
+        request) if [[ ${1:-} == --cancel ]]; then shift; exec python3 -B "$lib/dispatch.py" cancel "$@"; fi
+            exec python3 -B "$lib/dispatch.py" request "$@" ;;
+        *) usage ;;
+    esac
+}
+
+agent_desk_main "$@"; exit

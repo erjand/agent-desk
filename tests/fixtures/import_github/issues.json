@@ -1,0 +1,188 @@
+[
+ {
+  "data": {
+   "repository": {
+    "issues": {
+     "pageInfo": {
+      "hasNextPage": true,
+      "endCursor": "Y3Vyc29yOjI="
+     },
+     "nodes": [
+      {
+       "number": 1,
+       "title": "Move the desk onto this machine",
+       "body": "## Goal\n\nThe desk runs here.",
+       "state": "OPEN",
+       "stateReason": null,
+       "createdAt": "2026-10-01T10:00:00Z",
+       "updatedAt": "2026-10-02T10:00:00Z",
+       "closedAt": null,
+       "author": {
+        "login": "erjand"
+       },
+       "labels": {
+        "nodes": [
+         {
+          "name": "enhancement"
+         }
+        ]
+       },
+       "parent": null,
+       "blockedBy": {
+        "nodes": []
+       }
+      },
+      {
+       "number": 2,
+       "title": "Add the importer",
+       "body": "![board](https://github.com/org/game/blob/pr-assets/pr-4/board.png?raw=true)",
+       "state": "OPEN",
+       "stateReason": null,
+       "createdAt": "2026-10-01T10:00:00Z",
+       "updatedAt": "2026-10-02T10:00:00Z",
+       "closedAt": null,
+       "author": {
+        "login": "erjand"
+       },
+       "labels": {
+        "nodes": [
+         {
+          "name": "agent-ready"
+         },
+         {
+          "name": "serial:web"
+         },
+         {
+          "name": "enhancement"
+         }
+        ]
+       },
+       "parent": {
+        "number": 1,
+        "repository": {
+         "nameWithOwner": "org/game"
+        }
+       },
+       "blockedBy": {
+        "nodes": [
+         {
+          "number": 3,
+          "repository": {
+           "nameWithOwner": "org/game"
+          }
+         },
+         {
+          "number": 9,
+          "repository": {
+           "nameWithOwner": "org/other"
+          }
+         }
+        ]
+       }
+      }
+     ]
+    }
+   },
+   "viewer": {
+    "login": "erjand"
+   },
+   "rateLimit": {
+    "cost": 2
+   }
+  }
+ },
+ {
+  "data": {
+   "repository": {
+    "issues": {
+     "pageInfo": {
+      "hasNextPage": false,
+      "endCursor": "Y3Vyc29yOjU="
+     },
+     "nodes": [
+      {
+       "number": 3,
+       "title": "Add the store",
+       "body": "",
+       "state": "CLOSED",
+       "stateReason": "COMPLETED",
+       "createdAt": "2026-10-01T10:00:00Z",
+       "updatedAt": "2026-10-02T10:00:00Z",
+       "closedAt": "2026-10-03T12:00:00Z",
+       "author": {
+        "login": "erjand"
+       },
+       "labels": {
+        "nodes": [
+         {
+          "name": "in-progress"
+         },
+         {
+          "name": "enhancement"
+         }
+        ]
+       },
+       "parent": null,
+       "blockedBy": {
+        "nodes": []
+       }
+      },
+      {
+       "number": 5,
+       "title": "Port everything at once",
+       "body": "",
+       "state": "CLOSED",
+       "stateReason": "NOT_PLANNED",
+       "createdAt": "2026-10-01T10:00:00Z",
+       "updatedAt": "2026-10-02T10:00:00Z",
+       "closedAt": "2026-10-04T12:00:00Z",
+       "author": {
+        "login": "friend"
+       },
+       "labels": {
+        "nodes": []
+       },
+       "parent": null,
+       "blockedBy": {
+        "nodes": []
+       }
+      },
+      {
+       "number": 6,
+       "title": "Pick a colour for the board",
+       "body": "",
+       "state": "OPEN",
+       "stateReason": null,
+       "createdAt": "2026-10-01T10:00:00Z",
+       "updatedAt": "2026-10-02T10:00:00Z",
+       "closedAt": null,
+       "author": {
+        "login": "erjand"
+       },
+       "labels": {
+        "nodes": [
+         {
+          "name": "needs-design"
+         },
+         {
+          "name": "in-progress"
+         }
+        ]
+       },
+       "parent": null,
+       "blockedBy": {
+        "nodes": []
+       }
+      }
+     ]
+    }
+   },
+   "viewer": {
+    "login": "erjand"
+   },
+   "rateLimit": {
+    "cost": 2
+   }
+  }
+ }
+]

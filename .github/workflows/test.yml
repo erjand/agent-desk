@@ -1,0 +1,50 @@
+name: test
+
+# Runs agent-desk's tests on a GitHub-hosted runner for every PR and every push to main. A fork PR can change a workflow
+# to run on any runner the repository reaches, so the public repository never uses self-hosted runners. The private
+# repository runs the same steps in .github/workflows/test-hosted.yml before each release, and tests/test_ci.py keeps
+# the two copies' steps the same.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels its stale run.
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # The pane's tests run inside the Claude Code CLI, which needs no login to run them.
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Each suite runs even after an earlier one fails, so one run reports every failure.
+      - name: Python tests
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest discover -s tests
+
+      - name: Pane tests
+        if: ${{ !cancelled() }}
+        run: claude plugin test inbox
+
+      - name: Web page tests
+        if: ${{ !cancelled() }}
+        run: node --test web/*.test.ts
+
+      - name: Shellcheck
+        if: ${{ !cancelled() }}
+        run: shellcheck bin/agent-desk lib/*.sh

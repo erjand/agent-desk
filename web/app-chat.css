@@ -1,0 +1,81 @@
+/* The Chat column, app-chat.js's, which takes the third column as Runners and History do: the conversation scrolls,
+   and the message box stays under it. */
+.chat-side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 13px;
+}
+.chat-side > .side-head { padding: 16px 16px 0; }
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 16px 12px;
+  scrollbar-color: var(--border) transparent;
+}
+/* No row shrinks once the log overflows, which would squash a tool call's line, whose overflow hides its ellipsis, to
+   nothing. */
+.chat-log > * { flex: none; }
+.chat-empty { margin: 8px 0; line-height: 1.5; }
+
+/* The person's messages sit at the right in the accent's tint, and Claude's replies run the column's width. */
+.chat-you {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 6px 10px;
+  border-radius: 12px 12px 4px 12px;
+  background: color-mix(in oklch, var(--accent) 14%, var(--bg));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.chat-claude.markdown { line-height: 1.5; }
+.chat-claude.markdown p, .chat-claude.markdown ul, .chat-claude.markdown ol, .chat-claude.markdown pre,
+.chat-claude.markdown table, .chat-claude.markdown blockquote { margin-bottom: 8px; }
+.chat-claude.markdown pre { padding: 8px 10px; }
+.chat-claude.markdown h1, .chat-claude.markdown h2, .chat-claude.markdown h3 { margin: 12px 0 8px; font-size: 1.1em; }
+
+/* A tool call takes one muted line, as the Agent Log writes it, cut with an ellipsis. */
+.chat-tool {
+  overflow: hidden;
+  color: var(--muted);
+  font: 12px var(--mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.chat-note { color: var(--muted); font-style: italic; }
+.chat-note.error { color: var(--error); font-style: normal; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-marker { display: flex; align-items: center; gap: 8px; margin: 4px 0; color: var(--muted); font-size: 11px; }
+.chat-marker::before, .chat-marker::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.chat-waiting { margin: 0; color: var(--muted); animation: chat-pulse 1.4s ease-in-out infinite; }
+@keyframes chat-pulse { 50% { opacity: 0.45; } }
+
+.chat-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 10px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+.chat-input textarea {
+  grid-column: 1 / -1;
+  min-height: 64px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--fg);
+  font: 13px/1.45 var(--sans);
+  resize: vertical;
+}
+.chat-input textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--bg); }
+.chat-context { overflow: hidden; font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.chat-buttons { display: flex; gap: 6px; }

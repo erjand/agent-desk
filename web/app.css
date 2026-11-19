@@ -1,0 +1,807 @@
+/* The page follows GitHub's Primer layout: its type, bordered boxes, buttons, labels, and comment timeline. Its colors
+   are its own, in OKLCH so each hue sits at the same lightness and strength as the others: tangerine for Working, coral
+   for Needs you, teal for Merging, gold for Queued, blue for Open, violet for Needs design, emerald for Ideas, rose for Chores, and quiet
+   taupe and slate for Blocked and Recently merged. Dark mode lifts each hue's lightness and keeps its hue. The solid
+   colors behind white text, such as a PR's state, stay dark enough to read in both modes. */
+:root {
+  color-scheme: light dark;
+  --bg: oklch(1 0 0);
+  --panel: oklch(0.975 0.004 250);
+  /* The header's button bar, the deepest of the three bars stacked at the top: the bar, the tab band on --panel, and
+     the list's search on --bg. */
+  --chrome: oklch(0.93 0.012 255);
+  --inset: oklch(0.975 0.004 250);
+  --fg: oklch(0.25 0.015 260);
+  --muted: oklch(0.5 0.02 255);
+  --border: oklch(0.89 0.01 250);
+  --border-muted: oklch(0.89 0.01 250 / 0.7);
+  --hover: oklch(0.965 0.006 250);
+  --wash: oklch(0.6 0.02 255 / 0.13);
+  --button: oklch(0.975 0.004 250);
+  --button-hover: oklch(0.95 0.006 250);
+  --button-border: oklch(0.89 0.01 250);
+  --shadow: 0 1px 0 oklch(0.25 0.015 260 / 0.04);
+
+  /* Status: links and the selection, success, danger, attention, and done. */
+  --accent: oklch(0.55 0.16 255);
+  --success: oklch(0.56 0.13 155);
+  --error: oklch(0.57 0.19 25);
+  --warning: oklch(0.6 0.13 80);
+  --done: oklch(0.54 0.18 300);
+  --gauge-ok: oklch(0.58 0.08 155);
+
+  /* The groups. */
+  --runners: oklch(0.66 0.17 50);
+  --needs: oklch(0.58 0.19 25);
+  --merging: oklch(0.58 0.11 195);
+  --queued: oklch(0.62 0.13 80);
+  --open: oklch(0.56 0.16 255);
+  --design: oklch(0.55 0.18 295);
+  --ideas: oklch(0.57 0.13 155);
+  --backlog: oklch(0.55 0.07 285);
+  --blocked: oklch(0.55 0.05 60);
+  --merged: oklch(0.55 0.03 260);
+  --chores: oklch(0.58 0.17 350);
+  --github: oklch(0.52 0.08 240);
+
+  /* Each project's chip and tab, by its place on the page: teal, magenta, amber, green, indigo, and red, dark enough
+     for AA contrast on the page and the panel. */
+  --project-0: oklch(0.53 0.1 195);
+  --project-1: oklch(0.55 0.15 325);
+  --project-2: oklch(0.54 0.12 75);
+  --project-3: oklch(0.53 0.12 135);
+  --project-4: oklch(0.53 0.14 265);
+  --project-5: oklch(0.55 0.16 25);
+
+  /* A project tab's mode, a shade darker than its status color so it reads on the open tab's tint. */
+  --mode-running: oklch(0.5 0.13 155);
+  --mode-manual: oklch(0.52 0.16 255);
+  --mode-held: oklch(0.52 0.12 75);
+
+  /* Solid fills behind white text. */
+  --solid-open: oklch(0.55 0.13 155);
+  --solid-open-hover: oklch(0.51 0.13 155);
+  --solid-done: oklch(0.52 0.18 300);
+  --solid-danger: oklch(0.56 0.19 25);
+  --solid-muted: oklch(0.52 0.02 260);
+  /* The attention tone's fill, behind dark text. */
+  --solid-attention: oklch(0.8 0.15 80);
+  --on-attention: oklch(0.25 0.04 70);
+
+  /* How wide the selected card's content grows, which the runners over it keep to too. */
+  --card-width: 1280px;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: oklch(0.18 0.012 260);
+    --panel: oklch(0.21 0.013 260);
+    --chrome: oklch(0.13 0.012 260);
+    --inset: oklch(0.15 0.012 260);
+    --fg: oklch(0.94 0.008 250);
+    --muted: oklch(0.7 0.015 255);
+    --border: oklch(0.33 0.015 260);
+    --border-muted: oklch(0.33 0.015 260 / 0.7);
+    --hover: oklch(0.23 0.014 260);
+    --wash: oklch(0.7 0.02 255 / 0.15);
+    --button: oklch(0.25 0.014 260);
+    --button-hover: oklch(0.28 0.015 260);
+    --button-border: oklch(0.36 0.015 260);
+    --shadow: none;
+
+    --accent: oklch(0.72 0.14 255);
+    --success: oklch(0.74 0.15 155);
+    --error: oklch(0.7 0.18 25);
+    --warning: oklch(0.8 0.13 85);
+    --done: oklch(0.73 0.15 300);
+    --gauge-ok: oklch(0.72 0.09 155);
+
+    --runners: oklch(0.76 0.16 55);
+    --needs: oklch(0.72 0.17 25);
+    --merging: oklch(0.76 0.11 195);
+    --queued: oklch(0.8 0.13 85);
+    --open: oklch(0.74 0.13 255);
+    --design: oklch(0.74 0.14 295);
+    --ideas: oklch(0.76 0.14 155);
+    --backlog: oklch(0.74 0.07 285);
+    --blocked: oklch(0.72 0.05 60);
+    --merged: oklch(0.7 0.03 260);
+    --chores: oklch(0.75 0.15 350);
+    --github: oklch(0.74 0.08 240);
+
+    --project-0: oklch(0.78 0.1 195);
+    --project-1: oklch(0.75 0.14 325);
+    --project-2: oklch(0.8 0.12 75);
+    --project-3: oklch(0.77 0.12 135);
+    --project-4: oklch(0.74 0.12 265);
+    --project-5: oklch(0.74 0.14 25);
+
+    --mode-running: var(--success);
+    --mode-manual: var(--accent);
+    --mode-held: var(--warning);
+
+    --solid-open: oklch(0.52 0.12 155);
+    --solid-open-hover: oklch(0.56 0.12 155);
+    --solid-attention: oklch(0.8 0.13 85);
+    --on-attention: oklch(0.2 0.03 70);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* The page fills the window: the header and the runners at the top, and under them the list and the selected card,
+   each scrolling on its own. */
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 var(--sans);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd, .runner, .path { font-family: var(--mono); }
+#app { display: flex; flex-direction: column; height: 100%; }
+.pad { padding: 0 16px; }
+.muted, a.muted { color: var(--muted); }
+.success { color: var(--success); }
+.warning { color: var(--warning); }
+.error { color: var(--error); }
+.needs-text { color: var(--needs); }
+.offline { color: var(--error); }
+
+.notice { margin: 0; padding: 0 16px 6px; }
+
+.help-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* Tabs, as GitHub's underline navigation draws them. */
+nav { display: flex; gap: 8px; padding: 0 16px; overflow-x: auto; }
+
+nav button, .tabnav button {
+  height: auto;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  padding: 8px 8px 7px;
+  color: var(--fg);
+  font-weight: 400;
+}
+
+nav button:hover, .tabnav button:hover { background: none; border-bottom-color: var(--border); }
+
+nav button[aria-current="true"], .tabnav button[aria-current="true"] {
+  border-bottom-color: var(--runners);
+  font-weight: 600;
+}
+
+.counter, .count {
+  display: inline-block;
+  min-width: 20px;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 2em;
+  background: var(--wash);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  text-align: center;
+}
+
+.count { background: var(--solid-attention); color: var(--on-attention); font-weight: 600; }
+
+/* Buttons, as Primer's: a quiet default, green for the move forward, and red text for a dismissal. */
+button {
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--button-border);
+  border-radius: 6px;
+  background: var(--button);
+  color: var(--fg);
+  font: 500 14px/1 var(--sans);
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+
+button:hover { background: var(--button-hover); }
+button.primary { background: var(--solid-open); border-color: oklch(0 0 0 / 0.15); color: #ffffff; }
+button.primary:hover { background: var(--solid-open-hover); }
+button.danger { color: var(--error); }
+button.small { height: 24px; padding: 0 8px; font-size: 12px; }
+button:disabled { cursor: default; opacity: 0.6; }
+button kbd { margin-left: 4px; }
+
+kbd {
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.65;
+}
+
+.icon { flex: none; vertical-align: text-bottom; }
+.icon.open { color: var(--success); }
+.icon.done { color: var(--done); }
+.icon.danger { color: var(--error); }
+.icon.attention { color: var(--warning); }
+.icon.muted { color: var(--muted); }
+.icon.runners { color: var(--runners); }
+.icon.merging { color: var(--merging); }
+.icon.design { color: var(--design); }
+.icon.ideas { color: var(--ideas); }
+.icon.backlog { color: var(--backlog); }
+
+/* The Runners sidebar's table: a header row of small, spaced capitals over a rule, set apart from the rows' text,
+   then each project's rows together, a rule in the border color between one project's group and the next on All.
+   Each column's width sits on its <col> in the font its cells use, so the project fits its chip up to a dozen
+   characters, Runner the longest kind, Item an issue's number and its PR's, as `#348 → #349`, and Time a run's age;
+   Title takes what they leave and clips first. */
+.runners-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
+.runners-table col.desk { width: calc(var(--chip-width, 14ch) + 10px); font: 500 12px var(--sans); }
+.runners-table col.runner { width: calc(9ch + 10px); font: 12px var(--mono); }
+.runners-table col.number { width: calc(11ch + 18px); font: 12px var(--mono); }
+.runners-table col.time { width: calc(4ch + 10px); font: 12px var(--sans); }
+.runners-table th {
+  padding: 0 5px 5px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font: 700 10px var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+}
+.runners-table th.time, .runners-table td.time { text-align: right; }
+.runners-table td {
+  height: 26px;
+  padding: 0 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runners-table.all tbody + tbody tr:first-child td { border-top: 1px solid var(--border); }
+/* A chip wider than the Project column ends in an ellipsis inside its border. */
+.runners-table td.desk .chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.runners-table td.runner { color: var(--muted); font-size: 12px; }
+.runners-table td.runner.working { color: var(--runners); }
+.runners-table td.runner.full { color: var(--warning); font-weight: 600; }
+.runners-table .num { display: flex; gap: 4px; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.runners-table td.time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* A busy row's title is a button, so the keyboard reaches it, drawn as the plain text around it. */
+.runners-table td.title button {
+  display: block;
+  width: 100%;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runners-table td.title button:focus-visible { outline: none; }
+.runners-table tr.pressable { cursor: pointer; }
+.runners-table tr.pressable:hover td, .runners-table tr.pressable:focus-within td { background: var(--hover); }
+.runners-table tr.pressable:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(420px, 40%) minmax(0, 1fr);
+}
+/* The Runners sidebar, the History column, or the Chat takes a narrow third column at the right, while the window has
+   room for it. They share the column's look, so they read as one place. */
+.split.with-side { grid-template-columns: minmax(380px, 32%) minmax(0, 1fr) minmax(360px, 26%); }
+@media (max-width: 1300px) {
+  .split.with-side { grid-template-columns: minmax(420px, 40%) minmax(0, 1fr); }
+  .split .history, .split .runners-side, .split .chat-side { display: none; }
+}
+
+.history, .runners-side {
+  overflow: auto;
+  padding: 16px 16px 40px;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 12px;
+  scrollbar-color: var(--border) transparent;
+}
+.history-head, .side-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.history-head h2, .side-head h2 { margin: 0 auto 0 0; font-size: 14px; }
+.history select, .history input {
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--button-border);
+  border-radius: 6px;
+  background: var(--button);
+  color: var(--fg);
+  font: 12px var(--sans);
+}
+.history-dates { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.history-totals { margin: 0 0 8px; }
+.history-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.history .search { margin-bottom: 12px; background: var(--panel); }
+/* The headings stick below the search box, which sticks 16px above the column's padding and stands 57px tall. */
+.history-table th { position: sticky; top: 41px; background: var(--panel); text-align: left; }
+.history-table th button {
+  height: auto;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--muted);
+  font: 600 12px var(--sans);
+}
+.history-table th.cost, .history-table td.cost { text-align: right; }
+/* The Item column takes what the others leave: Time fits a date and a time, Project its chip, and Number two
+   four-digit numbers and the arrow between them, as `#1985 → #1986`, measured in the numbers' own font. */
+.history-table th.at { width: 9.5em; }
+.history-table th.desk { width: 7.5em; }
+.history-table th.number { width: calc(11ch + 16px); font: 12px var(--mono); }
+.history-table .num { display: flex; gap: 4px; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.history-table th.cost { width: 4.5em; }
+.history-table td {
+  padding: 5px 2px;
+  border-top: 1px solid var(--border-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-table tbody tr { cursor: pointer; }
+.history-table tbody tr:hover { background: var(--button-hover); }
+.history-table .time { color: var(--muted); }
+.history-pages { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+
+.list, .detail { scrollbar-color: var(--border) transparent; }
+/* The page holds the list's rows still itself, in draw(), so the browser's own scroll anchoring stays off. A card the
+   keys reveal stops below the search box and a group's stuck heading, 57px and 38px tall. */
+.list {
+  container: list / inline-size;
+  overflow: auto;
+  overflow-anchor: none;
+  scroll-padding-top: 95px;
+  padding: 16px 16px 40px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+.detail { position: relative; overflow: auto; padding: 24px 32px 48px; container-type: inline-size; }
+
+/* On a narrow window the list and the card stack, and the page scrolls as one, with the side column shown or hidden.
+   The selector names .with-side to outrank the two-column rule above. */
+@media (max-width: 900px) {
+  html, body, #app { height: auto; }
+  .split, .split.with-side { grid-template-columns: minmax(0, 1fr); }
+  .list { border-right: 0; border-bottom: 1px solid var(--border); }
+  .detail { padding: 16px; }
+}
+
+/* A bordered box with a gray heading and rows split by lines, as GitHub lists issues. Clipping, unlike hiding, keeps
+   the box from scrolling, so its heading sticks in the list while the corners stay round. */
+.box {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  overflow: clip;
+}
+
+/* A group's heading sticks below the search box, which ends 41px below the list's padding, while its rows scroll
+   under it, until the next group's heading pushes it out with the end of its box. It paints over the rows and under
+   the search box. */
+.box > .box-head, .box > .box-heading { position: sticky; top: 41px; z-index: 1; }
+
+.box-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: auto;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel);
+  box-shadow: none;
+  font-weight: 600;
+  text-align: left;
+}
+
+.box-head:hover { background: var(--button-hover); }
+.box-head .caret { width: 10px; color: var(--muted); }
+.box-head .counter { margin-left: 2px; }
+/* A sortable group's heading: the fold button, then its sort button at the right end. */
+.box-heading { display: flex; align-items: center; background: var(--panel); }
+.box-heading .box-head { flex: 1; min-width: 0; }
+
+.box-heading .sort {
+  flex: none;
+  height: 24px;
+  margin-right: 12px;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.box-row, .item, .empty { border-top: 1px solid var(--border-muted); }
+.empty { padding: 10px 16px; color: var(--muted); }
+
+.box-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+}
+
+.box-row .path { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+.box-row .details { margin-left: auto; }
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 6px 16px;
+  cursor: pointer;
+}
+
+.item:hover { background: var(--hover); }
+.item.selected { background: color-mix(in srgb, var(--accent) 12%, var(--bg)); box-shadow: inset 3px 0 var(--accent); }
+/* A queued card that drags shows a grab cursor and fades while it moves, and the line where it lands sits on the edge of
+   the card under the pointer, beside any selected card's bar. */
+.item[draggable="true"] { cursor: grab; }
+.item.dragging { opacity: 0.45; }
+.item.drop-above { box-shadow: inset 0 2px var(--accent); }
+.item.drop-below { box-shadow: inset 0 -2px var(--accent); }
+.item.selected.drop-above { box-shadow: inset 3px 0 var(--accent), inset 0 2px var(--accent); }
+.item.selected.drop-below { box-shadow: inset 3px 0 var(--accent), inset 0 -2px var(--accent); }
+/* A narrow row gives way in turn: its labels clip first, then its title, down to its first words; its state, runner,
+   note column, and time keep their room. */
+.item .text { flex: 0 1 auto; min-width: min(12em, 35%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 600; }
+.item .tags { display: flex; flex: 0 1000 auto; gap: 8px; min-width: 0; overflow: hidden; }
+/* Notes take a column at the row's right, as wide as the list's longest note up to a cap, so they line up from row to
+   row; a longer one clips, and its tooltip holds the rest. The time after it keeps one width, so the column's right
+   edge lines up too. The column takes at most 32% of a row, the same in every row, and a list too narrow for it
+   leaves the notes to each card's detail. */
+.item .note-cell {
+  display: flex;
+  flex: none;
+  width: var(--note-width, 24ch);
+  max-width: 32%;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 12px;
+}
+
+.item .note-cell .note { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.item .time { min-width: 4ch; margin-left: auto; padding-left: 8px; text-align: right; }
+.item .note-cell + .time { margin-left: 0; padding-left: 0; }
+/* A list too narrow for the note column also lets its titles give way further, so a row keeps its state and time. */
+@container list (max-width: 640px) {
+  .item .note-cell { display: none; }
+  .item .text { min-width: min(6em, 25%); }
+}
+/* The project and number take columns of their own, so titles line up whatever the project's name. */
+.item .chip-cell { flex: none; width: var(--chip-width, 14ch); font-size: 12px; }
+/* Wide enough for an issue's number and its PR's, as `#348 → #349`. */
+.item .num {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  width: 12ch;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.num a { color: inherit; }
+.num .pr { color: var(--success); }
+.num .arrow { color: var(--muted); opacity: 0.7; }
+
+/* The search box, which stays at the top of the list as it scrolls. */
+.search {
+  position: sticky;
+  top: -16px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -16px -16px 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--button-border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px var(--sans);
+}
+
+.search input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.search input::-webkit-search-cancel-button { appearance: none; }
+.search-field { position: relative; display: flex; flex: 1; min-width: 0; }
+.search-field input:not(:placeholder-shown) { padding-right: 32px; }
+
+.clear-search {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+  color: var(--muted);
+}
+
+.clear-search:hover { background: var(--hover); color: var(--fg); }
+.clear-search svg { display: block; margin: auto; }
+.search kbd { color: var(--muted); }
+.no-match { padding: 0 4px; }
+.time { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.num { color: var(--muted); }
+
+.chip, .badge, .note {
+  flex: none;
+  padding: 0 7px;
+  border-radius: 2em;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.chip { border: 1px solid currentColor; color: var(--muted); }
+.project-0 { color: var(--project-0); }
+.project-1 { color: var(--project-1); }
+.project-2 { color: var(--project-2); }
+.project-3 { color: var(--project-3); }
+.project-4 { color: var(--project-4); }
+.project-5 { color: var(--project-5); }
+.badge { border: 1px solid currentColor; color: var(--muted); }
+.badge.review { color: var(--success); }
+.badge.conflicts, .badge.failing, .badge.failed { color: var(--error); }
+.badge.stopped { color: var(--warning); }
+.badge.merged { color: var(--done); }
+.note { border: 1px solid var(--border); color: var(--muted); }
+.note.runner { border-color: currentColor; color: var(--runners); }
+.note.warning { border-color: currentColor; color: var(--warning); }
+
+/* Each chore on a grid of two lines whose columns line up from chore to chore: its name, model and effort, and how
+   its newest runs went over how often it runs, its last run, and its next; its buttons at the right of both. */
+.chore-row {
+  display: grid;
+  grid-template-columns: var(--chip-col, 0px) 16ch 23ch minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 10px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chore-row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A chip stands taller than a line of text, so its cell shows it whole. */
+.chore-row .chip-cell { grid-row: 1; grid-column: 1; display: flex; align-items: center; overflow: visible; }
+.chore-row .c-name { grid-row: 1; grid-column: 2; font-size: 14px; }
+.chore-row .c-model { grid-row: 1; grid-column: 3; }
+.chore-row .c-stats { grid-row: 1; grid-column: 4; color: var(--muted); }
+.chore-row .c-every { grid-row: 2; grid-column: 2; color: var(--muted); }
+.chore-row .c-last { grid-row: 2; grid-column: 3; }
+.chore-row .c-next { grid-row: 2; grid-column: 4; color: var(--muted); }
+.chore-row .c-controls { grid-row: 1 / span 2; grid-column: 5; overflow: visible; }
+/* A chore's change waiting on its schedule PR takes a line under its values. */
+.chore-row .c-pending { grid-row: 3; grid-column: 2 / 5; color: var(--warning); }
+.chore-row .c-pending a { color: inherit; }
+.model-tag { color: var(--muted); font: 12px var(--mono); }
+
+/* Each GitHub touchpoint on one line: its project on All, what it is, and how it last went in its tone. */
+.github-row {
+  display: grid;
+  grid-template-columns: var(--chip-col, 0px) 18ch minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.github-row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.github-row .chip-cell { display: flex; align-items: center; overflow: visible; }
+.github-row .g-name { font-size: 14px; }
+/* A note wraps, so an error reads whole in a narrow list. */
+.github-row .g-note { white-space: normal; overflow-wrap: anywhere; }
+
+/* In a narrow list a chore's buttons take a third line under its other values, which keep their columns. */
+@container list (max-width: 720px) {
+  .chore-row { grid-template-columns: var(--chip-col, 0px) 16ch 23ch minmax(0, 1fr); }
+  .chore-row .c-controls { grid-row: 4; grid-column: 2 / -1; justify-self: start; }
+  .chore-row .c-pending { grid-column: 2 / -1; }
+  .chore-row .c-controls .chore-controls { justify-content: flex-start; }
+}
+.chore-controls { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; }
+.chore-controls .days { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.chore-controls .schedule-error { max-width: 40ch; overflow: hidden; color: var(--error); text-overflow: ellipsis;
+  white-space: nowrap; }
+
+.chore-controls .times {
+  width: 52px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--button-border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 12px var(--sans);
+}
+
+.labels { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* A label, as GitHub draws one from its color. In light mode it fills with the color, with black text on a light color
+   and white on a dark one, and a darker border around a near-white one. In dark mode it shows a faint wash of the
+   color with its text and border in the color lightened until it reads on the dark page. */
+.label {
+  --perceived: calc((var(--label-r) * 0.2126 + var(--label-g) * 0.7152 + var(--label-b) * 0.0722) / 255);
+  --dark-text: max(0, min(calc((var(--perceived) - 0.453) * -1000), 1));
+  --border-alpha: max(0, min(calc((var(--perceived) - 0.96) * 100), 1));
+  flex: none;
+  padding: 0 7px;
+  --darkened: calc((var(--label-l) - 25) * 1%);
+  border: 1px solid hsl(var(--label-h) calc(var(--label-s) * 1%) var(--darkened) / var(--border-alpha));
+  border-radius: 2em;
+  background: rgb(var(--label-r) var(--label-g) var(--label-b));
+  color: hsl(0 0% calc(var(--dark-text) * 100%));
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .label {
+    --lighten-by: calc((0.6 - var(--perceived)) * 100 * max(0, min(calc((var(--perceived) - 0.6) * -1000), 1)));
+    --lightened: calc((var(--label-l) + var(--lighten-by)) * 1%);
+    border-color: hsl(var(--label-h) calc(var(--label-s) * 1%) var(--lightened) / 0.3);
+    background: rgb(var(--label-r) var(--label-g) var(--label-b) / 0.18);
+    color: hsl(var(--label-h) calc(var(--label-s) * 1%) var(--lightened));
+  }
+}
+
+/* Above the sticky search box, group headings, tab strips, and Files Changed bar (z-index 1 to 3), below hovercards
+   and tips.
+   The sheet centres when it fits and starts at the top, scrolling inside the backdrop, when the window is shorter. */
+.help {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: safe center;
+  padding: 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgb(0 0 0 / 0.35);
+}
+
+/* The sections flow into as many columns at least 16rem wide as the window fits, and a section never splits across
+   two, so the sheet stands as tall as its tallest column. */
+.help-sheet {
+  box-sizing: border-box;
+  width: min(100%, 72rem);
+  columns: 16rem;
+  column-gap: 24px;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.2);
+}
+
+.help section {
+  break-inside: avoid;
+  padding-bottom: 12px;
+}
+
+.help h2 {
+  margin: 0 0 4px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.help table { width: 100%; border-collapse: collapse; }
+.help td { padding: 3px 10px; vertical-align: baseline; }
+/* One width for every section's key column, so the sections' descriptions line up in each column. */
+.help td:first-child { width: 5.75rem; white-space: nowrap; }
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+}
+
+.toast {
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--needs);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.15);
+}
+
+/* A link's hovercard, as GitHub shows over a link to an issue or a PR: the project and date, then the state's icon,
+   title, and number, the start of the description in three lines at most, and the labels. */
+.hovercard {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 360px;
+  max-width: calc(100vw - 16px);
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.2);
+  font-size: 12px;
+}
+
+.hovercard .hc-title { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.4; }
+.hovercard .hc-title .icon { flex: none; margin-top: 2px; }
+.hovercard .hc-title a { color: var(--fg); }
+.hovercard .hc-excerpt {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+/* A parent issue's sub-issue progress beside its title in the list. */
+.subs-badge { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 20px; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: 2em; background: none; box-shadow: none; color: var(--muted);
+  font-size: 12px; font-weight: 500; }
+.subs-badge svg { color: var(--done); }
+.subs-badge.done { color: var(--done); }
+

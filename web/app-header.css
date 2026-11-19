@@ -1,0 +1,249 @@
+/* The header, app-header.js's, linked after app.css so its rules follow the page's: the bar with its mode buttons,
+   usage limit, tooltips, and gauges, and the project tabs under it. */
+
+header { flex: none; background: var(--chrome); border-bottom: 1px solid var(--border); }
+/* In light, the header's text on --chrome takes deeper warning, error, and healthy tones than the page's, so the notices,
+   the disconnected status, and the gauges keep AA contrast on the bar and on the gauges' pill. */
+@media (prefers-color-scheme: light) {
+  header .notice, header .code-notice, header .offline, header .gauges, header .usage {
+    --warning: oklch(0.49 0.11 75);
+    --error: oklch(0.51 0.18 25);
+    --gauge-ok: oklch(0.47 0.09 155);
+  }
+}
+
+/* The bar's controls align to the top of their line, each as tall as a button, so the restart notice under the right
+   end's row leaves them level with it. */
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px 14px;
+  padding: 12px 16px 6px;
+}
+.bar > .name, .bar > .muted, .bar > .offline { line-height: 32px; }
+
+.name { font-size: 16px; font-weight: 600; }
+.hold { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+
+.hold-state {
+  padding: 4px 10px;
+  border-radius: 2em;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.hold-state.held { background: var(--warning); }
+.modes { display: inline-flex; }
+.modes button { border-radius: 0; }
+.modes button + button { margin-left: -1px; }
+.modes button:first-child { border-radius: 6px 0 0 6px; }
+.modes button:last-child { border-radius: 0 6px 6px 0; }
+.modes button[aria-pressed="true"] { z-index: 1; }
+/* The pressed mode takes the color its project tabs name it in, over the accent other pressed bar buttons take. */
+.modes button[data-mode="running"][aria-pressed="true"] {
+  border-color: var(--mode-running);
+  color: var(--mode-running);
+}
+.modes button[data-mode="manual"][aria-pressed="true"] {
+  border-color: var(--mode-manual);
+  color: var(--mode-manual);
+}
+.modes button[data-mode="held"][aria-pressed="true"] {
+  border-color: var(--mode-held);
+  color: var(--mode-held);
+}
+/* The weekly usage limit beside the mode buttons: a small muted button while it is off, the week's usage while it is
+   on, in the pressed Hold button's amber at or over the limit, and in the error tone while it can't read usage. Its
+   popover opens under it, over the page, and hides the button's tooltip while it shows. */
+.usage { position: relative; display: flex; align-items: center; min-height: 32px; }
+.usage-button { font-variant-numeric: tabular-nums; }
+.usage-button.off { height: 24px; padding: 0 8px; color: var(--muted); font-size: 12px; }
+.usage-button.over { border-color: var(--mode-held); color: var(--mode-held); font-weight: 600; }
+.usage-button.unread { color: var(--error); }
+.usage-pop {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  gap: 10px;
+  width: 300px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.2);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.usage-pop p { margin: 0; }
+.usage-switch { display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
+/* The switch is a checkbox drawn as a track and knob, in the accent while on. */
+.usage-switch input {
+  position: relative;
+  flex: none;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9px;
+  appearance: none;
+  background: var(--solid-muted);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.usage-switch input::before {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  content: "";
+  transition: translate 0.15s;
+}
+.usage-switch input:checked { background: var(--accent); }
+.usage-switch input:checked::before { translate: 14px 0; }
+.usage-switch input:focus-visible, .usage-percent input:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .usage-switch input, .usage-switch input::before { transition: none; }
+}
+.usage-percent { display: flex; align-items: center; gap: 6px; margin: 0; }
+.usage-percent label { margin-right: 4px; }
+.usage-percent input {
+  width: 72px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--button-border);
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--fg);
+  font: inherit;
+}
+.usage-percent input:disabled { opacity: 0.6; }
+.usage-percent input[aria-invalid="true"] { border-color: var(--error); }
+.usage-error { color: var(--error); }
+.usage-held { color: var(--mode-held); font-weight: 500; }
+/* Refresh is a square icon button whose arrow turns once a second while a shown project's board reads. */
+.bar button.refresh { display: grid; width: 32px; padding: 0; place-items: center; }
+.refresh.spinning .icon { animation: spin 1s linear infinite; }
+@keyframes spin { to { rotate: 360deg; } }
+@media (prefers-reduced-motion: reduce) {
+  .refresh.spinning .icon { animation: none; }
+}
+/* A button's tooltip shows its data-tip below it, shortly after the pointer rests on it or the keyboard focuses it.
+   The text stays out of the button's accessible name, which aria-description carries instead. A hidden tooltip takes
+   no box, so it never widens the page, and the display transition keeps its fade. It spans at most the window less
+   the bar's padding on each side, and shifts left by as much as it would pass the right padding, from the room
+   placeTip() in app-header.js measures. */
+button[data-tip] { position: relative; }
+button[data-tip]:hover, button[data-tip]:focus-visible { z-index: 30; }
+button[data-tip]::after {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  display: none;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 48px));
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--fg);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.2);
+  color: var(--bg);
+  content: attr(data-tip);
+  content: attr(data-tip) / "";
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  pointer-events: none;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  transition: opacity 0.1s, display 0.1s allow-discrete;
+  translate: min(0px, calc(var(--tip-room, 100%) - 100%)) 0;
+}
+button[data-tip]:hover::after, button[data-tip]:focus-visible::after {
+  display: block;
+  opacity: 1;
+  transition-delay: 0.3s;
+}
+@starting-style {
+  button[data-tip]:hover::after, button[data-tip]:focus-visible::after { opacity: 0; }
+}
+/* A project tab's mode, in its mode's color. */
+.tab-mode { margin-left: 6px; padding: 0 6px; border: 1px solid currentColor; border-radius: 2em; font-size: 11px;
+  font-weight: 500; }
+.tab-mode.running { color: var(--mode-running); }
+.tab-mode.manual { color: var(--mode-manual); }
+.tab-mode.held { color: var(--mode-held); }
+/* The bar's right end is a row that wraps as one unit under the bar's other controls: the machine's gauges in a pill,
+   the History and Runners buttons, and the help button. The pill is a button, as tall as the others, that opens the
+   Resources view. A window too narrow for the row wraps the gauges inside the pill, which then grows taller. The
+   restart notice takes a line of its own under the row, at the bar's right. */
+.meters { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 0; margin-left: auto; }
+.side-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.side-row > button { flex: none; }
+.gauges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 12px;
+  box-sizing: border-box;
+  min-width: 0;
+  height: auto;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--wash);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.3;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.gauges:hover { background: var(--button-hover); }
+.code-notice { font-size: 12px; line-height: 1.3; text-align: right; }
+.gauges > span { white-space: nowrap; }
+.gauges .divider { color: var(--muted); opacity: 0.6; }
+
+/* The project tabs: the page's main navigation, in a band of its own between the header's buttons and the list, in
+   larger text than the rows. The open tab shows its project's chip hue in its underline and a light tint of it; All
+   shows Working's orange. On a narrow window the band scrolls sideways. */
+header > nav {
+  gap: 4px;
+  margin-top: 6px;
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+header > nav button {
+  --tab-hue: var(--runners);
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 10px 12px 7px;
+  border-bottom-width: 3px;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+header > nav button:hover { background: var(--hover); }
+
+header > nav button[aria-current="true"] {
+  border-bottom-color: var(--tab-hue);
+  background: color-mix(in srgb, var(--tab-hue) 14%, var(--panel));
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  header > nav button[aria-current="true"] { background: color-mix(in srgb, var(--tab-hue) 20%, var(--panel)); }
+}
+
+header > nav .tab-mode { font-size: 12px; line-height: 18px; }
+
+.bar button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }

@@ -1,0 +1,29 @@
+[
+ {
+  "id": 301,
+  "node_id": "LA_kwDO301",
+  "url": "https://api.github.com/repos/org/game/labels/enhancement",
+  "name": "enhancement",
+  "color": "A2EEEF",
+  "default": true,
+  "description": "New feature or request"
+ },
+ {
+  "id": 302,
+  "node_id": "LA_kwDO302",
+  "url": "https://api.github.com/repos/org/game/labels/serial:web",
+  "name": "serial:web",
+  "color": "5319e7",
+  "default": false,
+  "description": "Changes web/app.js, app.css, or server.ts"
+ },
+ {
+  "id": 303,
+  "node_id": "LA_kwDO303",
+  "url": "https://api.github.com/repos/org/game/labels/in-progress",
+  "name": "in-progress",
+  "color": "fbca04",
+  "default": false,
+  "description": "An agent is working this"
+ }
+]

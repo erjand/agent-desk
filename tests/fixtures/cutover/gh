@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Stands in for `gh api` in tests/test_cutover.py. It keeps a repository's Issues switch, workflows, open issues, and
+PRs in the JSON file FAKE_GH_STATE, answers the importer's reads from the recorded pages in tests/fixtures/import_github,
+and appends each call's arguments to FAKE_GH_LOG. A call whose arguments contain the state's `fail` text fails as gh
+does, and the state's `fail_after` lets that many such calls through first. A call whose arguments contain the state's
+`kill` text makes its change and then kills the process that called it, once, as a machine that goes down between a
+change and its record would."""
+
+import json
+import os
+import re
+import signal
+import sys
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parents[1] / "import_github"
+
+
+def main(argv):
+    state_path = Path(os.environ["FAKE_GH_STATE"])
+    state = json.loads(state_path.read_text())
+    with open(os.environ["FAKE_GH_LOG"], "a", encoding="utf-8") as log:
+        log.write(json.dumps(argv) + "\n")
+    joined = " ".join(argv)
+    if state.get("fail") and state["fail"] in joined:
+        if state.get("fail_after", 0) > 0:
+            state["fail_after"] -= 1
+        else:
+            print("gh: Server Error (HTTP 502)", file=sys.stderr)
+            return 1
+    if argv[:1] != ["api"]:
+        print(f"fake gh: no {argv[0]}", file=sys.stderr)
+        return 1
+    args, method, fields, jq, path = argv[1:], "GET", {}, None, None
+    while args:
+        arg = args.pop(0)
+        if arg == "--paginate":
+            continue
+        if arg == "-X":
+            method = args.pop(0)
+        elif arg in ("-f", "-F"):
+            key, value = args.pop(0).split("=", 1)
+            fields[key] = value
+        elif arg == "--jq":
+            jq = args.pop(0)
+        else:
+            path = arg
+    repo = state["repo"]
+    if path == "graphql":
+        name = "issues" if "issues(" in fields["query"] else "pulls"
+        for page in json.loads((FIXTURES / f"{name}.json").read_text()):
+            print(json.dumps(page))
+        return 0
+    path = path.split("?", 1)[0]
+    rest = path[len(f"repos/{repo}"):]
+    pulls = state["pulls"]
+    if rest == "" and method == "PATCH":
+        state["has_issues"] = fields["has_issues"] == "true"
+        result = {}
+    elif rest == "":
+        result = {"has_issues": state["has_issues"]}
+    elif rest == "/labels":
+        result = json.loads((FIXTURES / "labels.json").read_text())
+    elif rest == "/issues/comments":
+        result = json.loads((FIXTURES / "issue_comments.json").read_text())
+    elif rest == "/pulls/comments":
+        result = json.loads((FIXTURES / "review_comments.json").read_text())
+    elif rest == "/issues":
+        result = state["issues"] + [{"number": int(number), "labels": [], "pull_request": {}}
+                                    for number, pull in pulls.items() if pull["state"] == "open"]
+    elif rest == "/pulls":
+        result = [{"number": int(number), "head": {"ref": pull["head"], "sha": pull.get("sha"),
+                                                   "repo": {"full_name": pull.get("from", repo)}}}
+                  for number, pull in pulls.items() if pull["state"] == "open"]
+    elif rest == "/actions/workflows":
+        result = {"total_count": len(state["workflows"]), "workflows": state["workflows"]}
+    elif match := re.fullmatch(r"/actions/workflows/(\d+)/(enable|disable)", rest):
+        workflow = next(one for one in state["workflows"] if one["id"] == int(match[1]))
+        workflow["state"] = "active" if match[2] == "enable" else "disabled_manually"
+        result = {}
+    elif match := re.fullmatch(r"/issues/(\d+)/comments", rest):
+        comments = pulls[match[1]]["comments"]
+        if method == "POST":
+            comments.append({"body": fields["body"]})
+        result = comments
+    elif match := re.fullmatch(r"/pulls/(\d+)", rest):
+        if method == "PATCH":
+            pulls[match[1]]["state"] = fields["state"]
+        result = {"state": pulls[match[1]]["state"]}
+    else:
+        print(f"fake gh: no {method} {path}", file=sys.stderr)
+        return 1
+    kill = state.get("kill") and state["kill"] in joined
+    if kill:
+        state["kill"] = None
+    state_path.write_text(json.dumps(state))
+    if kill:
+        os.kill(os.getppid(), signal.SIGKILL)
+    if jq is None:
+        print(json.dumps(result))
+    elif jq.endswith("[]"):
+        for one in (result if jq == ".[]" else result[jq[1:-2]]):
+            print(json.dumps(one))
+    else:
+        value = result[jq[1:]]
+        print(json.dumps(value) if isinstance(value, bool) else value)
+    return 0
+
+
+sys.exit(main(sys.argv[1:]))

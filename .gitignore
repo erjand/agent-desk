@@ -1,0 +1,3 @@
+# Types Claude Code writes into a mod's folder when it loads it.
+inbox/.claude-plugin/types/
+__pycache__/
