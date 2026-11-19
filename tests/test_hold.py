@@ -277,5 +277,103 @@ class PicksTest(HoldCase):
                 self.assertEqual(hold.main(["hold.py", *argv]), 2, argv)
 
 
+
+class SlotsTest(HoldCase):
+    """
+    `agent-desk slots` on org/game, whose config sets 3 agent slots and 1 check slot, and org/town, which sets none.
+    """
+
+    def setUp(self):
+        super().setUp()
+        folder = Path(self.folder.name)
+        for name, config in (("game", {"slots": {"agent": 3, "check": 1}}), ("town", None)):
+            (folder / name).mkdir()
+            if config:
+                (folder / name / ".agent-desk.json").write_text(json.dumps(config))
+        (folder / "projects").write_text(f"org/game {folder / 'game'}\norg/town {folder / 'town'}\n")
+        patch = mock.patch.object(store, "PROJECTS", folder / "projects")
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def slots(self, *args, repo=""):
+        """Runs `agent-desk slots` with `repo` as the current directory's project, and returns its status and output."""
+        with (mock.patch.object(hold, "repo_here", return_value=repo), redirect_stdout(io.StringIO()) as out,
+              redirect_stderr(io.StringIO()) as err):
+            code = hold.main(["hold.py", "slots", *args])
+        return code, out.getvalue() + err.getvalue()
+
+    def overrides(self):
+        return hold.status().get("slots")
+
+    def test_set_overrides_each_kind_named_above_or_below_the_config_and_keeps_the_others(self):
+        code, out = self.slots("org/game", "agent=1", "fix=4")
+        self.assertEqual(code, 0, out)
+        self.assertIn("  agent       1   config  3   override\n", out)
+        self.assertIn("  check       1   config  1\n", out)
+        self.slots("org/game", "chore=0")
+        self.assertEqual(self.overrides(), {"org/game": {"agent": 1, "fix": 4, "chore": 0}})
+
+    def test_a_count_equal_to_the_config_s_drops_that_kind_s_override_and_the_last_drops_the_project(self):
+        self.slots("org/game", "agent=1", "check=2")
+        self.slots("org/game", "agent=3")
+        self.assertEqual(self.overrides(), {"org/game": {"check": 2}})
+        self.slots("org/game", "check=1")
+        self.assertIsNone(self.overrides())
+
+    def test_reset_drops_the_kinds_named_or_every_override_of_the_project(self):
+        self.slots("org/game", "agent=1", "fix=0", "check=4")
+        self.slots("org/town", "agent=5")
+        self.assertEqual(self.slots("org/game", "--reset", "fix", "check")[0], 0)
+        self.assertEqual(self.overrides(), {"org/game": {"agent": 1}, "org/town": {"agent": 5}})
+        self.slots("org/game", "--reset")
+        self.assertEqual(self.overrides(), {"org/town": {"agent": 5}})
+
+    def test_without_a_project_the_setting_forms_act_on_the_current_one_and_refuse_outside_a_project(self):
+        self.assertEqual(self.slots("agent=1", repo="org/town")[0], 0)
+        self.assertEqual(self.overrides(), {"org/town": {"agent": 1}})
+        for args in (["agent=2"], ["--reset"]):
+            code, out = self.slots(*args)
+            self.assertEqual(code, 1, args)
+            self.assertIn("No project here", out)
+        self.assertEqual(self.overrides(), {"org/town": {"agent": 1}})
+        self.slots("--reset", repo="org/town")
+        self.assertIsNone(self.overrides())
+
+    def test_print_lists_every_project_or_the_one_named_with_its_config_and_overrides(self):
+        self.slots("org/town", "benchmark=0")
+        code, out = self.slots()
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[0::6], ["org/game", "org/town"])
+        self.assertIn("  benchmark   0   config  2   override", out)
+        code, out = self.slots("org/game")
+        self.assertEqual(out.splitlines()[:2], ["org/game", "  agent       3   config  3"])
+        self.assertEqual(self.slots("org/elsewhere")[0], 1)
+
+    def test_a_kind_or_count_it_does_not_know_or_an_unknown_project_changes_nothing(self):
+        for args in (["agent"], ["agents=1"], ["agent=x"], ["agent=-1"], ["agent=1", "fix"], ["--reset", "agents"]):
+            self.assertEqual(self.slots("org/game", *args)[0], 2, args)
+        self.assertEqual(self.slots("org/elsewhere", "agent=1")[0], 1)
+        self.assertIsNone(self.overrides())
+
+    def test_mode_changes_and_resume_keep_every_project_s_overrides(self):
+        self.slots("org/game", "agent=1")
+        self.slots("org/town", "check=0")
+        kept = self.overrides()
+        for state, repo in (("held", "org/game"), ("manual", None), ("held", None), ("running", "org/town"),
+                            ("running", None), ("held", None)):
+            hold.set_state(state, repo=repo)
+            self.assertEqual(self.overrides(), kept, (state, repo))
+        hold.resume()
+        self.assertEqual(self.overrides(), kept)
+
+    def test_status_prints_the_overrides_and_keeps_them_when_the_state_goes_missing(self):
+        self.slots("org/game", "agent=1")
+        with redirect_stdout(io.StringIO()) as out:
+            hold.main(["hold.py", "status"])
+        self.assertEqual(json.loads(out.getvalue())["slots"], {"org/game": {"agent": 1}})
+        hold.HOLD.write_text(json.dumps({"slots": {"org/game": {"agent": 1}}}))
+        self.assertEqual((hold.status()["state"], self.overrides()), ("running", {"org/game": {"agent": 1}}))
+
+
 if __name__ == "__main__":
     unittest.main()

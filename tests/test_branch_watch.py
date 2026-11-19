@@ -193,6 +193,18 @@ class WatchTest(GitCase):
         self.wait(1)
         self.assertEqual([check["branch"] for check in self.store.checks(("running",))], ["agent/issue-6"])
 
+    def test_a_check_slot_override_holds_checks_past_its_count(self):
+        self.configure({"test": "just test", "slots": {"check": 2}})
+        self.hold = {"state": "running", "picked": [], "slots": {REPO: {"check": 1}}}
+        self.commit("agent/issue-5", "b.txt", "five\n")
+        self.commit("agent/issue-6", "b.txt", "six\n")
+        self.settle()
+        self.assertEqual(len(self.store.checks(("running",))), 1)
+        [waiting] = self.store.checks(("queued",))
+        self.assertEqual((waiting["wait_gate"], waiting["wait_reason"]), ("slot", "a free check slot"))
+        self.assertIn(f"Check {waiting['id']} of {waiting['branch']} waits: its project's 1 check slots are busy.",
+                      self.said)
+
     def test_a_restart_checks_a_move_made_while_the_dispatcher_was_down_and_ends_a_vanished_check(self):
         self.commit("agent/issue-5", "b.txt", "one\n")
         self.settle()

@@ -68,7 +68,8 @@
   --solid-attention: oklch(0.8 0.15 80);
   --on-attention: oklch(0.25 0.04 70);
 
-  /* How wide the selected card's content grows, which the runners over it keep to too. */
+  /* How wide the selected card's content, the New Issue form, and the Resources page grow while a right panel is open.
+     With none open, .split lifts the cap, so they fill the panel. */
   --card-width: 1280px;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -311,13 +312,16 @@ kbd {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(420px, 40%) minmax(0, 1fr);
+  /* With no right panel, the list and the card keep the 32 to 42 split they have beside one, scaled to the window. */
+  grid-template-columns: minmax(420px, 43.24%) minmax(0, 1fr);
 }
+.split:not(.with-side) { --card-width: none; }
 /* The Runners sidebar, the History column, or the Chat takes a narrow third column at the right, while the window has
    room for it. They share the column's look, so they read as one place. */
 .split.with-side { grid-template-columns: minmax(380px, 32%) minmax(0, 1fr) minmax(360px, 26%); }
+/* Below 1300px the side column hides, and the list takes 40% whether or not a right panel is open. */
 @media (max-width: 1300px) {
-  .split.with-side { grid-template-columns: minmax(420px, 40%) minmax(0, 1fr); }
+  .split, .split.with-side { grid-template-columns: minmax(420px, 40%) minmax(0, 1fr); }
   .split .history, .split .runners-side, .split .chat-side { display: none; }
 }
 

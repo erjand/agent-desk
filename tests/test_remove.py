@@ -58,6 +58,7 @@ class RemoveTest(RemoveCase):
         self.assertTrue(self.other_board.exists())
         hold = json.loads((self.state / "hold.json").read_text())
         self.assertEqual(hold["projects"], {OTHER: "manual"})
+        self.assertEqual(hold["slots"], {OTHER: {"fix": 0}})
         self.assertEqual(hold["picked"], [f"{OTHER}#2", f"{OLD}-x#3"])
         self.assertEqual(json.loads((self.state / "chore-repeat.json").read_text()), {OTHER: {"audit": 1}})
         self.assertEqual(self.projects.read_text(), f"{OTHER} {self.root / 'thing'}\n")
@@ -90,7 +91,7 @@ class RemoveTest(RemoveCase):
         self.assertIn(f"Would delete {OLD} from the store (", out)
         self.assertIn("Would delete merges/org__game.json.", out)
         self.assertIn(f"Would delete boards/{self.board.name}.", out)
-        self.assertIn("Would drop its mode, its picks from hold.json.", out)
+        self.assertIn("Would drop its mode, its slot overrides, its picks from hold.json.", out)
         self.assertIn("Would drop its queued chores from chore-repeat.json.", out)
         self.assertIn(f"Would drop {OLD}'s line from {self.projects}.", out)
         self.assertIn("with git rm and commit it.", out)
@@ -120,18 +121,28 @@ class RefusalTest(RemoveCase):
         out, _ = self.remove("--dry-run", OLD)
         self.assertIn(f"Would refuse now: {OLD} is on Manual, not Hold.", out)
 
-    def test_it_refuses_while_a_run_works_or_waits_or_a_check_waits(self):
+    def test_it_refuses_while_a_run_works_or_waits_or_a_check_works(self):
         desk = self.store()
         run = desk.request_run(OLD, "agent", "1")
         desk.run_started(run, "agent-desk-agent-org-game-1-2.service")
         waiting = desk.request_run(OLD, "chore", "audit")
-        desk.check_queue(OLD, "agent/issue-1", "b" * 40)
+        check = desk.check_queue(OLD, "agent/issue-1", "b" * 40)
+        desk.check_started(check, str(self.state / "checks" / "org__game" / f"{check}.log"))
         _, err = self.remove(OLD, status=1)
         self.assertIn(f"1 run still working (agent {run})", err)
-        self.assertIn("1 branch check queued or running (agent/issue-1)", err)
+        self.assertIn("1 branch check running (agent/issue-1)", err)
         self.assertIn(f"1 run request waiting (chore audit as run {waiting})", err)
         self.assertIn("`agent-desk request --cancel <run>`", err)
         self.assertEqual(self.counts(OLD)["projects"], 1)
+
+    def test_a_check_hold_keeps_queued_goes_with_the_project(self):
+        desk = self.store()
+        check = desk.check_queue(OLD, "agent/issue-1", "b" * 40)
+        desk.check_waits(check, "mode", "Resume")
+        out, _ = self.remove(OLD)
+        self.assertIn("1 branch check queued (agent/issue-1), which Hold keeps from starting, so the removal deletes "
+                      "each with the project's rows.", out)
+        self.assertEqual(desk.checks(("queued", "running")), [])
 
     def test_it_refuses_with_a_merge_queue(self):
         (self.state / "merges" / "org__game.json").write_text(json.dumps({"queue": [{"pr": 3}]}))

@@ -42,17 +42,18 @@ test('off, the button is a small Usage Limit control whose tooltip names the per
     'Set a weekly plan usage limit that holds new runs in every project')
 })
 
-test('under the limit, the button reads the week\'s usage rounded down, and its tooltip the limit and the reset', () => {
-  assert.deepEqual(usageView(under), { text: 'Week 41%', tone: 'under',
+test('under the limit, the button reads the week\'s usage rounded down and the limit, and its tooltip the reset', () => {
+  assert.deepEqual(usageView(under), { text: 'Week 41% / 80%', tone: 'under',
     tip: 'Weekly plan usage is 41%, under the 80% limit; resets Wed 04:00' })
   // 79.9% reads 79%, so a reading under the limit never shows as at it.
-  assert.equal(usageView({ ...under, percent: 79.9 }).text, 'Week 79%')
+  assert.equal(usageView({ ...under, percent: 79.9 }).text, 'Week 79% / 80%')
   assert.equal(usageView({ ...under, percent: 79.9 }).tone, 'under')
 })
 
 test('at or over the limit, the button takes the Hold tone, and its tooltip names the limit and the reset', () => {
-  assert.deepEqual(usageView(over), { text: 'Week 80%', tone: 'over',
+  assert.deepEqual(usageView(over), { text: 'Week 80% / 80%', tone: 'over',
     tip: 'Weekly plan usage is 80%, at the 80% limit, so new agent, chore, and fix runs wait; resets Wed 04:00' })
+  assert.equal(usageView({ ...over, percent: 83 }).text, 'Week 83% / 80%')
   assert.equal(usageView({ ...over, percent: 97, resetsAt: null }).tip,
     'Weekly plan usage is 97%, at the 80% limit, so new agent, chore, and fix runs wait')
 })
@@ -97,6 +98,7 @@ test('saving turns the limit on at a percentage or off, and the header shows it 
   ui.server = { usage: { ...under, on: false } }
   saveUsage(true, '75')
   assert.deepEqual([ui.server.usage.on, ui.server.usage.limit], [true, 75])
+  assert.equal(usageView(ui.server.usage).text, 'Week 41% / 75%', 'the button reads the new limit')
   saveUsage(true, '75')
   saveUsage(false, '75')
   assert.deepEqual([ui.server.usage.on, ui.server.usage.limit], [false, 75], 'off keeps the percentage for on')

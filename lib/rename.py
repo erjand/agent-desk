@@ -4,18 +4,18 @@
 
 `agent-desk project rename` runs it once the project has a new name on its host, or before, since `repo_here` in
 lib/store.py reads the name from the main checkout's `origin` and a command would otherwise find an empty project. It
-refuses to start unless the project is on Hold, with no run working, no branch check queued or
-running, and its merge queue empty. It refuses when the new name already belongs to another project in the store or
-in ~/.config/agent-desk/projects. Then it takes these steps in order, printing each, and stops at the first failure
-with the step named:
+refuses to start unless the project is on Hold, with no run working, no branch check running, and its merge queue
+empty. A queued branch check, which Hold keeps from starting, moves with the project and starts on Resume. It refuses
+when the new name already belongs to another project in the store or in ~/.config/agent-desk/projects. Then it takes
+these steps in order, printing each, and stops at the first failure with the step named:
 
 1. store: rewrites the name in every table of desk.sqlite with a `project` column and in `projects.slug`, moves each
    `checks.log_path` and `assets.path` that names the project's `<owner>__<repo>` folder to the new folder, and writes
    a `project-renamed` event naming both, in one transaction.
 2. files: moves the project's files in the state folder that carry its `<owner>__<repo>` name: its folders in
    `chores/`, `checks/`, and `assets/`, and its files and locks in `fixes/`, `merges/`, and `pushes/`.
-3. hold: renames the project's mode in hold.json and its Manual picks (`owner/repo#n`), and its queued chores in
-   chore-repeat.json.
+3. hold: renames the project's mode and slot overrides in hold.json and its Manual picks (`owner/repo#n`), and its
+   queued chores in chore-repeat.json.
 4. projects: changes the project's line in ~/.config/agent-desk/projects.
 5. remote: points the main checkout's `origin` at the new name with `git remote set-url` when it is a host address
    naming the old name, so the checkout and its worktrees resolve to the new name at once. A path, or no origin, stays.
@@ -133,6 +133,10 @@ class Rename(project_steps.Steps):
         self.refuse(project_steps.refusals(self.desk, (self.old, self.new)),
                     f"Run `agent-desk hold {self.old}` first, and wait for the runs, the checks, and the merge queue "
                     "to finish.")
+        note = project_steps.queued(self.desk, (self.old, self.new),
+                                    "the rename moves each to the new name, where it starts on Resume")
+        if note:
+            self.note(note)
 
     # The steps.
 
@@ -203,11 +207,11 @@ class Rename(project_steps.Steps):
     def renamed_modes(self, data):
         """Renames the project in hold.json's data, and returns what it renamed."""
         old, new, changed = self.old, self.new, []
-        for field in ("projects", "before_projects"):
+        for field, named in hold.PROJECT_FIELDS.items():
             modes = data.get(field)
             if isinstance(modes, dict) and old in modes:
                 modes[new] = modes.pop(old)
-                changed.append("its mode" if field == "projects" else "its mode before Hold")
+                changed.append(named)
         picks = [f"{new}#{pick.split('#', 1)[1]}" if pick.split("#", 1)[0] == old else pick
                  for pick in data["picked"]]
         if picks != data["picked"]:

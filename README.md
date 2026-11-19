@@ -18,6 +18,8 @@ agent-desk runs on Linux with systemd. `agent-desk doctor` checks each of these 
 
 - A systemd user manager that `systemctl --user` reaches, and cgroup v2 mounted at `/sys/fs/cgroup`.
 - `git`, `python3`, Node 24 or newer, `flock` from util-linux, and `loginctl` and `busctl` from systemd.
+- A git identity the agents commit their work with: `git config --global user.name "Your Name"` and
+  `git config --global user.email you@example.com`.
 - [Claude Code](https://claude.com/claude-code), signed in to the account the agents run on.
 - On a machine without a desktop session, lingering, so the timers keep running after you log out:
   `sudo loginctl enable-linger $USER`.
@@ -50,7 +52,13 @@ Then turn on the services, which serve every project you register:
 agent-desk dispatch install   # the dispatcher, which starts every run
 agent-desk chores on          # the timers that move the merge queue, fix conflicts, and run chores
 agent-desk web on             # the web page at http://127.0.0.1:7480
+agent-desk backup install     # the backup timer, which backs up the local store every 15 minutes
 ```
+
+The backup timer commits every issue, review, and comment as JSON to a git repository at `~/dev/repo/agent-desk-data`,
+or the folder `AGENT_DESK_DATA` names when `backup install` runs, and copies the whole database to a snapshot once a
+day, keeping seven days of snapshots. Without the timer, agent-desk keeps no backup. [Backup and
+restore](docs/reference.md#backup-and-restore) says how to push the repository to a remote and restore from either.
 
 To work on agent-desk itself, clone it and run `./install.sh` without the marketplace plugin, as
 [CONTRIBUTING.md](CONTRIBUTING.md) describes.
@@ -97,7 +105,9 @@ end with `0 failed`; follow the fix under any failure, and see [Troubleshooting]
    the issue and removes the worktree and branch.
 
 To watch from Claude Code instead, run `/agent-desk` in a session in the demo's checkout. The pane docks beside the
-chat with the same board and buttons.
+chat with the same board and buttons. It lists a review without its description or diff, and pressing the review
+opens it on the web page. To read it from a terminal, run `agent-desk review view <n>` for its description, comments,
+and branch, then `git diff main...<branch>` in the demo's checkout for its changes.
 
 ![The agent-desk pane in Claude Code: Needs You, Queued, and the other sections with their buttons](docs/images/pane.png)
 
@@ -189,6 +199,7 @@ under each warning and failure, and exits 1 when a check fails.
 | `doctor` reports | What to do |
 | --- | --- |
 | A command isn't on PATH, or Node is older than 24 | Install it; the fix names the package |
+| git has no `user.name` or `user.email` for this account | Set them with the `git config --global` commands doctor prints |
 | `systemctl --user` can't reach the user's manager | Log in to a session with a systemd user manager, or enable lingering |
 | `/sys/fs/cgroup` isn't cgroup v2 | Boot with `systemd.unified_cgroup_hierarchy=1` |
 | `agent-desk` isn't on PATH, or runs another checkout | Run `install.sh` from the clone that should be live |
@@ -208,6 +219,9 @@ under each warning and failure, and exits 1 when a check fails.
 | `gh` is missing or logged out, for a `github` project | Install `gh` and run `gh auth login`, or set `host` to `none` |
 | GitHub has an open PR from an `agent/*` branch | Open a review for the branch with `agent-desk review create`, and close the PR |
 | Claude Code finds no skill for a chore | Install the skill, or take it out of `chores.every` |
+
+When another program holds port 7480, run `AGENT_DESK_WEB_PORT=7481 agent-desk web on` to serve the web page on
+another port. The service keeps the port through upgrades, and the pane opens items there.
 
 When a run fails, its card in Needs You names the `journalctl --user -u <unit>` command that prints its log, and the
 Agent Log tab shows the agent's session. `journalctl --user -u agent-desk-dispatch` prints the dispatcher's log, and a

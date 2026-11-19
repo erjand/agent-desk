@@ -178,6 +178,50 @@ class SliceTest(unittest.TestCase):
                                       "agent-desk dispatch install"))
 
 
+class GitIdentityTest(unittest.TestCase):
+    """check_git_identity against a real git, with the account's config in a temporary file and no system config."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = Path(self.tmp.name, "gitconfig")
+        self.config.write_text("")
+        env = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(self.config), "GIT_CONFIG_NOSYSTEM": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def set(self, key, value):
+        self.assertEqual(doctor.run("git", "config", "--file", str(self.config), key, value)[0], 0)
+
+    def test_no_identity_fails_with_both_fixes(self):
+        self.assertEqual(doctor.check_git_identity(), doctor.Check(
+            "fail", "git has no user.name or user.email for this account, so the agents can't commit their work",
+            'git config --global user.name "Your Name"; git config --global user.email you@example.com'))
+
+    def test_a_missing_email_fails_with_its_fix(self):
+        self.set("user.name", "Ada Lovelace")
+        self.assertEqual(doctor.check_git_identity(), doctor.Check(
+            "fail", "git has no user.email for this account, so the agents can't commit their work",
+            "git config --global user.email you@example.com"))
+
+    def test_an_empty_name_fails(self):
+        self.set("user.name", "")
+        self.set("user.email", "ada@example.com")
+        self.assertEqual(doctor.check_git_identity().status, "fail")
+
+    def test_both_set_passes_and_names_the_identity(self):
+        self.set("user.name", "Ada Lovelace")
+        self.set("user.email", "ada@example.com")
+        self.assertEqual(doctor.check_git_identity(),
+                         doctor.Check("ok", "git commits as Ada Lovelace <ada@example.com>"))
+
+    def test_the_commands_check_includes_it_after_git(self):
+        with mock.patch.object(doctor.shutil, "which", side_effect=lambda name: None if name != "git" else name):
+            checks = doctor.check_commands()
+        self.assertEqual([check.what for check in checks[:2]], [
+            "git", "git has no user.name or user.email for this account, so the agents can't commit their work"])
+
+
 class StateFolderTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

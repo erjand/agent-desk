@@ -277,6 +277,8 @@ function Item({ card, selected }) {
   const note = noteOf(card)
   const noteClass = card.stage === 'merging' && card.state === 'stopped' ? 'note warning' : 'note'
   const classes = ['item', selected ? 'selected' : '', dragClass(card)].filter(Boolean).join(' ')
+  // Working names the run's kind, such as `fix` or `check`, but not `agent`, which most of them are.
+  const runner = card.runner !== 'agent' ? card.runner : undefined
   return html`<div role="option" class=${classes} aria-selected=${String(selected)} data-key=${card.id}
     ...${dragProps(card)} onClick=${() => select(card.id)}>
     <${Icon} name=${icon} tone=${tone} />
@@ -285,7 +287,7 @@ function Item({ card, selected }) {
     <span class="text" title=${card.title}>${card.title}</span>
     ${card.subs ? html`<${SubsBadge} card=${card} />` : null}
     ${card.state ? html`<span class=${`badge ${card.state}`}>${card.state}</span>` : null}
-    ${card.runner ? html`<span class="note runner">${card.runner}</span>` : null}
+    ${runner ? html`<span class="note runner">${runner}</span>` : null}
     <span class="tags">${tagsOf(card.desk, card.labels, card.note, { noteApart: true })}</span>
     ${note ? html`<span class="note-cell"><span class=${noteClass} title=${note}>${note}</span></span>` : null}
     <span class="time">${timeOf(card)}</span>

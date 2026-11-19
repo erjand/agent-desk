@@ -53,7 +53,7 @@ class SettleTest(unittest.TestCase):
     def test_enough_timed_runs_set_it_at_their_95th_percentile_times_one_and_a_half(self):
         # 20 runs that peaked after 1 to 20 minutes: the 95th percentile is 20, so 30 minutes.
         self.assertEqual(memory.settle("org/game", "agent", [], timed(range(1, 21))), 30)
-        self.assertEqual(memory.settle("org/game", "agent", [], timed([4] * 19 + [40]) + runs(9, 2.0)), 60)
+        self.assertEqual(memory.settle("org/game", "agent", [], timed([4] * 19 + [20]) + runs(9, 2.0)), 30)
         self.assertIsNone(memory.settle("org/other", "agent", [], timed(range(1, 21))))
 
     def test_a_label_with_enough_timed_runs_of_its_own_can_only_lengthen_it(self):
@@ -63,6 +63,14 @@ class SettleTest(unittest.TestCase):
         self.assertEqual(memory.settle("org/game", "agent", ["docs"], history), 15)
         few = timed([10] * 200) + timed([30] * 9, labels=["blender"])
         self.assertEqual(memory.settle("org/game", "agent", ["blender"], few), 15)
+
+    def test_a_learned_settle_time_past_45_minutes_stops_at_45(self):
+        # Runs that peaked after 98 minutes learn 147 minutes, and the cap takes it to 45.
+        self.assertEqual(memory.MAX_SETTLE_MINUTES, 45)
+        self.assertEqual(memory.settle("org/game", "agent", [], timed([98] * 20)), 45)
+        self.assertEqual(memory.settle("org/game", "agent", ["blender"],
+                                       timed([10] * 20) + timed([40] * 10, labels=["blender"])), 45)
+        self.assertEqual(memory.settle("org/game", "agent", [], timed([29] * 20)), 43.5)
 
 
 def meminfo(folder, total_kb):

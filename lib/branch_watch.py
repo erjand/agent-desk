@@ -175,9 +175,8 @@ class BranchWatch:
                 self.desk.check_ended(row["id"], "cancelled")
             elif mode == "held" and (project, row["branch"]) not in worked:
                 self.note(row, "mode", *hold.MODE_WAITS[mode])
-            elif running[project] >= slots_of(config)["check"]:
-                self.note(row, "slot", "a free check slot", f"its project's {slots_of(config)['check']} check slots "
-                          "are busy")
+            elif running[project] >= (slots := slots_of(config, hold.slot_override(state, project))["check"]):
+                self.note(row, "slot", "a free check slot", f"its project's {slots} check slots are busy")
             elif self.start(row, checkout, config):
                 running[project] += 1
 

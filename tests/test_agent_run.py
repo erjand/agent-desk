@@ -5,6 +5,7 @@ must end at the result anyway."""
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,8 @@ import agent_run  # noqa: E402
 
 RESULT_GRACE = 1
 KILL_GRACE = 1
+BEAT = 0.5
+SESSION = "5f1c2a9e-0000-4000-8000-000000000518"
 
 
 def result(is_error=False):
@@ -73,6 +76,7 @@ class AgentRunTest(unittest.TestCase):
         long it took."""
         env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(self.root / "state"),
                "AGENT_DESK_RESULT_GRACE": str(RESULT_GRACE), "AGENT_DESK_KILL_GRACE": str(KILL_GRACE),
+               "AGENT_DESK_BEAT": str(BEAT),
                "work": str(self.work), "stream": str(self.stream)}
         env.pop("BASH_MAX_TIMEOUT_MS", None)
         env.pop("BASH_DEFAULT_TIMEOUT_MS", None)
@@ -180,6 +184,52 @@ class AgentRunTest(unittest.TestCase):
         self.assertGreaterEqual(took, 2)
         self.assertIn("not json", done.stdout)
 
+    def events(self, *events):
+        return "\n".join(f"echo {shlex.quote(json.dumps(event))}" for event in events)
+
+    def test_a_quiet_run_logs_the_call_it_waits_on_and_its_busy_child(self):
+        wait = "timeout 7000 bash -c 'until grep -q \"^exit\" .scratch/fill.log; do sleep 30; done'"
+        fill = "just bank-fill algebra-1 > .scratch/fill.log 2>&1"
+        (self.fakes / "spin.py").write_text("while True:\n    pass\n")
+        before = self.events(
+            {"type": "system", "subtype": "init", "session_id": SESSION, "model": "opus"},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash",
+                                                           "input": {"command": fill, "run_in_background": True}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1"}]}},
+            {"type": "system", "subtype": "task_started", "task_id": "b1", "tool_use_id": "toolu_1",
+             "description": "Fill the bank"},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_2", "name": "Bash",
+                                                           "input": {"command": wait}}]}})
+        after = self.events({"type": "user", "message": {"content": [{"type": "tool_result",
+                                                                      "tool_use_id": "toolu_2"}]}})
+        # The fake goes quiet for three beats while a python module spins, then reports the call's result.
+        self.claude(f'{before}\nPYTHONPATH="{self.fakes}" python3 -m spin &\nspin=$!\nsleep {BEAT * 3.6}\n'
+                    f'kill $spin\n{after}\necho \'{result()}\'')
+        done, _ = self.agent_run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        beats = [line for line in done.stdout.splitlines() if " Still in Bash for " in line]
+        self.assertGreaterEqual(len(beats), 2, done.stdout)
+        self.assertLessEqual(len(beats), 4, done.stdout)
+        first = beats[0].split(" ", 1)[1]
+        self.assertRegex(first, r"^Still in Bash for \d+ s: timeout 7000 bash -c 'until grep -q \"\^exit\" "
+                                r"\.scratch/fill\.log; do sleep 30; don … · background: just bank-fill algebra-1 "
+                                r"> \.scratch/fill\.log 2>&1 · busy: python -m spin \(\d+% CPU\)")
+        written = (self.root / "state" / "agent-desk" / "beats" / SESSION).read_text().splitlines()
+        self.assertEqual([json.loads(line)["text"] for line in written], [line.split(" ", 1)[1] for line in beats])
+        self.assertEqual({json.loads(line)["type"] for line in written}, {"beat"})
+        self.assertRegex(json.loads(written[0])["timestamp"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+
+    def test_a_run_with_steady_events_logs_no_beat(self):
+        tick = self.events({"type": "system", "subtype": "status"})
+        init = self.events({"type": "system", "subtype": "init", "session_id": SESSION, "model": "opus"})
+        self.claude(f"{init}\nfor _ in $(seq 15); do\n{tick}\nsleep 0.1\ndone\necho '{result()}'")
+        done, took = self.agent_run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertGreater(took, BEAT * 2)
+        self.assertNotIn("Still in", done.stdout)
+        self.assertNotIn("Quiet for", done.stdout)
+        self.assertFalse((self.root / "state" / "agent-desk" / "beats").exists())
+
     def test_the_run_forbids_tools_that_outlive_the_agents_last_turn(self):
         self.claude(f"echo '{result()}'")
         self.agent_run()
@@ -187,6 +237,30 @@ class AgentRunTest(unittest.TestCase):
         self.assertEqual(args[:2], ["-p", "/agent-desk:work-issue 7"])
         self.assertEqual(args[args.index("--disallowedTools") + 1], "ScheduleWakeup,CronCreate,Monitor")
         self.assertEqual(args[args.index("--output-format") + 1], "stream-json")
+
+    def test_a_run_may_wait_two_hours_on_one_command(self):
+        self.claude(f"echo \"$BASH_MAX_TIMEOUT_MS\" >\"{self.root / 'max'}\"\necho '{result()}'")
+        done, _ = self.agent_run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / "max").read_text(), "7200000\n")
+
+    def test_a_run_keeps_the_users_own_command_limit(self):
+        self.claude(f"echo \"$BASH_MAX_TIMEOUT_MS\" >\"{self.root / 'max'}\"\necho '{result()}'")
+        done, _ = self.agent_run('desk_claude_run "$work" "$stream"', BASH_MAX_TIMEOUT_MS="900000")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / "max").read_text(), "900000\n")
+
+    def test_a_command_given_no_timeout_waits_fifteen_minutes(self):
+        self.claude(f"echo \"$BASH_DEFAULT_TIMEOUT_MS\" >\"{self.root / 'default'}\"\necho '{result()}'")
+        done, _ = self.agent_run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / "default").read_text(), "900000\n")
+
+    def test_a_run_keeps_the_users_own_default_timeout(self):
+        self.claude(f"echo \"$BASH_DEFAULT_TIMEOUT_MS\" >\"{self.root / 'default'}\"\necho '{result()}'")
+        done, _ = self.agent_run('desk_claude_run "$work" "$stream"', BASH_DEFAULT_TIMEOUT_MS="300000")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / "default").read_text(), "300000\n")
 
 
 class StreamTest(unittest.TestCase):
@@ -218,6 +292,60 @@ class StreamTest(unittest.TestCase):
         tasks.see({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
         self.assertEqual(tasks.left(), "")
 
+    def test_a_beat_names_the_newest_call_still_waiting_or_says_none_is(self):
+        tasks = agent_run.Tasks()
+        self.assertRegex(tasks.waiting(), r"^Quiet for \d+ s with no tool call waiting$")
+        tasks.see({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Agent", "input": {"description": "Explore the store"}},
+            {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "x" * 200}}]}})
+        self.assertEqual(tasks.waiting(), f"Still in Bash for 0 s: {'x' * 79} …")
+        tasks.see({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2"}]}})
+        self.assertEqual(tasks.waiting(), "Still in Agent for 0 s: Explore the store")
+        tasks.see({"type": "system", "subtype": "task_started", "task_id": "a1", "description": "Judge item 4"})
+        self.assertEqual(tasks.waiting(), "Still in Agent for 0 s: Explore the store · background: Judge item 4")
+
+    def test_a_stretch_reads_in_seconds_then_minutes(self):
+        self.assertEqual(agent_run.span(42.9), "42 s")
+        self.assertEqual(agent_run.span(12 * 60 + 59), "12 min")
+
+    def test_a_process_is_named_by_what_it_runs(self):
+        for argv, name in [
+            (["/usr/bin/python3.13", "-B", "-m", "quiz.bank_fill", "--set", "algebra-1"], "python -m quiz.bank_fill"),
+            (["python3", "-W", "ignore", "-mquiz.judge"], "python -m quiz.judge"),
+            (["python", "-u", "/srv/lib/run_log.py", "record"], "python run_log.py"),
+            (["python3", "-c", "print(1)"], "python -c"),
+            (["uv", "run", "--with", "rich", "python", "-m", "quiz.bank_fill"], "python -m quiz.bank_fill"),
+            (["/home/u/.local/bin/uv", "run", "--frozen", "pytest", "-x"], "pytest"),
+            (["uv", "run"], "uv run"),
+            (["claude", "-p", "Judge this item", "--output-format", "json"], "claude -p"),
+            (["claude", "--resume", "abc"], "claude"),
+            (["/usr/bin/node", "/srv/cli.js"], "node"),
+            ([], ""),
+        ]:
+            self.assertEqual(agent_run.command_name(argv), name, argv)
+
+    def test_the_busy_list_ranks_three_commands_by_cpu_since_the_last_line(self):
+        ticks = agent_run.CLOCK_TICKS
+        before = {(1, "1"): ("claude -p", 0), (2, "2"): ("claude -p", 10 * ticks), (3, "3"): ("bash", 5 * ticks),
+                  (4, "4"): ("python -m quiz.bank_fill", 0)}
+        after = {(1, "1"): ("claude -p", 30 * ticks), (2, "2"): ("claude -p", 30 * ticks),
+                 (3, "3"): ("bash", 5 * ticks), (4, "4"): ("python -m quiz.bank_fill", 4 * ticks),
+                 (5, "5"): ("claude -p", 35 * ticks), (6, "6"): ("sleep", 1), (7, "7"): ("timeout", 2 * ticks)}
+        self.assertEqual(agent_run.busy(before, after, 100),
+                         "busy: claude -p ×3 (85% CPU), python -m quiz.bank_fill (4%), timeout (2%)")
+        self.assertEqual(agent_run.busy(before, before, 100), "busy: nothing")
+        self.assertEqual(agent_run.busy({}, {(6, "6"): ("sleep", 1)}, 300), "busy: sleep (<1% CPU)")
+
+    def test_the_cpu_sample_holds_a_busy_child(self):
+        spin = subprocess.Popen([sys.executable, "-c", "while True: pass"])
+        self.addCleanup(spin.wait)
+        self.addCleanup(spin.kill)
+        time.sleep(0.3)
+        sample = agent_run.cpu_sample(os.getpid())
+        names = {name: ticks for (pid, _), (name, ticks) in sample.items() if pid == spin.pid}
+        self.assertEqual(list(names), ["python -c"])
+        self.assertGreater(names["python -c"], 0)
+
     def test_a_code_span_fences_the_backticks_inside_it(self):
         self.assertEqual(agent_run.code("just test"), "`just test`")
         self.assertEqual(agent_run.code("a `b` c"), "``a `b` c``")
@@ -230,27 +358,3 @@ class StreamTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-    def test_a_run_may_wait_two_hours_on_one_command(self):
-        self.claude(f"echo \"$BASH_MAX_TIMEOUT_MS\" >\"{self.root / 'max'}\"\necho '{result()}'")
-        done, _ = self.agent_run()
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "max").read_text(), "7200000\n")
-
-    def test_a_run_keeps_the_users_own_command_limit(self):
-        self.claude(f"echo \"$BASH_MAX_TIMEOUT_MS\" >\"{self.root / 'max'}\"\necho '{result()}'")
-        done, _ = self.agent_run('desk_claude_run "$work" "$stream"', BASH_MAX_TIMEOUT_MS="900000")
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "max").read_text(), "900000\n")
-
-    def test_a_command_given_no_timeout_waits_fifteen_minutes(self):
-        self.claude(f"echo \"$BASH_DEFAULT_TIMEOUT_MS\" >\"{self.root / 'default'}\"\necho '{result()}'")
-        done, _ = self.agent_run()
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "default").read_text(), "900000\n")
-
-    def test_a_run_keeps_the_users_own_default_timeout(self):
-        self.claude(f"echo \"$BASH_DEFAULT_TIMEOUT_MS\" >\"{self.root / 'default'}\"\necho '{result()}'")
-        done, _ = self.agent_run('desk_claude_run "$work" "$stream"', BASH_DEFAULT_TIMEOUT_MS="300000")
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "default").read_text(), "300000\n")

@@ -227,6 +227,15 @@ class ReadTest(BoardCase):
         self.assertEqual(board.read(self.store, REPO, NOW)["slots"],
                          {"agent": 1, "chore": 1, "fix": 0, "check": 2, "benchmark": 2})
 
+    def test_the_slot_overrides_agent_desk_slots_sets_lay_over_the_config(self):
+        checkout = self.folder / "repo"
+        checkout.mkdir()
+        (checkout / ".agent-desk.json").write_text(json.dumps({"slots": {"agent": 3}}))
+        self.store.project(REPO, str(checkout))
+        hold.HOLD.write_text(json.dumps({"state": "running", "slots": {REPO: {"agent": 1, "fix": 4}}}))
+        self.assertEqual(board.read(self.store, REPO, NOW)["slots"],
+                         {"agent": 1, "chore": 1, "fix": 4, "check": 2, "benchmark": 2})
+
     def test_a_running_check_of_a_branch_without_a_review_names_none_and_ended_ones_leave(self):
         running, ended = (self.store.check_queue(REPO, branch, "h1") for branch in ("agent/chore-audit", "agent/x"))
         self.store.check_started(running, "/tmp/1.log")

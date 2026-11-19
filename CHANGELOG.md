@@ -16,6 +16,37 @@ into this file.
 
 The changes since the last release sit in [`changelog.d/`](changelog.d/README.md).
 
+## [0.2.2] - 2026-11-19
+
+### Added
+
+- `agent-desk slots [<owner/repo>] <kind>=<n>...` overrides how many agent, chore, fix, check, or benchmark runs a
+  project runs at once without editing its `.agent-desk.json`, `--reset` drops the overrides, and `agent-desk slots`
+  prints each project's slots with its config's counts and overrides. The dispatcher follows a new count at its next
+  pass, and mode changes keep the overrides. (#513)
+- A run's journal shows what a quiet run waits on: every 5 minutes without a new event from the agent, it logs the
+  tool call still waiting, the background tasks, and the busiest processes under the run. (#518)
+- `agent-desk doctor` fails when git has no `user.name` or `user.email` for the account, which the agents commit
+  with, and prints the `git config --global` commands that set them. The README's prerequisites list the identity.
+  (#525)
+
+### Changed
+
+- With no right panel open, the web page's list and selected card fill a wide window in the proportions they keep
+  beside a right panel, and the card, New Issue form, and Resources page grow past 1280px to fill their panel.
+- A working card in the web page's list leaves off the `agent` chip and still names a `fix` or `check` run.
+- A run's memory claim shrinks within its first 45 minutes, even for kinds of runs that reach their peak late, so a
+  run that uses far less than it claimed stops holding other projects' issues back. (#517)
+- While the weekly usage limit is on, the web page header's usage button shows the limit beside the week's usage, such
+  as `Week 41% / 80%`. (#537)
+- README.md's quickstart turns on the backup timer and says which backups it keeps, says how to read a review from a
+  terminal beside the pane, and its Troubleshooting says how to serve the web page on another port. (#526)
+
+### Fixed
+
+- `agent-desk project rename` and `project remove` start on a held project whose branch check waits for Resume. They
+  refuse only while a check runs, and name each queued check they move or delete. (#524)
+
 ## [0.2.1] - 2026-11-19
 
 ### Fixed
@@ -910,7 +941,8 @@ of its own.
 
 - A run that claims an issue takes `needs-design` off it. (#36)
 
-[Unreleased]: https://github.com/erjand/agent-desk/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/erjand/agent-desk/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/erjand/agent-desk/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/erjand/agent-desk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/erjand/agent-desk/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/erjand/agent-desk/releases/tag/v0.1.0

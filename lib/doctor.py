@@ -2,17 +2,17 @@
 
     python3 doctor.py <agent-desk checkout> [<owner/repo> <main checkout> <current checkout>]
 
-It reports each check as ok, warn, or fail, with a fix under each warning and failure, and exits 1 when any check
-fails. The machine checks cover the commands agent-desk runs, cgroup v2, `agent-desk` on PATH, the Claude Code plugin
-and its skills, that the state folder is private to its owner, that nothing is left of the GitHub API budget queue,
-the GitHub response cache, or the failure write-ups' ledger, the local store's database, the dispatcher, the backup,
-chore, and merge timers, the web page's service, the agentdesk.slice file that caps the runs' memory, lingering, and
-that the weekly usage limit, while on, reads the plan's usage. Given a project, it also checks that its
-.agent-desk.json parses, warns when it sets no `test` command, and checks that ~/.config/agent-desk/projects and the
-store's projects table record its main checkout, and that each of its chores names a skill Claude Code finds. For a
-project whose `host` is `github`, it warns when `gh` can't reach GitHub, which releases and `agent-desk import` need,
-and when GitHub has an open PR from an `agent/*` branch, which the desk never sees. A project is a checkout with a
-.agent-desk.json.
+It reports each check as ok, warn, or fail, with a fix under each warning and failure, and exits 1 when any check fails.
+The machine checks cover the commands agent-desk runs, the git identity the agents commit with, cgroup v2, `agent-desk`
+on PATH, the Claude Code plugin and its skills, that the state folder is private to its owner, that nothing is left of
+the GitHub API budget queue, the GitHub response cache, or the failure write-ups' ledger, the local store's database,
+the dispatcher, the backup, chore, and merge timers, the web page's service, the agentdesk.slice file that caps the
+runs' memory, lingering, and that the weekly usage limit, while on, reads the plan's usage. Given a project, it also
+checks that its .agent-desk.json parses, warns when it sets no `test` command, and checks that
+~/.config/agent-desk/projects and the store's projects table record its main checkout, and that each of its chores names
+a skill Claude Code finds. For a project whose `host` is `github`, it warns when `gh` can't reach GitHub, which releases
+and `agent-desk import` need, and when GitHub has an open PR from an `agent/*` branch, which the desk never sees. A
+project is a checkout with a .agent-desk.json.
 """
 
 import json
@@ -226,7 +226,22 @@ def check_commands():
                                 "log in to a session with a systemd user manager, or enable lingering"))
         else:
             checks.append(Check("ok", command))
+            if command == "git":
+                checks.append(check_git_identity())
     return checks
+
+
+def check_git_identity():
+    """Whether git has a user.name and user.email for the account, which every agent commits its work with. It reads
+    them from `/`, outside any repository, so an identity one project's .git/config sets doesn't count."""
+    values = {key: run("git", "-C", "/", "config", "--get", f"user.{key}")[1] for key in ("name", "email")}
+    missing = [key for key, value in values.items() if not value]
+    if not missing:
+        return Check("ok", f"git commits as {values['name']} <{values['email']}>")
+    examples = {"name": '"Your Name"', "email": "you@example.com"}
+    return Check("fail", f"git has no {' or '.join('user.' + key for key in missing)} for this account, so the "
+                 "agents can't commit their work",
+                 "; ".join(f"git config --global user.{key} {examples[key]}" for key in missing))
 
 
 def check_cgroup():

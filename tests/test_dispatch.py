@@ -30,6 +30,23 @@ class GateTest(DispatchCase):
         self.assertEqual(self.systemd.commands()[-1], ["work-issue", "3"])
         self.assertEqual(self.status(third), "running")
 
+    def test_a_slot_override_below_the_config_holds_a_request_and_starts_it_once_it_rises(self):
+        first, second = (self.request("agent", str(n)) for n in (1, 2))
+        self.dispatcher.tick()
+        # Lowering the count to 1 stops neither run, and a new request waits until the busy count drops below it.
+        self.hold = {"state": "running", "picked": [], "slots": {REPO: {"agent": 1}}}
+        self.dispatcher.tick()
+        self.end(first)
+        third = self.request("agent", "3")
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in (second, third)], ["running", "requested"])
+        self.assertEqual(self.waits(third), ("slot", "a free agent slot"))
+        self.assertIn(f"Run {third} waits: its project's 1 agent slots are busy.", self.said)
+        # Raising it above the config's 2 starts the request at the next pass.
+        self.hold = {"state": "running", "picked": [], "slots": {REPO: {"agent": 3}}}
+        self.dispatcher.tick()
+        self.assertEqual(self.status(third), "running")
+
     def test_a_project_without_slots_takes_the_defaults_and_a_zero_count_turns_a_kind_off(self):
         self.configure({"slots": {"fix": 0}})
         runs = [self.request("agent", str(n)) for n in range(1, 5)]

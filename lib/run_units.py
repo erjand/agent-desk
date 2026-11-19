@@ -36,12 +36,15 @@ STOP_SECONDS = 180
 CARRIED_ENV = ("PATH", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "AGENT_DESK_INSTALLED")
 
 
-def slots_of(config):
-    """The project's `slots` over the defaults."""
+def slots_of(config, override=None):
+    """The project's `slots` over the defaults, and over both the counts `agent-desk slots` set for it, which
+    lib/hold.py's slot_override reads."""
     slots = dict(DEFAULT_SLOTS)
     configured = config.get("slots")
     if isinstance(configured, dict):
         slots.update({key: value for key, value in configured.items() if isinstance(value, int) and value >= 0})
+    slots.update({key: value for key, value in (override or {}).items()
+                  if key in DEFAULT_SLOTS and isinstance(value, int) and not isinstance(value, bool) and value >= 0})
     return slots
 
 

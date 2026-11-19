@@ -61,12 +61,16 @@ MIN_LABEL_RUNS = 3
 HEADROOM = 1.2
 # A run's settle time is SETTLE_FACTOR times the SETTLE_PERCENTILE of the minutes its kind's past runs took to reach their
 # peaks, learned from at least MIN_SETTLE_RUNS timed runs, and lengthened by any of its labels with MIN_LABEL_SETTLE_RUNS
-# of its own. Past it, the run's claim counts as the larger of SHRINK_FACTOR times its peak so far and its peak so far
-# plus SHRINK_SPARE_GB, never more than the claim.
+# of its own, and never longer than MAX_SETTLE_MINUTES. Past it, the run's claim counts as the larger of SHRINK_FACTOR
+# times its peak so far and its peak so far plus SHRINK_SPARE_GB, never more than the claim.
 SETTLE_PERCENTILE = 0.95
 SETTLE_FACTOR = 1.5
 MIN_SETTLE_RUNS = 20
 MIN_LABEL_SETTLE_RUNS = 10
+# Kinds whose runs peak late learn settle times near the run time limit, so their claims would never shrink while a run
+# that used a fraction of its claim holds other projects' runs back. Past the cap, the shrunk claim still leaves room
+# above the peak so far, and agentdesk.slice's MemoryHigh and the pressure gate catch a run that outgrows it.
+MAX_SETTLE_MINUTES = 45
 SHRINK_FACTOR = 1.5
 SHRINK_SPARE_GB = 2.0
 POLL_SECONDS = 15
@@ -139,7 +143,8 @@ def settle(repo, kind, labels, runs):
     """
     The minutes after which a run's claim may shrink: SETTLE_FACTOR times the SETTLE_PERCENTILE of the minutes past
     runs of its kind in the project took to reach their peaks, lengthened by any of its labels with
-    MIN_LABEL_SETTLE_RUNS timed runs of its own. None until the history holds MIN_SETTLE_RUNS timed runs of the kind.
+    MIN_LABEL_SETTLE_RUNS timed runs of its own, and never more than MAX_SETTLE_MINUTES. None until the history holds
+    MIN_SETTLE_RUNS timed runs of the kind.
     """
     timed = [(run_labels, minutes) for run_repo, run_kind, run_labels, _, minutes in runs
              if run_repo == repo and run_kind == kind and minutes is not None]
@@ -150,7 +155,7 @@ def settle(repo, kind, labels, runs):
         tagged = [minutes for run_labels, minutes in timed if label in run_labels]
         if len(tagged) >= MIN_LABEL_SETTLE_RUNS:
             learned = max(learned, percentile(tagged, SETTLE_PERCENTILE))
-    return round(learned * SETTLE_FACTOR, 1)
+    return min(round(learned * SETTLE_FACTOR, 1), MAX_SETTLE_MINUTES)
 
 
 def meminfo_gb(field, meminfo=None):

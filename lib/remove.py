@@ -3,14 +3,16 @@
     python3 remove.py [--dry-run] <owner/repo>
 
 `agent-desk project remove` runs it. It refuses to start unless the project is on Hold, with no run working or
-waiting, no branch check queued or running, and its merge queue empty. Then it takes these steps in order, printing
-each, and stops at the first failure with the step named:
+waiting, no branch check running, and its merge queue empty. A queued branch check, which Hold keeps from starting,
+goes with the project's rows. Then it takes these steps in order, printing each, and stops at the first failure with
+the step named:
 
 1. store: deletes every row with the project in a table of desk.sqlite with a `project` column, and its `projects`
    row, and writes a `project-removed` event naming it, in one transaction.
 2. files: deletes the project's files in the state folder that carry its `<owner>__<repo>` name, as lib/rename.py
    moves them, and the board files the pane once kept in `boards/` under its main checkout's path.
-3. hold: drops the project's mode and Manual picks from hold.json, and its queued chores from chore-repeat.json.
+3. hold: drops the project's mode, slot overrides, and Manual picks from hold.json, and its queued chores from
+   chore-repeat.json.
 4. projects: drops the project's line from ~/.config/agent-desk/projects.
 5. backup: deletes the backup repository's `<owner>/<repo>/` folder with `git rm` and commits it, so the backup's
    history still holds the project.
@@ -117,6 +119,9 @@ class Remove(project_steps.Steps):
         self.refuse(reasons, f"Run `agent-desk hold {self.repo}` first, and wait for the runs, the checks, and the "
                     f"merge queue to finish.{cancel}",
                     ready="On Hold, with no run working or waiting, no check working, and the merge queue empty.")
+        note = project_steps.queued(self.desk, (self.repo,), "the removal deletes each with the project's rows")
+        if note:
+            self.note(note)
 
     def leftovers(self):
         """Whether anything outside the store and the projects file still holds the project, as after a failed run."""
@@ -181,11 +186,11 @@ class Remove(project_steps.Steps):
     def dropped_modes(self, data):
         """Drops the project from hold.json's data, and returns what it dropped."""
         dropped = []
-        for field in ("projects", "before_projects"):
+        for field, named in hold.PROJECT_FIELDS.items():
             modes = data.get(field)
             if isinstance(modes, dict) and self.repo in modes:
                 del modes[self.repo]
-                dropped.append("its mode" if field == "projects" else "its mode before Hold")
+                dropped.append(named)
         picks = [pick for pick in data.get("picked", []) if pick.rpartition("#")[0] != self.repo]
         if picks != data.get("picked", []):
             data["picked"] = picks

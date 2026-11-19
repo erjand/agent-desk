@@ -45,6 +45,7 @@ class RenameCase(unittest.TestCase):
         self.git("-C", str(self.checkout), "remote", "add", "origin", "git@github.com:org/game.git")
         self.projects.write_text(f"other/thing {self.root / 'thing'}\n{OLD} {self.checkout}\n")
         self.hold({"state": "running", "projects": {OLD: "held", "other/thing": "manual"},
+                   "slots": {OLD: {"agent": 1}, "other/thing": {"fix": 0}},
                    "picked": [f"{OLD}#2", "other/thing#2", f"{OLD}-x#3"]})
         self.seed()
 
@@ -161,6 +162,7 @@ class RenameTest(RenameCase):
         self.assertEqual((self.state / "fixes" / "org__game-x.tsv").read_text(), "x\n")
         hold = json.loads((self.state / "hold.json").read_text())
         self.assertEqual(hold["projects"], {NEW: "held", "other/thing": "manual"})
+        self.assertEqual(hold["slots"], {NEW: {"agent": 1}, "other/thing": {"fix": 0}})
         self.assertEqual(hold["picked"], [f"{NEW}#2", "other/thing#2", f"{OLD}-x#3"])
         self.assertEqual(json.loads((self.state / "chore-repeat.json").read_text()),
                          {NEW: {"audit": 2}, "other/thing": {"audit": 1}})
@@ -217,7 +219,7 @@ class RenameTest(RenameCase):
         out, _ = self.rename("--dry-run", OLD, NEW)
         self.assertIn("Would rename org/game to org/game-dev in the store", out)
         self.assertIn("Would move merges/org__game.json to merges/org__game-dev.json.", out)
-        self.assertIn("Would rename its mode, its picks in hold.json.", out)
+        self.assertIn("Would rename its mode, its slot overrides, its picks in hold.json.", out)
         self.assertIn("Would rename its queued chores in chore-repeat.json.", out)
         self.assertIn(f"Would change org/game's line in {self.projects} to org/game-dev.", out)
         self.assertIn("Would point origin of", out)
@@ -239,14 +241,29 @@ class RefusalTest(RenameCase):
         out, _ = self.rename("--dry-run", OLD, NEW)
         self.assertIn("Would refuse now: org/game is on Manual, not Hold.", out)
 
-    def test_it_refuses_while_a_run_works_or_a_check_waits(self):
+    def test_it_refuses_while_a_run_or_a_check_works(self):
         desk = self.store()
         run = desk.request_run(OLD, "agent", "1")
         desk.run_started(run, "agent-desk-agent-org-game-1-2.service")
-        desk.check_queue(OLD, "agent/issue-1", "b" * 40)
+        check = desk.check_queue(OLD, "agent/issue-1", "b" * 40)
+        desk.check_started(check, str(self.state / "checks" / "org__game" / f"{check}.log"))
         _, err = self.rename(OLD, NEW, status=1)
         self.assertIn(f"1 run still working (agent {run})", err)
-        self.assertIn("1 branch check queued or running (agent/issue-1)", err)
+        self.assertIn("1 branch check running (agent/issue-1)", err)
+
+    def test_a_check_hold_keeps_queued_moves_to_the_new_name(self):
+        desk = self.store()
+        check = desk.check_queue(OLD, "agent/issue-1", "b" * 40)
+        desk.check_waits(check, "mode", "Resume")
+        out, _ = self.rename("--dry-run", OLD, NEW)
+        self.assertNotIn("Would refuse now", out)
+        out, _ = self.rename(OLD, NEW)
+        self.assertIn("1 branch check queued (agent/issue-1), which Hold keeps from starting, so the rename moves each "
+                      "to the new name, where it starts on Resume.", out)
+        self.assertEqual(desk.checks(("queued",), project=OLD), [])
+        [row] = desk.checks(("queued",), project=NEW)
+        self.assertEqual((row["id"], row["branch"], row["head_sha"], row["wait_gate"], row["log_path"]),
+                         (check, "agent/issue-1", "b" * 40, "mode", None))
 
     def test_it_refuses_with_a_merge_queue(self):
         (self.state / "merges" / "org__game.json").write_text(json.dumps({"queue": [{"pr": 3}]}))

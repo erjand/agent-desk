@@ -32,8 +32,8 @@ function overLimit(usage) {
 
 /**
  * What the header's button reads, its tone for the CSS, and its tooltip: Usage Limit while the limit is off, the
- * week's usage while it is on, in the Hold amber at or over the limit, and that it can't read usage while the reading
- * doesn't count.
+ * week's usage and the limit while it is on, such as `Week 41% / 80%`, in the Hold amber at or over the limit, and that
+ * it can't read usage while the reading doesn't count.
  */
 export function usageView(usage) {
   if (!usage?.on) {
@@ -47,12 +47,13 @@ export function usageView(usage) {
   }
   const resets = usage.resetsAt ? weekAt(usage.resetsAt) : null
   const reset = resets ? `; resets ${resets}` : ''
+  const text = `Week ${shown(usage.percent)} / ${usage.limit}%`
   if (overLimit(usage)) {
-    return { text: `Week ${shown(usage.percent)}`, tone: 'over',
+    return { text, tone: 'over',
       tip: `Weekly plan usage is ${shown(usage.percent)}, at the ${usage.limit}% limit, so new agent, chore, and fix `
         + `runs wait${reset}` }
   }
-  return { text: `Week ${shown(usage.percent)}`, tone: 'under',
+  return { text, tone: 'under',
     tip: `Weekly plan usage is ${shown(usage.percent)}, under the ${usage.limit}% limit${reset}` }
 }
 

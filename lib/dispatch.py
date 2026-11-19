@@ -700,7 +700,7 @@ class Dispatcher(WakeMixin):
         wait = self.held(request) or self.waits(request)
         if wait:
             return wait
-        slots = slots_of(config)
+        slots = slots_of(config, hold.slot_override(self.mode(), request["project"]))
         same = {run: one for run, one in self.running.items() if one["project"] == request["project"]}
         kind = request["kind"]
         if sum(one["kind"] == kind for one in same.values()) >= slots[kind]:

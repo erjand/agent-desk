@@ -55,6 +55,7 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
 | `unpick <n> [<owner/repo>]`, `unpick --all [<owner/repo>]` | Drops issue n's Manual pick, in the current project or the one named, so its run waits for Start again, and exits 1 when the issue has no pick; with `--all`, drops every project's picks, or the one named, as [Auto, Manual, and Hold](#auto-manual-and-hold) describes |
 | `pause <n>`, `unpause <n>` [`-R <owner/repo>`] | Stops the agent run on issue n and puts the issue on hold, or queues an issue on hold again at the top of the start order, as [the dispatcher](#the-dispatcher) describes |
 | `resume` | Goes back to Auto or Manual, whichever the desk was in before Hold |
+| `slots [<owner/repo>] [<kind>=<n>... \| --reset [<kind>...]]` | Prints each project's [slots](#the-config), or the one named, with each kind's count, its config's, and whether an override sets it; with `<kind>=<n>`, overrides the current project's or the named one's slots of each kind; with `--reset`, drops its overrides, or those of the kinds named |
 | `usage-limit [<0-100> \| on \| off]` | Shows the [weekly usage limit](#the-weekly-usage-limit) and the last reading of the plan's usage, sets the limit's percentage and turns it on, or turns it on or off, for every project on the machine |
 | `shots [--comment] <review> <picture>...` | Saves screenshots for a review in the state folder and prints the Markdown that shows them on the web page; with `--comment`, adds it to the review as a comment |
 | `gpu [--exclusive] -- <command> [args...]` | Runs a command while it holds one of the machine's [GPU slots](#gpu-slots), or with `--exclusive` all of them, and exits with its status |
@@ -132,6 +133,12 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
 - `slots` caps how many runs of each kind the [dispatcher](#the-dispatcher) runs at once in the project, such as
   `{"agent": 3, "chore": 1, "fix": 1, "check": 2}`, which are also the defaults. `benchmark`, by default 2, caps how
   many of the agent runs may be on `benchmark` issues. A count of 0 starts none of that kind.
+  `agent-desk slots <owner/repo> agent=1` overrides a kind's count on this machine without editing the config, above
+  or below it, and `lib/hold.py` keeps the override in `hold.json` under `slots`, where mode changes and Resume leave
+  it. The dispatcher, the [branch checks](#branch-checks), and the board read the override at the next pass. A lower
+  count stops no run: the runs past it keep working, and the kind starts none until its busy count drops below the
+  count. A count equal to the config's drops that kind's override, and `agent-desk slots --reset` drops them all. The
+  memory gate still holds a run the machine lacks memory for.
 - `worktree.seeds` lists paths copied from the main checkout into each new worktree, such as caches and generated or
   downloaded folders git ignores. `worktree.setup` runs in the new worktree.
 - `sync.run` runs in the main checkout after the merge queue fast-forwards it, unless a program in `sync.skipWhile`
@@ -188,6 +195,11 @@ its own. The README's [Install](../README.md#install) gives the commands.
 The repository's `.claude-plugin/marketplace.json` lists the `agent-desk` plugin with its source at `./inbox`, and the
 plugin's `inbox/.claude-plugin/plugin.json` carries the release's version. Keep the plugin and the clone at the same
 release: `agent-desk doctor` warns when the plugin's version differs from the clone's `VERSION`.
+
+The agents commit their work with the account's git identity. `agent-desk doctor` reads `user.name` and `user.email`
+outside any repository, from the account's and the system's git config, and fails in its Machine section when
+either is empty, with the `git config --global` commands that set them. An identity that only one project's
+`.git/config` sets doesn't count, since the check runs before doctor knows the project.
 
 `./install.sh` links `~/.local/bin/agent-desk` to the checkout's `bin/agent-desk`, moving anything else there into
 `~/.local/state/agent-desk/backups/`, and says so when `~/.local/bin` is missing from PATH. When `~/.claude/settings.json`
@@ -326,6 +338,21 @@ back to a review, a parent check, or a discussion that stopped early says so the
 a chore that stopped early asks for no queued next run. Runs forbid scheduled wakeups, cron jobs, and Monitors, which
 would keep the agent waiting past its last turn the same way.
 
+A run's journal shows what a quiet run waits on. While `claude -p` writes no stream event for 5 minutes, as when the
+agent waits on a long foreground command, `lib/agent_run.py` logs a beat line, and another every 5 minutes the silence
+lasts:
+
+```text
+Still in Bash for 12 min: timeout 7000 bash -c 'until grep -q … · background: just bank-fill algebra-1 … · busy: claude -p ×3 (85% CPU), python -m quiz.bank_fill (4%)
+```
+
+The line names the newest tool call still waiting on its result and how long it has run, each background task still
+running, and the three commands under the run that used the most CPU since the line before, grouped by command, with
+`python -m <module>` and `uv run …` named by what they run, or `busy: nothing`. A line that starts `Quiet for` means no
+tool call is waiting. Each beat also goes, as a JSON line of `type` `beat`, a UTC `timestamp`, and its `text`, to
+`~/.local/state/agent-desk/beats/<session id>`, which stays with the session. `AGENT_DESK_BEAT` sets the interval in
+seconds.
+
 An agent can wait on one command in the foreground for up to 2 hours, such as a long benchmark or a full test suite.
 Claude Code moves a command to the background when it reaches its timeout, and caps that timeout at 10 minutes unless
 `BASH_MAX_TIMEOUT_MS` raises it, so `lib/common.sh` starts every run's `claude -p` with `BASH_MAX_TIMEOUT_MS` set to
@@ -427,7 +454,9 @@ before.
 Hold lets the agent, chore, and fix runs working now finish and starts no new ones: each new request waits at the
 dispatcher, before it takes a slot or claims anything, and starts on Resume, while the chore timer starts nothing.
 A [branch check](#branch-checks) of a branch a working run works still starts on Hold, in the project's `check` slots,
-so a run that waits for its check can finish; a check of any other branch waits for Resume.
+so a run that waits for its check can finish; a check of any other branch waits for Resume. A check that waits so
+holds back neither [a rename](#renaming-a-project) nor [a removal](#removing-a-project), which wait only for running
+checks.
 Each queued issue and request nobody picked shows Start on Hold too. Start then picks and starts nothing, and an
 issue's row reads `picked; starts on Resume`, and a request's row `starts on Resume`, so Resume into Manual starts what
 you picked. Resume goes back to Auto or Manual, whichever the desk was in, which starts the requests held meanwhile.
@@ -449,8 +478,8 @@ agent-desk usage-limit off    # turn it off, keeping 80% for `on`
 ```
 
 The web page's header shows the same setting beside the mode buttons. While the limit is on, it reads the week's
-usage from the last reading, such as `Week 81%`, rounded down, and takes the Hold button's amber at or over the limit,
-with a tooltip that names the limit and when the week resets. While the reading doesn't count, as after a failed
+usage from the last reading, rounded down, and the limit, such as `Week 41% / 80%`, and takes the Hold button's amber at
+or over the limit, with a tooltip that names the limit and when the week resets. While the reading doesn't count, as after a failed
 fetch, it reads `Week: can't read`, in the error tone, and its tooltip says why. While the limit is off, a small
 Usage Limit button takes its place. Either opens a popover with an on/off switch and the percentage, which waits while
 the limit is off and offers 80% before one was ever set. Changing either saves it at once through `lib/usage.py`, as
@@ -774,9 +803,11 @@ Each agent, chore, and fix run checks the machine itself before its heavy work. 
    not the settle time.
 5. Once the history holds 20 runs of the same kind in the project with their minutes to peak, a run gets a settle
    time: the 95th percentile of those minutes, times 1.5, lengthened by any of the run's labels with 10 such runs of
-   its own. Past its settle time, nearly every earlier run of its kind had reached its peak, so the run's claim counts
-   as the larger of 1.5 times its peak so far and its peak so far plus 2 GB, and never more than it claimed. A run
-   that spiked and fell back keeps its spike in that peak. As before, the memory the run holds counts against the
+   its own, and never more than 45 minutes. Past it, nearly every earlier run of its kind had reached its peak, or
+   the kind peaks so late that a longer wait would keep the claim in full for most of the run. The run's claim then
+   counts as the larger of 1.5 times its peak so far and its peak so far plus 2 GB, and never more than it claimed. A
+   run that spiked and fell back keeps its spike in that peak, and `agentdesk.slice`'s `MemoryHigh` and the pressure
+   gate hold back a run that grows past its shrunk claim. As before, the memory the run holds counts against the
    memory available, and the claim counts only for the rest. Before the settle time, or without one, the claim counts
    in full. The run's log says when its claim may shrink, and the dispatcher's log says when it does, with the claim
    before and after, the peak so far, and the settle time. `resources.shrinkClaims: false` turns this off for a
@@ -1757,17 +1788,18 @@ its `pre-local-desk` tag and install the runners with that version's `agent-desk
 
 `agent-desk project rename <owner/repo> <new owner/repo>` moves a project to a new name, such as after a rename on
 GitHub, keeping its issues, reviews, comments, runs, checks, and state. `lib/rename.py` refuses to start unless the
-project is on Hold, with no run working, no branch check queued or running, and its merge queue empty, and refuses when
-the new name belongs to another project in the store or in `~/.config/agent-desk/projects`. Then it takes these steps in
-order, printing each, and stops at the first failure with the step named:
+project is on Hold, with no run working, no branch check running, and its merge queue empty, and refuses when the new
+name belongs to another project in the store or in `~/.config/agent-desk/projects`. A queued check, which Hold keeps
+from starting once no run works, moves with the project and starts under the new name on Resume; the check step names
+each one. Then it takes these steps in order, printing each, and stops at the first failure with the step named:
 
 1. **store**: rewrites the name in every table with a `project` column and in `projects.slug`, moves each
    `checks.log_path` and `assets.path` in the project's `<owner>__<repo>` folder to the new folder, and writes a
    `project-renamed` event naming both names, in one `BEGIN IMMEDIATE` transaction.
 2. **files**: moves the project's `<owner>__<repo>` folders in `chores/`, `checks/`, and `assets/`, and its files and
    locks in `fixes/`, `merges/`, and `pushes/`.
-3. **hold**: renames the project's mode and its Manual picks in `hold.json`, and its queued chores in
-   `chore-repeat.json`.
+3. **hold**: renames the project's mode, its slot overrides, and its Manual picks in `hold.json`, and its queued
+   chores in `chore-repeat.json`.
 4. **projects**: changes the project's line in `~/.config/agent-desk/projects`.
 5. **remote**: points the main checkout's `origin` at the new name with `git remote set-url` when it is a host
    address naming the old one, so the checkout and its worktrees resolve to the new name at once. An `origin` that is
@@ -1789,16 +1821,17 @@ name before GitHub has it fails to fetch and push. Run `agent-desk resume` once 
 
 `agent-desk project remove <owner/repo>` takes a project off this machine's desk, so it leaves the dispatcher, the
 timers, the pane, and the web page. `lib/remove.py` refuses to start unless the project is on Hold, with no run working
-or waiting, no branch check queued or running, and its merge queue empty, and names each reason with the commands that
-clear it. Then it takes these steps in order, printing each, and stops at the first failure with the step named:
+or waiting, no branch check running, and its merge queue empty, and names each reason with the commands that clear
+it. A queued check, which Hold keeps from starting once no run works, goes with the project's rows; the check step
+names each one. Then it takes these steps in order, printing each, and stops at the first failure with the step named:
 
 1. **store**: deletes every row with the project in a table with a `project` column, and its `projects` row, and
    writes a `project-removed` event, which names no project so every reader reads every board again, in one
    `BEGIN IMMEDIATE` transaction.
 2. **files**: deletes the project's `<owner>__<repo>` folders and files in the state folder, the ones a rename moves,
    and the files under its main checkout's path in `boards/`, where the pane once kept its board.
-3. **hold**: drops the project's mode and its Manual picks from `hold.json`, and its queued chores from
-   `chore-repeat.json`.
+3. **hold**: drops the project's mode, its slot overrides, and its Manual picks from `hold.json`, and its queued
+   chores from `chore-repeat.json`.
 4. **projects**: drops the project's line from `~/.config/agent-desk/projects`.
 5. **backup**: deletes the backup repository's `<owner>/<repo>/` folder with `git rm` and commits it, so the backup's
    history still holds the project.
@@ -1835,8 +1868,8 @@ it asks GitHub nothing. It reads the store once and the files the timers saved, 
   the dispatcher's answer replaces the comment with the run's request, or with a note for a branch no agent works.
 - `checks`: the [branch checks](#branch-checks) running now, each with its branch, its review's number or null, the
   head it checks, and when it started.
-- `slots`: the project's slots of each kind, its config's [`slots`](#the-config) over the defaults, as the
-  [dispatcher](#the-dispatcher) reads them.
+- `slots`: the project's slots of each kind, its config's [`slots`](#the-config) over the defaults and the overrides
+  `agent-desk slots` sets over both, as the [dispatcher](#the-dispatcher) reads them.
 - `queue`: the [merge queue](#merge-queue) and the reviews that left it, as the last `agent-desk merges` tick saved
   it, with `ahead` and `push` from the [push queue](#pushing-main) when the store knows the project's main checkout.
 - `fixes`: what each conflicting PR's [automatic fix](#conflict-fixes) waits on, as the last `agent-desk fixes` status
@@ -1894,7 +1927,7 @@ so a request held by the mode or by other issues never takes a slot:
    comment on an issue already worked goes on past its blockers.
 5. **Serial groups.** For an agent request on an issue labelled `serial` or `serial:<group>`, no other issue in one of
    its groups is `in-progress` or works in a running agent run, by `lib/serial_slots.py`'s `holder` rule.
-6. **A slot.** The project runs fewer runs of the kind than its [`slots`](#the-config) allow, and for a `--benchmark`
+6. **A slot.** The project runs fewer runs of the kind than its [`slots`](#the-config) and their overrides allow, and for a `--benchmark`
    request fewer benchmark runs than `slots.benchmark`. The `check` slots hold the [branch checks](#branch-checks).
 7. **The target.** No other run holds the same target. An agent run on issue or PR n and a fix of PR n share one
    target, `agent-<n>`, and a chore holds `chores-<skill>`. A target's later

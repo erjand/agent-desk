@@ -279,7 +279,7 @@ test('the usage limit sits beside the mode buttons, and reads and acts the same 
       expanded: button.props['aria-expanded'], popup: button.props['aria-haspopup'] }
   }
   const all = control()
-  assert.deepEqual(all, { text: 'Week 81%', class: 'usage-button over',
+  assert.deepEqual(all, { text: 'Week 81% / 80%', class: 'usage-button over',
     tip: 'Weekly plan usage is 81%, at the 80% limit, so new agent, chore, and fix runs wait', expanded: 'false',
     popup: 'dialog' })
   ui.tab = 'game'

@@ -7,7 +7,8 @@ Store.board reads from the local store: the open issues with their workflow stat
 sub-issues, the open reviews with their checks and whether they merge with their bases, the newest merges, and the
 runs, each that waits with the gate that holds it and why, with `checks`, the branch checks running now,
 `waitingChecks`, the queued branch checks the dispatcher holds with the gate and why, and `slots`, the project's slots of
-each kind as lib/run_units.py's slots_of reads them from its `.agent-desk.json`. Beside those it prints, each from a file another command saved:
+each kind as lib/run_units.py's slots_of reads them from its `.agent-desk.json` and the overrides
+`agent-desk slots` sets. Beside those it prints, each from a file another command saved:
 
 - `queue`: the merge queue and the reviews that left it, as the last `agent-desk merges` tick or change saved it,
   with `ahead`, how many commits main holds that origin's main lacks, `push`, the push queue's state, and
@@ -116,7 +117,8 @@ def read(desk, repo, now=None):
     checkout = desk.project_path(repo)
     origin = pushes.shown(checkout, repo, now) if checkout else None
     return {**desk.board(repo, now),
-            "slots": run_units.slots_of(config.read(checkout) if checkout else {}),
+            "slots": run_units.slots_of(config.read(checkout) if checkout else {},
+                                        hold.slot_override(hold.status(), repo)),
             "checks": running_checks(desk, repo), "waitingChecks": waiting_checks(desk, repo),
             "queue": merges.shown(merges.load(merges.state_path(repo), int(now)), origin),
             "fixes": fixes.saved_plan(repo), "hold": hold_status(), "chores": saved_chores(repo),

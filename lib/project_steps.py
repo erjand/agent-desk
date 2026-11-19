@@ -71,7 +71,9 @@ def listed():
 def refusals(desk, names, held=None):
     """
     Why a change to a project can't start now, read for each of `names`, the names a rerun may find the project under:
-    its mode, unless `held` says whether it counts as on Hold, its working runs and checks, and its merge queue.
+    its mode, unless `held` says whether it counts as on Hold, its working runs and running checks, and its merge
+    queue. A queued check doesn't count: on Hold it starts only for a branch a working run works, and a working run
+    refuses already, so the change carries it, as `queued` says.
     """
     reasons = []
     modes = hold.status()
@@ -84,9 +86,9 @@ def refusals(desk, names, held=None):
     if working:
         reasons.append(f"{cutover.plural(len(working), 'run')} still working ("
                        + ", ".join(f"{run['workflow']} {run['run']}" for run in working) + ")")
-    checking = [row for name in names for row in desk.checks(("queued", "running"), project=name)]
+    checking = [row for name in names for row in desk.checks(("running",), project=name)]
     if checking:
-        reasons.append(f"{cutover.plural(len(checking), 'branch check')} queued or running ("
+        reasons.append(f"{cutover.plural(len(checking), 'branch check')} running ("
                        + ", ".join(row["branch"] for row in checking) + ")")
     for name in names:
         queue = merges.load(merges.state_path(name), time.time())
@@ -94,6 +96,18 @@ def refusals(desk, names, held=None):
             reasons.append("the merge queue holds " + (", ".join(f"#{one['pr']}" for one in queue["queue"])
                                                        or "a batch under test"))
     return reasons
+
+
+def queued(desk, names, fate):
+    """
+    A note on the project's queued branch checks, which wait on Hold and don't hold the change back, ending in `fate`,
+    what the change does with them, or None without one.
+    """
+    rows = [row for name in names for row in desk.checks(("queued",), project=name)]
+    if not rows:
+        return None
+    return (f"{cutover.plural(len(rows), 'branch check')} queued (" + ", ".join(row["branch"] for row in rows)
+            + f"), which Hold keeps from starting, so {fate}.")
 
 
 class Steps:
