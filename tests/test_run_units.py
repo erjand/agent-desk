@@ -17,10 +17,29 @@ import run_units  # noqa: E402
 class UnitCommandTest(unittest.TestCase):
     def command(self):
         return run_units.unit_command("agent-desk-agent-org-game-7-1.service", "a run", "/work/game", 180, 12,
-                                      "handler", {"GH_REPO": "org/game"}, ["agent-desk", "work-issue", "7"])
+                                      "handler", {"GH_REPO": "org/game", "TMPDIR": "/elsewhere"},
+                                      ["agent-desk", "work-issue", "7"], run_units.tmp_folder("run", 1))
 
     def properties(self, args):
         return [args[i + 1] for i, arg in enumerate(args) if arg == "-p"]
+
+    def env(self, args):
+        return dict(args[i + 1].split("=", 1) for i, arg in enumerate(args) if arg == "--setenv")
+
+    def test_the_unit_has_its_own_short_temp_folder_over_the_projects_env(self):
+        env = self.env(self.command())
+        self.assertEqual(env["TMPDIR"], "/tmp/ad-run-1")
+        self.assertEqual(env["GH_REPO"], "org/game")
+        # A project's Postgres test may put its socket two levels inside, and a socket's path stops at 107 bytes.
+        socket = Path(run_units.tmp_folder("check", 9_999_999), "pg-abcdefgh", ".s.PGSQL.65535")
+        self.assertLess(len(str(socket)), 108)
+
+    def test_the_unit_makes_its_temp_folder_before_its_command_and_removes_it_after_its_handler(self):
+        properties = self.properties(self.command())
+        self.assertIn('ExecStartPre=mkdir -p -m 700 "/tmp/ad-run-1"', properties)
+        stops = [p.removeprefix("ExecStopPost=") for p in properties if p.startswith("ExecStopPost=")]
+        # The `-` keeps a failed handler from making systemd skip the removal.
+        self.assertEqual(stops, ["-handler", 'rm -rf "/tmp/ad-run-1"'])
 
     def test_the_unit_runs_in_the_slice(self):
         args = self.command()

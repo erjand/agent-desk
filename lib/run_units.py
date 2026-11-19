@@ -34,6 +34,9 @@ STOP_SECONDS = 180
 # The dispatcher's own environment that a unit carries over, so a desk with its own state folder keeps it, and a run of
 # the installed checkout may migrate the store.
 CARRIED_ENV = ("PATH", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "AGENT_DESK_INSTALLED")
+# Where each unit's own temp folder goes. The path stays short: a project's tests may put a Unix socket two levels
+# inside it, and a socket's path stops at 107 bytes.
+TMP_ROOT = Path("/tmp")
 
 
 def slots_of(config, override=None):
@@ -91,15 +94,24 @@ def slice_text():
                       f"MemoryHigh={slice_memory_high()}", *WEIGHTS, ""])
 
 
-def unit_command(unit, description, checkout, minutes, high, handler, env, command):
+def tmp_folder(kind, number):
+    """The temp folder of a `run` or `check` unit, such as /tmp/ad-run-12."""
+    return TMP_ROOT / f"ad-{kind}-{number}"
+
+
+def unit_command(unit, description, checkout, minutes, high, handler, env, command, tmp):
     """The systemd-run command that starts a unit in the slice with its limit, priority, memory ceiling, exit handler,
-    and environment."""
+    environment, and its own temp folder `tmp` as TMPDIR. The unit makes the folder before its command starts and
+    removes it after the handler, however the unit ends. The handler's leading `-` lets the removal run when the
+    handler fails, since systemd skips the commands after a failed one."""
     args = ["systemd-run", "--user", "--unit", unit, "--slice", SLICE, "--collect", "--quiet", "--description",
             description,
             "--working-directory", str(checkout), "-p", f"RuntimeMaxSec={minutes}min"]
-    for setting in (*PRIORITY, f"MemoryHigh={high}G", f"TimeoutStopSec={STOP_SECONDS}", f"ExecStopPost={handler}"):
+    for setting in (*PRIORITY, f"MemoryHigh={high}G", f"TimeoutStopSec={STOP_SECONDS}",
+                    f"ExecStartPre=mkdir -p -m 700 {quoted(tmp)}", f"ExecStopPost=-{handler}",
+                    f"ExecStopPost=rm -rf {quoted(tmp)}"):
         args += ["-p", setting]
-    for name, value in env.items():
+    for name, value in {**env, "TMPDIR": str(tmp)}.items():
         args += ["--setenv", f"{name}={value}"]
     return args + ["--", *map(str, command)]
 

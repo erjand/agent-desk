@@ -1,6 +1,6 @@
 // Run with: node --test web/
 import assert from 'node:assert/strict'
-import { mkdtempSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -13,6 +13,7 @@ import { choreReviews, hashedColor, labelColors, lastEvent, reviewCosts, storedA
 test('a store that can\'t be read logs the first error of a streak, names it until it reads, and reopens when replaced',
   t => {
   const folder = mkdtempSync(join(tmpdir(), 'agent-desk-store-'))
+  t.after(() => rmSync(folder, { recursive: true, force: true }))
   const path = join(folder, 'desk.sqlite')
   const logged = t.mock.method(console, 'error', () => undefined)
   useStore(path)

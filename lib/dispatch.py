@@ -127,7 +127,7 @@ from dispatch_wake import NOTE_MARK, WakeMixin  # noqa: E402
 from run_control import cancel_run, chore_runs, pause_issue, stop_runs, unpause_issue, unqueue_issue  # noqa: E402
 from run_end import stopped  # noqa: E402
 from run_units import (CARRIED_ENV, LIB, PRIORITY, SLICE, checkout_of, limit_minutes, quoted, run_env,  # noqa: E402
-                       slots_of, systemd, unit_command)
+                       slots_of, systemd, tmp_folder, unit_command)
 from store_runs import labelled  # noqa: E402
 
 KINDS = ("agent", "chore", "fix", "check")
@@ -819,7 +819,7 @@ class Dispatcher(WakeMixin):
 
     def unit_args(self, request, unit, checkout, config, minutes):
         """The systemd-run command that starts a run under its limit of `minutes`, with its priority, memory ceiling,
-        environment, and exit handler."""
+        environment, exit handler, and temp folder."""
         kind = request["kind"]
         high = memory.default_gb(MEMORY_HIGH[kind])
         handler = " ".join(quoted(part) for part in (sys.executable, "-B", self.desk_lib / "dispatch.py", "stopped"))
@@ -829,7 +829,8 @@ class Dispatcher(WakeMixin):
         env.update({"AGENT_DESK_RUN": str(request["id"]), "AGENT_DESK_UNIT": unit, "GH_REPO": request["project"]})
         return unit_command(unit, f"agent-desk {kind} run {request['target']} in {request['project']}", checkout,
                             minutes, high, handler, env,
-                            [self.desk_lib.parent / "bin" / "agent-desk", *command_of(request)])
+                            [self.desk_lib.parent / "bin" / "agent-desk", *command_of(request)],
+                            tmp_folder("run", request["id"]))
 
     def serve(self):
         self.rebuild()

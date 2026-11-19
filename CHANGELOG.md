@@ -16,6 +16,18 @@ into this file.
 
 The changes since the last release sit in [`changelog.d/`](changelog.d/README.md).
 
+## [0.2.3] - 2026-11-19
+
+### Fixed
+
+- Each run and branch check keeps its temp files in its own folder under `/tmp`, which its unit removes when it ends,
+  even after a timeout, a stop, or a crash, so leftovers no longer fill `/tmp`'s memory. The web tests remove the
+  folders they make. (#527)
+- The `resource-report` skill sizes `/tmp` when it holds over 100,000 entries, groups leftovers by name with their
+  random suffix removed so a thousand temp folders show as one row, checks a folder's newest file with a `find` that
+  works in Claude Code's shell, and names how much of zram's swap the processes and the tmpfs each hold. (#528)
+- The Python tests pass in the public repository, which leaves out agent-desk's own `.agent-desk.json`. (#543)
+
 ## [0.2.2] - 2026-11-19
 
 ### Added
@@ -941,7 +953,8 @@ of its own.
 
 - A run that claims an issue takes `needs-design` off it. (#36)
 
-[Unreleased]: https://github.com/erjand/agent-desk/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/erjand/agent-desk/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/erjand/agent-desk/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/erjand/agent-desk/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/erjand/agent-desk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/erjand/agent-desk/compare/v0.1.0...v0.2.0

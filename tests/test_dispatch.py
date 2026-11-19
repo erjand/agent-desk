@@ -312,6 +312,7 @@ class UnitTest(DispatchCase):
         self.assertEqual(env["REPLY_PR"], "14")
         self.assertEqual(env["EVENT"], "issue_comment")
         self.assertEqual(env["GODOT"], f"{Path.home()}/bin/godot")
+        self.assertEqual(env["TMPDIR"], f"/tmp/ad-run-{run}")
         args = self.systemd.started[0]
         self.assertEqual(args[args.index("--working-directory") + 1], str(self.checkout))
         self.assertTrue(args[args.index("--") + 1].endswith("/bin/agent-desk"))

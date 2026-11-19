@@ -13,7 +13,7 @@ import checks
 import hold
 import memory
 from config import read as read_config
-from run_units import CARRIED_ENV, checkout_of, projects, quoted, run_env, slots_of, unit_command
+from run_units import CARRIED_ENV, checkout_of, projects, quoted, run_env, slots_of, tmp_folder, unit_command
 
 # How long a branch's head stands still before its check starts, unless the run working the branch ends first.
 SETTLE_SECONDS = 60
@@ -201,7 +201,7 @@ class BranchWatch:
         done = self.host.systemd(unit_command(
             unit, f"agent-desk check of {row['branch']} at {row['head_sha'][:12]} in {project}", checkout,
             checks.test_minutes(config), memory.default_gb("agentMemoryHigh"), handler, env,
-            [sys.executable, "-B", script, "run", check, checkout]))
+            [sys.executable, "-B", script, "run", check, checkout], tmp_folder("check", check)))
         if done.returncode != 0:
             self.host.say(f"Check {check} failed to start: {(done.stderr or done.stdout).strip()}")
             self.desk.check_ended(check, "failed")

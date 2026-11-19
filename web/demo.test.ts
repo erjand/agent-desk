@@ -1,17 +1,24 @@
 // Run with: node --test web/
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { type TestContext, test } from 'node:test'
 
 import { buildDemo, DEMO_PROJECTS } from './demo.ts'
 
 const DESK = join(import.meta.dirname, '..', 'bin', 'agent-desk')
 
-test('the demo lists only its made-up projects, and each one\'s board reads cards from the demo\'s own store', () => {
-  const root = join(mkdtempSync(join(tmpdir(), 'agent-desk-demo-test-')), 'demo')
+/** A new temporary folder, removed when the test `t` ends. */
+function scratch(t: TestContext): string {
+  const folder = mkdtempSync(join(tmpdir(), 'agent-desk-demo-test-'))
+  t.after(() => rmSync(folder, { recursive: true, force: true }))
+  return folder
+}
+
+test('the demo lists only its made-up projects, and each one\'s board reads cards from the demo\'s own store', t => {
+  const root = join(scratch(t), 'demo')
   const { config, state } = buildDemo(root)
   const listed = readFileSync(join(config, 'agent-desk', 'projects'), 'utf8').trim().split('\n').map(line => {
     const [repo = '', path = ''] = line.split(' ')
@@ -36,8 +43,8 @@ test('the demo lists only its made-up projects, and each one\'s board reads card
   assert.equal(boards[0]?.merged.length, 1)
 })
 
-test('the demo builds only in an empty or new folder', () => {
-  const root = mkdtempSync(join(tmpdir(), 'agent-desk-demo-test-'))
+test('the demo builds only in an empty or new folder', t => {
+  const root = scratch(t)
   writeFileSync(join(root, 'notes.txt'), 'mine')
   assert.throws(() => buildDemo(root), /isn't empty/)
 })

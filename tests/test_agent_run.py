@@ -51,6 +51,11 @@ class AgentRunTest(unittest.TestCase):
         self.args_log = self.root / "claude.args"
         self.child_pid = self.root / "child.pid"
         self.stream = self.root / "stream"
+        # The project's main checkout, so common.sh never reads the config of the checkout the tests run from, which
+        # the public repository leaves out.
+        self.checkout = self.root / "checkout"
+        self.checkout.mkdir()
+        (self.checkout / ".agent-desk.json").write_text("{}")
         self.addCleanup(self.end_child)
 
     def end_child(self):
@@ -76,7 +81,7 @@ class AgentRunTest(unittest.TestCase):
         long it took."""
         env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(self.root / "state"),
                "AGENT_DESK_RESULT_GRACE": str(RESULT_GRACE), "AGENT_DESK_KILL_GRACE": str(KILL_GRACE),
-               "AGENT_DESK_BEAT": str(BEAT),
+               "AGENT_DESK_BEAT": str(BEAT), "AGENT_DESK_CHECKOUT": str(self.checkout), "GH_REPO": "o/r",
                "work": str(self.work), "stream": str(self.stream)}
         env.pop("BASH_MAX_TIMEOUT_MS", None)
         env.pop("BASH_DEFAULT_TIMEOUT_MS", None)
@@ -129,7 +134,8 @@ class AgentRunTest(unittest.TestCase):
             if written is not None:
                 tasks.write_text(written)
             done = subprocess.run(["bash", "-c", f'source "{LIB}/common.sh"; desk_left_task "$0" {status}',
-                                   str(self.stream)], capture_output=True, text=True, timeout=10)
+                                   str(self.stream)], env={**os.environ, "DESK_HELPERS_ONLY": "1"},
+                                  capture_output=True, text=True, timeout=10)
             self.assertEqual((done.returncode, done.stdout), (0, expected), done.stderr)
             self.assertFalse(tasks.exists())
 

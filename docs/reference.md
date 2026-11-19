@@ -2021,6 +2021,11 @@ carries:
 - `AGENT_DESK_RUN` set to the run's id, `AGENT_DESK_UNIT` to the unit's name, `GH_REPO` to the project, the
   dispatcher's `PATH`, and the project's `env`. The run's notes name the unit and the
   `journalctl --user -u <unit>` command that prints its log.
+- `TMPDIR` set to the run's own temp folder, `/tmp/ad-run-<id>`, over any the project's `env` sets, so the run's
+  scripts, its agent's shell, and the tests it runs put their temp files there. An `ExecStartPre` makes the folder,
+  and a second `ExecStopPost`, after the handler, removes it however the run ends: a normal end, a timeout, a stop by
+  hand, or a crash. The path stays short because a project's tests may put a Unix socket two levels inside it, and a
+  socket's path stops at 107 bytes.
 - An `ExecStopPost` handler, `lib/dispatch.py stopped`, that records the run's end in `runs` as `succeeded`,
   `stopped` for status 75, `failed`, `cancelled`, or `timed-out`, with its exit status. For an agent run on an issue
   that failed, was cancelled, or timed out, it first runs `agent-desk release`, quoting the unit's last log lines. The
@@ -2156,7 +2161,7 @@ worktree, and records `MERGEABLE` or `CONFLICTING` from its exit status in the b
 conflicting PR in a project without checks too.
 
 Each check runs `lib/checks.py` in a unit named `agent-desk-check-<owner>-<repo>-<id>.service`, with the priority and
-environment of a run's unit, the `MemoryHigh` of an agent run, and the config's [`testMinutes`](#the-config) as its time
+environment of a run's unit, its own temp folder `/tmp/ad-check-<id>` that the unit removes as a run's does, the `MemoryHigh` of an agent run, and the config's [`testMinutes`](#the-config) as its time
 limit, 15 minutes by default. It makes a detached scratch worktree of the head under `~/.cache/agent-desk/checks/`,
 merges the head's base into it from the local branch or else `origin/<base>`, and names that base in the log's first
 line and its `Merge <base>` step. It then copies `worktree.seeds` from the main checkout, runs `worktree.setup`, runs

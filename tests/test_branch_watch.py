@@ -93,6 +93,7 @@ class WatchTest(GitCase):
         self.assertEqual(args[args.index("--") + 3:], [str(dispatch.LIB / "checks.py"), "run", str(check["id"]),
                                                        str(self.checkout)])
         self.assertEqual(self.systemd.env()["AGENT_DESK_UNIT"], unit)
+        self.assertEqual(self.systemd.env()["TMPDIR"], f"/tmp/ad-check-{check['id']}")
 
     def test_a_check_takes_the_projects_test_minutes_as_its_time_limit(self):
         self.configure({"test": "just test", "testMinutes": 30})

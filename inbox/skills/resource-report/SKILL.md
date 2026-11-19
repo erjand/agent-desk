@@ -23,7 +23,16 @@ the rules below hold there as here.
    and free swap are both under its lines, so with swap spent, free RAM is the margin that matters.
 2. CPU: `uptime`, and two samples of the busiest processes a few seconds apart, such as `top -b -n 2 -d 3 -o %CPU`.
 3. Processes by memory, with how much of each is swapped out:
-   `ps -eo pid,ppid,rss,etime,args --sort=-rss | head -30`, and `VmSwap` from `/proc/<pid>/status`.
+   `ps -eo pid,ppid,rss,etime,args --sort=-rss | head -30`, and `VmSwap` from `/proc/<pid>/status`, summed by process
+   name so a browser's content processes show as one row:
+
+   ```bash
+   cat /proc/[0-9]*/status 2>/dev/null | awk '/^Name:/ { n = substr($0, 7) } /^VmSwap:/ { s[n] += $2; t += $2 }
+     END { for (n in s) if (s[n]) printf "%8.1f MB  %s\n", s[n] / 1024, n; printf "%8.1f MB  total\n", t / 1024 }' |
+     sort -rn | head -20
+   ```
+
+   The `cat` skips a process that exits while it reads; awk given the files itself stops at the first one.
 
 ## Step 2: Attribute it
 
@@ -52,10 +61,34 @@ Group the processes and say who each group belongs to. A process's working direc
 
 Check each candidate before listing it, and give its size, its age (newest file inside), and its owner.
 
-- **Temp files.** `/tmp` is a tmpfs, so its files sit in RAM and swap: `du -xsh /tmp/* /tmp/claude-<uid>/*/*`. A
-  folder is a candidate when nothing inside changed in the last day and no process has it as its working directory
-  or holds a file open in it (`/proc/*/cwd` and `/proc/*/fd`). Leave apps' own folders, such as browser, IDE,
-  `.dotnet`, and daemon sockets, alone.
+- **Temp files.** `/tmp` is a tmpfs, so its files sit in RAM and swap. zram's `DATA` from `zramctl` holds the swapped
+  pages of every process, which the `VmSwap` sum from Step 1 gives, plus the swapped part of the tmpfs, which is at
+  most its used size from `df -h /tmp`. Name both figures in the report, so the user sees how much of the swap
+  temp files hold. `/tmp` can hold over 100,000 entries, more than a shell glob such as `/tmp/*` passes to one
+  command, and a list of each one buries the leaks. Size every entry without a glob and group the entries by name with
+  the random suffix taken off, so a thousand `agent-desk-web-*` folders show as one row with a count and a total:
+
+  ```bash
+  find /tmp -mindepth 1 -maxdepth 1 -print0 | du -xs --files0-from=- 2>/dev/null |
+    awk -F'\t' '{ n = $2; sub(/^.*\//, "", n)
+      if (match(n, /[-._][A-Za-z0-9_]{6,}$/)) n = substr(n, 1, RSTART) "*"
+      else if (match(n, /[A-Za-z0-9_]{6}$/)) { t = substr(n, RSTART)
+        if ((t ~ /[A-Z]/) + (t ~ /[a-z]/) + (t ~ /[0-9_]/) >= 2) n = substr(n, 1, RSTART - 1) "*" }
+      gsub(/[0-9]+/, "N", n); kb[n] += $1; c[n]++ }
+      END { for (n in kb) printf "%9.1f MB %7d  %s\n", kb[n] / 1024, c[n], n }' | sort -rn | head -40
+  ```
+
+  Sort by the count column, `sort -k3,3rn`, to find a group of many small entries. The row named `*` holds names
+  that are random throughout. List a group's members with `find /tmp -maxdepth 1 -name '<prefix>*'`, and size the
+  session scratchpads inside `claude-<uid>` the same way:
+  `find /tmp/claude-$(id -u) -mindepth 2 -maxdepth 2 -print0 | du -xs --files0-from=- | sort -rn | head -20`.
+
+  A folder is a candidate when nothing inside changed in the last day and no process has it as its working directory
+  or holds a file open in it (`/proc/*/cwd` and `/proc/*/fd`). `find <dir> -mmin -1440 -print -quit` prints the
+  first path in the folder changed in the last day, and nothing for an untouched folder. Claude Code's shell runs
+  `find` as bfs, which rejects relative dates such as `-newermt '-1 day'` with an error on stderr and prints nothing,
+  so a broken check makes every folder look untouched: trust its silence only when it exits 0. Leave apps' own
+  folders, such as browser, IDE, `.dotnet`, and daemon sockets, alone.
 - **Scratch folders.** `.scratch/` in each checkout, which the projects' Memory rule uses for large intermediate files.
 - **Worktrees.** For each worktree of each registered project, `git worktree list`, its branch, its review's state
   (`agent-desk review list --state all --head <branch> --json number,state`), commits not in `origin/main`,
