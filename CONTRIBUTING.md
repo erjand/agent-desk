@@ -65,9 +65,10 @@ public repository runs the same suites on GitHub-hosted runners for every pull r
 through `public/.github/workflows/test.yml`, which each release's snapshot carries there along with the rest of
 `public/`. The private repository's `test-hosted` workflow runs those steps on a GitHub-hosted runner only when the
 public publish starts it at a release's tag, or from its Run workflow button, since hosted minutes on a private
-repository count against a monthly allowance. The hosted workflows leave gitleaks out, so the secret scan runs in
-`just test` and the branch checks. `tests/test_ci.py` checks that the two workflows run the same steps and that
-`just test` runs their `shellcheck` command and the gitleaks scan, so change their steps together.
+repository count against a monthly allowance. It first swaps the checkout for the tree the release publishes, so it
+tests what the public repository receives. The hosted workflows leave gitleaks out, so the secret scan runs in
+`just test` and the branch checks. `tests/test_ci.py` checks that the two workflows run the same steps apart from that
+swap and that `just test` runs their `shellcheck` command and the gitleaks scan, so change their steps together.
 
 ## Conventions
 

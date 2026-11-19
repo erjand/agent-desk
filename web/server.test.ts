@@ -8,7 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, u
 import { createServer, get } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join, posix } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { test } from 'node:test'
 
 import { choreStats, repeatsOf, SCHEDULE_BRANCH, scheduleWorktree, steps, withStarting } from './chores.ts'
@@ -16,7 +16,7 @@ import type { Board, Row, RowAction } from '../inbox/types'
 import { DESK } from '../inbox/hooks/run.ts'
 import { CONFIRMS, FORWARD, KEYS, LABELS } from './app-state.js'
 import { act } from './card-actions.ts'
-import { catchUp, gpuGauges, handle, loop, parseProjects, servedProjects, STATIC, transcriptFolder }
+import { catchUp, gpuGauges, handle, loop, parseProjects, servedProjects, splitBeats, STATIC, transcriptFolder }
   from './server.ts'
 import { appName, appsOf, claimsOf, inDeskUnit, processesOf, TOP_PROCESSES, topOf, unitUsage, useProc }
   from './resources.ts'
@@ -113,6 +113,49 @@ test('a chore the page started shows as starting until GitHub lists its run, or 
 test('a worktree\'s sessions keep their transcripts in a folder Claude Code names after its path', () => {
   assert.match(transcriptFolder('/home/me/dev/my.game-issue-12'),
     /\/\.claude\/projects\/-home-me-dev-my-game-issue-12$/)
+})
+
+test('an issue\'s Agent Log puts the session\'s beats among its lines by time, and marks them', async () => {
+  const signIn = process.env.CLAUDE_CONFIG_DIR
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'agent-desk-claude-'))
+  const home = mkdtempSync(join(tmpdir(), 'agent-desk-log-'))
+  const main = join(home, 'yard')
+  const session = '11e614cb-01aa-42f9-b080-35e44d2caf59'
+  const folder = transcriptFolder(`${main}-issue-4`)
+  mkdirSync(folder, { recursive: true })
+  const call = (at: string, command: string) => JSON.stringify({ type: 'assistant', timestamp: at,
+    message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } })
+  writeFileSync(join(folder, `${session}.jsonl`),
+    `${call('2026-11-19T15:00:00Z', 'just test')}\n${call('2026-11-19T15:12:00Z', 'git commit')}\n`)
+  desks.set('yard', { id: 'yard', repo: 'me/yard', owner: 'me', title: 'Yard', main } as Desk)
+  const read = async () => JSON.parse((await getFrom('/api/log?desk=yard&number=4')).body.toString()) as
+    { session: string; lines: string[]; beats: number[] }
+  try {
+    const plain = await read()
+    assert.deepEqual([plain.session, plain.lines.length, plain.beats], [session, 2, []])
+    mkdirSync(join(dirname(storePath()), 'beats'), { recursive: true })
+    writeFileSync(join(dirname(storePath()), 'beats', session), `${JSON.stringify({ type: 'beat',
+      timestamp: '2026-11-19T15:05:00.000Z', text: 'Still in Bash for 5 min: just test · busy: nothing' })}\n`)
+    const log = await read()
+    assert.deepEqual(log.lines.map(line => line.replace(/^\d\d:\d\d:\d\d /, '')),
+      ['→ Bash: just test', 'Still in Bash for 5 min: just test · busy: nothing', '→ Bash: git commit'])
+    assert.deepEqual(log.beats, [1])
+  } finally {
+    desks.delete('yard')
+    rmSync(home, { recursive: true, force: true })
+    rmSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+    if (signIn === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = signIn
+    }
+  }
+})
+
+test('a merged log\'s beat lines lose their mark and are listed by index', () => {
+  assert.deepEqual(splitBeats('08:00:00 → Bash: x\n\x1e08:05:00 Quiet for 5 min\n08:06:00 done\n'),
+    { lines: ['08:00:00 → Bash: x', '08:05:00 Quiet for 5 min', '08:06:00 done'], beats: [1] })
+  assert.deepEqual(splitBeats(''), { lines: [], beats: [] })
 })
 
 test('a project\'s queued chores read by the names its chores table shows', () => {

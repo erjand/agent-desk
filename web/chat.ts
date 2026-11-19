@@ -63,10 +63,13 @@ export function chatFile(): string {
   return join(stateFolder(), 'chat.json')
 }
 
-/** Claude Code's folder for the transcripts of sessions run in `cwd`: the path with every other character a dash. */
-export function transcriptFolder(cwd: string): string {
-  return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects',
-    cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+/**
+ * Claude Code's folder for the transcripts of sessions run in `cwd`, under `projects`: the path with every other
+ * character a dash.
+ */
+export function transcriptFolder(cwd: string,
+  projects = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects')): string {
+  return join(projects, cwd.replace(/[^a-zA-Z0-9]/g, '-'))
 }
 
 /**

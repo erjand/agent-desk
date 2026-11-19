@@ -554,13 +554,16 @@ const STAMP = /^(\d\d:\d\d:\d\d) /
 
 /**
  * The agent's log lines joined by newlines, with the `HH:MM:SS` time that leads a line in its own `log-time` span, so
- * the times stand out while the log's text copies as before.
+ * the times stand out while the log's text copies as before. Each line whose index `beats` lists, a beat logged while
+ * the agent waited on a quiet tool call, goes in a muted `log-beat` span, so the agent's own lines stand out.
  */
-export function logLines(lines) {
+export function logLines(lines, beats = []) {
+  const muted = new Set(beats)
   return lines.flatMap((line, at) => {
     const stamp = STAMP.exec(line)
     const parts = stamp ? [html`<span class="log-time">${stamp[1]}</span>`, line.slice(stamp[1].length)] : [line]
-    return at ? ['\n', ...parts] : parts
+    const shown = muted.has(at) ? [html`<span class="log-beat">${parts}</span>`] : parts
+    return at ? ['\n', ...shown] : shown
   })
 }
 
@@ -591,7 +594,7 @@ function AgentLog({ desk, number, live }) {
     <pre class="agent-log" onScroll=${event => {
       const pre = event.currentTarget
       ui.logStick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24
-    }}>${logLines(log.lines)}</pre>
+    }}>${logLines(log.lines, log.beats)}</pre>
   </div>`
 }
 

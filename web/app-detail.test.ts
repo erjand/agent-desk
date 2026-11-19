@@ -564,6 +564,19 @@ test('the agent log draws each leading time in its own span and copies as the jo
     ['15:11 short stamp', '\n', '15:11:10x no space'])
 })
 
+test('the agent log draws each beat line muted, its time too, and copies it as the line', () => {
+  type Part = string | { type: string; props: { class: string; children: Part | Part[] } }
+  const lines = ['15:00:00 → Bash: just test', '15:05:00 Still in Bash for 5 min: just test', '15:06:00 done']
+  const parts = logLines(lines, [1]) as Part[]
+  const shown = (part: Part): string => typeof part === 'string' ? part
+    : `[${part.props.class}:${[part.props.children].flat().map(shown).join('')}]`
+  assert.deepEqual(parts.map(shown), ['[log-time:15:00:00]', ' → Bash: just test', '\n',
+    '[log-beat:[log-time:15:05:00] Still in Bash for 5 min: just test]', '\n', '[log-time:15:06:00]', ' done'])
+  const copied = (part: Part): string => typeof part === 'string' ? part
+    : [part.props.children].flat().map(copied).join('')
+  assert.equal(parts.map(copied).join(''), lines.join('\n'))
+})
+
 test('Delete Issue confirms only on the issue\'s number with its #, as the dialog asks', () => {
   assert.equal(confirmsDelete('#12', 12), true)
   assert.equal(confirmsDelete(' #12 ', 12), true)

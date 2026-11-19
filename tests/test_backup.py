@@ -501,7 +501,9 @@ class RestoreTest(BackupCase):
         self.store.db.execute("UPDATE reviews SET merged_commits = 3 WHERE project = ?", (REPO,))
         self.store.db.commit()
         backup.backup(self.database, self.data, CLOCK)
-        review = next(path for path in (self.data / REPO).glob("*.json") if json.loads(path.read_text())["review"])
+        # project.json and label_colors.json sit beside the items, in whatever order the folder lists them.
+        review = next(path for path in (self.data / REPO).glob("*.json")
+                      if json.loads(path.read_text()).get("review"))
         self.assertEqual(json.loads(review.read_text())["review"]["merged_commits"], 3)
         backup.restore(self.data, self.target)
         self.assertEqual(self.restored().db.execute("SELECT merged_commits FROM reviews").fetchall()[0][0], 3)

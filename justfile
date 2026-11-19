@@ -9,7 +9,8 @@ demo port="7481":
     root=$(mktemp -d -t agent-desk-demo-XXXXXX)
     node web/demo.ts "$root" >/dev/null
     echo "The demo desk is in $root."
-    export XDG_CONFIG_HOME="$root/config" XDG_STATE_HOME="$root/state" AGENT_DESK_WEB_PORT={{port}}
+    export XDG_CONFIG_HOME="$root/config" XDG_STATE_HOME="$root/state" AGENT_DESK_TRANSCRIPTS="$root/transcripts"
+    export AGENT_DESK_WEB_PORT={{port}}
     exec node web/server.ts
 
 # Run every test suite: the scripts' Python tests, the inbox pane's, the web page's, shellcheck on the scripts, and gitleaks

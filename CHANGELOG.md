@@ -16,6 +16,17 @@ into this file.
 
 The changes since the last release sit in [`changelog.d/`](changelog.d/README.md).
 
+## [0.2.4] - 2026-11-19
+
+### Added
+
+- An issue's Agent Log tab on the web page shows the beat lines a run logs every 5 minutes while the agent waits on a
+  quiet tool call, muted and in time order among the agent's own lines. (#519)
+
+### Fixed
+
+- The backup tests pass whatever order the filesystem lists a project's backup files in. (#543)
+
 ## [0.2.3] - 2026-11-19
 
 ### Fixed
@@ -953,7 +964,8 @@ of its own.
 
 - A run that claims an issue takes `needs-design` off it. (#36)
 
-[Unreleased]: https://github.com/erjand/agent-desk/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/erjand/agent-desk/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/erjand/agent-desk/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/erjand/agent-desk/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/erjand/agent-desk/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/erjand/agent-desk/compare/v0.2.0...v0.2.1

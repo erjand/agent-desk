@@ -1061,7 +1061,9 @@ registered project's mode.
 Screenshots show made-up cards or agent-desk's own, never another project's. `just demo [port]`, from a checkout of
 this repository, builds a demo desk in a new temporary folder with `web/demo.ts` and serves it on port 7481 or the one
 given: three made-up projects, with cards in Working, Needs You, Queued, Open, Needs Design, and Ideas, in a store and
-projects file of the demo's own, so tab and multi-project pictures read nothing of the live store. A screenshot server
+projects file of the demo's own, so tab and multi-project pictures read nothing of the live store. Orchard #2's Agent
+Log tab shows a made-up session with beat lines, which the server reads from the demo's folder through
+`AGENT_DESK_TRANSCRIPTS`. A screenshot server
 never takes a copy of the live store, since that holds every project's issues.
 
 The header's bar reads, from the left, `agent-desk`, the Refresh button, the time the shown boards were last read,
@@ -1253,7 +1255,9 @@ above the diffs. Checks shows the newest branch check
 of the review's head from the store, and its Details link opens the check's log from
 `~/.local/state/agent-desk/checks/`. An issue's Agent Log tab shows the newest Claude Code session in the
 issue's worktree on this machine, run through `lib/agent_log.py` as its run's journal reads, each line led by its
-local time in the accent color, and read again every 5 seconds while the agent works. Every description and comment renders on this
+local time in the accent color, and read again every 5 seconds while the agent works. The session's beat lines, from
+its file under `~/.local/state/agent-desk/beats/`, go among the agent's own lines by time, muted, so a long wait on a
+tool call reads as the beats `lib/agent_run.py` logged during it. Every description and comment renders on this
 machine through `web/markdown.ts`, so the panel reads with the network down, and its `#123` references link to the page
 itself: a click shows item 123 in the panel, as a card of its own with no buttons when the list has none for it, and a
 click with Ctrl or a middle click opens the page at it in a new tab. The number beside the title and a review page's
@@ -2264,7 +2268,8 @@ of the private ones. The public publish, `scripts/publish.py vX.Y.Z`, logs to th
    has only its path checked, so a picture's compressed bytes never match by chance and a picture still needs a
    person's look.
 3. It runs the `test-hosted` workflow at the tag with `gh workflow run`, waits up to 20 minutes for it, and refuses
-   unless it passed, naming the run's link.
+   unless it passed, naming the run's link. The workflow builds the same public tree and runs the suites on it, so a
+   test that needs a file the publish drops fails here.
 4. It commits the tree as `Release X.Y.Z` on the public `main` and checks the commit with
    `scripts/publish_history.py`, which refuses, naming the commits, when a local branch, a tag, or one of `origin`'s
    branches also reaches any commit in its history. It pushes the commit to the public `main` and as the tag `vX.Y.Z`
@@ -2275,4 +2280,6 @@ of the private ones. The public publish, `scripts/publish.py vX.Y.Z`, logs to th
 A version whose tag the public repository holds skips to the last step, so a rerun after a finished publish does
 nothing. After a failure, `just release publish` starts the public publish again, with a new hosted test.
 `python3 scripts/publish.py vX.Y.Z` runs it in the foreground, and `--dry-run` builds and checks the tree and prints
-the files that would change since the public `main`, without the hosted test or a push.
+the files that would change since the public `main`, without the hosted test or a push. `--tree <dir> <revision>`
+writes the public tree of any revision, such as `HEAD`, into a new or empty folder and exits, so you can run the
+suites on it.

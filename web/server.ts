@@ -38,7 +38,7 @@ import { assetFile, checkLogPath, hovercardOf, issuePreviewOf, markdownOf, MAX_C
   pictureType, postComment, postLineComment, previewOf, relationsOf } from './review.ts'
 import type { Person } from './review.ts'
 import { choreReviews, heldRuns, labelColors, lastEvent, mergedReviews, movedSince, reviewCosts, storedCheck,
-  storeOpens, storeProblem } from './store.ts'
+  storeOpens, storePath, storeProblem } from './store.ts'
 
 const PORT = Number(process.env.AGENT_DESK_WEB_PORT ?? 7480)
 // How often the server reads the store's newest event id while a page is open, reads every project's board again
@@ -351,34 +351,59 @@ function current(): boolean {
     && [...desks.values()].every(desk => desk.board !== null)
 }
 
-// The formatter that turns a session's transcript into the log an Actions run shows, and how many of the log's newest
-// lines the page gets.
+// The formatter that turns a session's transcript into the log an Actions run shows, merged with the session's beats
+// file, the character it leads each beat line with, and how many of the log's newest lines the page gets.
 const AGENT_LOG = join(HERE, '..', 'lib', 'agent_log.py')
+const BEAT_MARK = '\x1e'
 const LOG_LINES = 600
 
 export { transcriptFolder }
 
-/** An issue's newest agent session, as its log reads: the session, its worktree, when it last wrote, and its lines. */
-export type AgentLog = { session: string; worktree: string; at: string; sessions: number; lines: string[] }
+/**
+ * An issue's newest agent session, as its log reads: the session, its worktree, when it last wrote, its lines, and the
+ * indexes of the lines that are beats, which lib/agent_run.py logs while the agent waits on a quiet tool call.
+ */
+export type AgentLog = { session: string; worktree: string; at: string; sessions: number; lines: string[];
+  beats: number[] }
+
+/** The beats file lib/agent_run.py writes for a session, in agent-desk's state folder beside the store. */
+export function beatsFile(session: string): string {
+  return join(dirname(storePath()), 'beats', session)
+}
+
+/** A merged log's lines with each beat's leading mark taken off, and the indexes of the lines that carried it. */
+export function splitBeats(out: string): { lines: string[]; beats: number[] } {
+  const lines: string[] = []
+  const beats: number[] = []
+  for (const line of out.split('\n').filter(Boolean)) {
+    if (line.startsWith(BEAT_MARK)) {
+      beats.push(lines.length)
+    }
+    lines.push(line.startsWith(BEAT_MARK) ? line.slice(BEAT_MARK.length) : line)
+  }
+  return { lines, beats }
+}
 
 /**
  * The newest session's log for an issue, from the transcripts of sessions run in its worktree beside the main
- * checkout, as agent-desk work-issue and start make it; null when no session ran there. A runner's agent and one a
- * local session started both write there, so the log reads live while either works.
+ * checkout, as agent-desk work-issue and start make it, with the session's beats in time order among its lines; null
+ * when no session ran there. A runner's agent and one a local session started both write there, so the log reads live
+ * while either works. `just demo` sets AGENT_DESK_TRANSCRIPTS to its own folder in place of Claude Code's `projects`,
+ * so its made-up session shows while the demo's chat keeps the person's Claude Code sign-in.
  */
 async function agentLogOf(desk: Desk, number: number): Promise<AgentLog | null> {
   const worktree = `${desk.main}-issue-${number}`
-  const folder = transcriptFolder(worktree)
+  const folder = transcriptFolder(worktree, process.env.AGENT_DESK_TRANSCRIPTS || undefined)
   const names = (await readdir(folder).catch(() => [])).filter(name => /^[0-9a-f-]{36}\.jsonl$/.test(name))
   const dated = await Promise.all(names.map(async name => ({ name, at: (await stat(join(folder, name))).mtimeMs })))
   const newest = dated.sort((a, b) => b.at - a.at)[0]
   if (newest === undefined) {
     return null
   }
-  const out = await host.run(['bash', '-c', 'python3 -B "$1" < "$2" | tail -n "$3"', '_', AGENT_LOG,
-    join(folder, newest.name), String(LOG_LINES)])
-  return { session: newest.name.replace(/\.jsonl$/, ''), worktree, at: new Date(newest.at).toISOString(),
-    sessions: dated.length, lines: (out ?? '').split('\n').filter(Boolean) }
+  const session = newest.name.replace(/\.jsonl$/, '')
+  const out = await host.run(['bash', '-c', 'python3 -B "$1" "$2" < "$3" | tail -n "$4"', '_', AGENT_LOG,
+    beatsFile(session), join(folder, newest.name), String(LOG_LINES)])
+  return { session, worktree, at: new Date(newest.at).toISOString(), sessions: dated.length, ...splitBeats(out ?? '') }
 }
 
 

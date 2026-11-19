@@ -2,7 +2,8 @@
 // server started on it shows no real project's issues. `just demo` builds one in a new temporary folder and serves it;
 // by hand:
 //   node web/demo.ts <folder>   builds the demo in <folder>, which must be empty or absent, and prints its folders
-// Then start the server with XDG_CONFIG_HOME=<folder>/config and XDG_STATE_HOME=<folder>/state.
+// Then start the server with XDG_CONFIG_HOME=<folder>/config, XDG_STATE_HOME=<folder>/state, and
+// AGENT_DESK_TRANSCRIPTS=<folder>/transcripts, where Orchard #2's agent session keeps its transcript.
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -88,18 +89,60 @@ store.check_ended(check, "failed", name="merge")
 store.create(k, "issue", "Restack the kiln shelves for the long firing", labels=["enhancement", "on-hold"])
 `
 
+// The session of the agent working Orchard #2, whose Agent Log tab shows its transcript with the beats lib/agent_run.py
+// logged while the agent waited on a long test run.
+export const DEMO_SESSION = '7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f'
+
+/**
+ * Writes the demo session's transcript under `transcripts`, in the folder Claude Code names after the worktree's path,
+ * and its beats file under `state`, timed so the session's last line comes two minutes before `now`.
+ */
+function writeSession(transcripts: string, state: string, worktree: string, now: number): void {
+  const at = (minutes: number) => new Date(now - (60 - minutes) * 60_000).toISOString()
+  const said = (minutes: number, text: string) => ({ type: 'assistant', timestamp: at(minutes),
+    message: { content: [{ type: 'text', text }] } })
+  const ran = (minutes: number, name: string, input: Record<string, string>) => ({ type: 'assistant',
+    timestamp: at(minutes), message: { content: [{ type: 'tool_use', name, input }] } })
+  const events = [
+    said(0, 'I\'ll read the issue and its comments first.'),
+    ran(0.2, 'Bash', { command: 'agent-desk issue view 2 --comments' }),
+    ran(1, 'Read', { file_path: '/srv/orchard-issue-2/tally/pears.py' }),
+    ran(4, 'Edit', { file_path: '/srv/orchard-issue-2/tally/pears.py' }),
+    ran(6, 'Bash', { command: 'just test' }),
+    said(22, 'The tests pass. Committing the tally by tree.'),
+    ran(22.5, 'Bash', { command: 'git commit -am "Count the pear harvest by tree"' }),
+    ran(23, 'Bash', { command: 'just bench harvest' }),
+    said(58, 'The bench holds under its budget, so I\'ll open the review.'),
+  ]
+  const transcript = join(transcripts, worktree.replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(transcript, { recursive: true })
+  writeFileSync(join(transcript, `${DEMO_SESSION}.jsonl`), events.map(event => `${JSON.stringify(event)}\n`).join(''))
+  const beat = (minutes: number, text: string) => JSON.stringify({ type: 'beat', timestamp: at(minutes), text })
+  const beats = [
+    beat(11, 'Still in Bash for 5 min: just test · busy: pytest (96% CPU), node --test (12%)'),
+    beat(16, 'Still in Bash for 10 min: just test · busy: pytest (98% CPU), node --test (4%)'),
+    beat(21, 'Still in Bash for 15 min: just test · busy: pytest (64% CPU)'),
+    ...[28, 33, 38, 43, 48, 53].map(minutes => beat(minutes, `Still in Bash for ${minutes - 23} min: just bench `
+      + 'harvest · background: python -m tally.sample … · busy: python -m tally.bench (99% CPU), '
+      + 'python -m tally.sample (31%), claude -p ×2 (6%)')),
+  ]
+  mkdirSync(join(state, 'agent-desk', 'beats'), { recursive: true })
+  writeFileSync(join(state, 'agent-desk', 'beats', DEMO_SESSION), beats.map(line => `${line}\n`).join(''))
+}
+
 /**
  * Builds the demo in `root`, an empty or absent folder: a projects file under `root/config`, a checkout for each
- * project under `root/projects` with its `.agent-desk.json`, and a store under `root/state` holding the made-up cards.
- * Returns the folders to start the server with.
+ * project under `root/projects` with its `.agent-desk.json`, a store under `root/state` holding the made-up cards, and
+ * Orchard #2's agent session under `root/transcripts`. Returns the folders to start the server with.
  */
-export function buildDemo(root: string): { config: string; state: string } {
+export function buildDemo(root: string, now = Date.now()): { config: string; state: string; transcripts: string } {
   const at = resolve(root)
   if (existsSync(at) && readdirSync(at).length) {
     throw new Error(`${at} isn't empty; the demo builds in an empty or new folder.`)
   }
   const config = join(at, 'config')
   const state = join(at, 'state')
+  const transcripts = join(at, 'transcripts')
   const checkouts: Record<string, string> = {}
   for (const { repo, title, chores } of DEMO_PROJECTS) {
     const checkout = join(at, 'projects', repo.split('/')[1] ?? repo)
@@ -116,7 +159,8 @@ export function buildDemo(root: string): { config: string; state: string } {
   mkdirSync(join(state, 'agent-desk'), { recursive: true, mode: 0o700 })
   storeFixture(`checkouts = ${JSON.stringify(checkouts)}\n${SEED}`,
     join(state, 'agent-desk', 'desk.sqlite'))
-  return { config, state }
+  writeSession(transcripts, state, `${checkouts['demo/orchard']}-issue-2`, now)
+  return { config, state, transcripts }
 }
 
 if (import.meta.main) {
@@ -125,6 +169,6 @@ if (import.meta.main) {
     console.error('usage: node web/demo.ts <folder>')
     process.exit(2)
   }
-  const { config, state } = buildDemo(root)
-  console.log(`XDG_CONFIG_HOME=${config} XDG_STATE_HOME=${state}`)
+  const { config, state, transcripts } = buildDemo(root)
+  console.log(`XDG_CONFIG_HOME=${config} XDG_STATE_HOME=${state} AGENT_DESK_TRANSCRIPTS=${transcripts}`)
 }

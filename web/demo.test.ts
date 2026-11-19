@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type TestContext, test } from 'node:test'
 
-import { buildDemo, DEMO_PROJECTS } from './demo.ts'
+import { buildDemo, DEMO_PROJECTS, DEMO_SESSION } from './demo.ts'
 
 const DESK = join(import.meta.dirname, '..', 'bin', 'agent-desk')
 
@@ -41,6 +41,18 @@ test('the demo lists only its made-up projects, and each one\'s board reads card
   assert.deepEqual(boards.flatMap(board => board.runs.map((one: { kind: string; status: string }) =>
     `${one.kind} ${one.status}`)).sort(), ['agent running', 'agent timed-out', 'chore running'])
   assert.equal(boards[0]?.merged.length, 1)
+})
+
+test('the demo\'s Orchard #2 has an agent session whose beats fall between its transcript\'s lines', t => {
+  const root = join(scratch(t), 'demo')
+  const { state, transcripts } = buildDemo(root)
+  const worktree = join(root, 'projects', 'orchard-issue-2').replace(/[^a-zA-Z0-9]/g, '-')
+  const log = execFileSync('python3', ['-B', join(import.meta.dirname, '..', 'lib', 'agent_log.py'),
+    join(state, 'agent-desk', 'beats', DEMO_SESSION)],
+  { input: readFileSync(join(transcripts, worktree, `${DEMO_SESSION}.jsonl`)), encoding: 'utf8' }).split('\n')
+  const beats = log.flatMap((line, at) => (line.startsWith('\x1e') ? [at] : []))
+  assert.equal(beats.length, 9)
+  assert.ok(beats[0]! > 0 && beats.at(-1)! < log.filter(Boolean).length - 1, 'agent lines come before and after')
 })
 
 test('the demo builds only in an empty or new folder', t => {

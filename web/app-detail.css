@@ -205,6 +205,9 @@
 
 .log-time { color: var(--accent); }
 
+/* A beat, logged while the agent waits on a quiet tool call, reads muted, its time too. */
+.log-beat, .log-beat .log-time { color: var(--muted); }
+
 button.link {
   height: auto;
   padding: 0;
