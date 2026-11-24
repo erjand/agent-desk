@@ -2,6 +2,8 @@
 out of reach. Each runs git against a temporary bare origin, a main checkout cloned from it, and another clone that
 moves origin as someone else would."""
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -48,6 +50,13 @@ class PushCase(unittest.TestCase):
         git(where, "add", ".")
         git(where, "commit", "-q", "-m", message)
         return git(where, "rev-parse", "HEAD")
+
+    def branch(self, name):
+        """An agent branch with a commit of its own beyond main, as a run's branch has once its agent commits."""
+        git(self.main, "checkout", "-q", "-b", name, "main")
+        sha = self.commit(self.main, name.replace("/", "-"))
+        git(self.main, "checkout", "-q", "main")
+        return sha
 
     def tick(self, now=NOW, run=None):
         return pushes.tick(self.main, self.state, now, self.said.append, desk_root=self.root, run=run)
@@ -219,8 +228,8 @@ class MainTest(PushCase):
 
 class BranchesTest(PushCase):
     def test_agent_branches_that_moved_are_pushed_and_a_failed_one_blocks_nothing(self):
-        git(self.main, "branch", "agent/issue-7")
-        git(self.main, "branch", "agent/issue-8")
+        self.branch("agent/issue-7")
+        self.branch("agent/issue-8")
         git(self.main, "branch", "feature/mine")
         # Origin's agent/issue-8 went its own way, so a push that never forces fails for it.
         other = self.root / "other"
@@ -246,7 +255,7 @@ class BranchesTest(PushCase):
             self.on_origin("feature/mine")
 
     def test_a_branch_that_moves_waits_for_the_next_tick_and_a_push_clears_the_failure(self):
-        git(self.main, "branch", "agent/issue-7")
+        self.branch("agent/issue-7")
         self.tick()
         self.assertEqual(self.shown()["agentBranches"], {"pushed": 1, "waiting": 0, "pushedAt": NOW})
         git(self.main, "checkout", "-q", "agent/issue-7")
@@ -258,6 +267,34 @@ class BranchesTest(PushCase):
         self.assertEqual(self.shown()["agentBranches"], {"pushed": 1, "waiting": 0, "pushedAt": NOW + 60})
         self.assertNotIn("branchesError", self.state)
 
+    def test_a_branch_main_holds_never_reaches_origin_and_one_commit_beyond_main_pushes_it(self):
+        # A run's branch, cut from main before its agent commits, and one whose review merged into main.
+        git(self.main, "branch", "agent/chore-tidy-1")
+        self.branch("agent/issue-7")
+        git(self.main, "merge", "-q", "--no-edit", "agent/issue-7")
+        self.tick()
+        self.assertEqual(self.said, [f"Pushed main to origin at {git(self.main, 'rev-parse', 'main')[:12]}."])
+        for name in ("agent/chore-tidy-1", "agent/issue-7"):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.on_origin(name)
+        self.assertEqual(self.shown()["agentBranches"], {"pushed": 0, "waiting": 0})
+        self.assertNotIn("branchesPushedAt", self.state)
+        # One commit beyond main pushes the branch as before.
+        git(self.main, "checkout", "-q", "agent/chore-tidy-1")
+        sha = self.commit(self.main, "tidied")
+        git(self.main, "checkout", "-q", "main")
+        self.tick(NOW + 60)
+        self.assertEqual(self.on_origin("agent/chore-tidy-1"), sha)
+        self.assertEqual(self.shown()["agentBranches"], {"pushed": 1, "waiting": 0, "pushedAt": NOW + 60})
+
+    def test_a_branch_main_holds_still_counts_while_origin_has_the_same_head(self):
+        sha = self.branch("agent/issue-7")
+        self.tick()
+        self.assertEqual(self.on_origin("agent/issue-7"), sha)
+        git(self.main, "merge", "-q", "--no-edit", "agent/issue-7")
+        self.tick(NOW + 60)
+        self.assertEqual(self.shown()["agentBranches"], {"pushed": 1, "waiting": 0, "pushedAt": NOW})
+
     def test_branches_wait_while_origin_is_out_of_reach(self):
         git(self.main, "branch", "agent/issue-7")
         self.commit(self.main, "merged")
@@ -265,6 +302,41 @@ class BranchesTest(PushCase):
         with mock.patch.object(pushes, "push_branches") as branches:
             self.tick()
         branches.assert_not_called()
+
+
+class PushBranchTest(PushCase):
+    def test_one_branch_that_moved_is_pushed_and_the_others_wait_for_the_tick(self):
+        self.branch("agent/issue-7")
+        self.branch("agent/issue-8")
+        self.assertTrue(pushes.push_branch(self.main, "agent/issue-7", self.said.append))
+        self.assertEqual(self.on_origin("agent/issue-7"), git(self.main, "rev-parse", "agent/issue-7"))
+        self.assertEqual(self.said, ["Pushed agent/issue-7 to origin."])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.on_origin("agent/issue-8")
+        # A branch origin holds already sends nothing.
+        self.assertTrue(pushes.push_branch(self.main, "agent/issue-7", self.said.append))
+        self.assertEqual(len(self.said), 1)
+
+    def test_a_push_with_origin_out_of_reach_fails(self):
+        self.branch("agent/issue-7")
+        git(self.main, "remote", "set-url", "origin", str(self.root / "unreachable.git"))
+        self.assertFalse(pushes.push_branch(self.main, "agent/issue-7", self.said.append))
+        self.assertRegex(self.said[0], r"^Couldn't push agent/issue-7 to origin: ")
+
+    def test_a_project_whose_host_is_none_pushes_no_branch(self):
+        self.branch("agent/issue-7")
+        (self.main / ".agent-desk.json").write_text('{"host": "none"}')
+        self.assertTrue(pushes.push_branch(self.main, "agent/issue-7", self.said.append))
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.on_origin("agent/issue-7")
+
+    def test_the_command_exits_1_when_the_push_fails(self):
+        self.branch("agent/issue-7")
+        git(self.main, "remote", "set-url", "origin", str(self.root / "unreachable.git"))
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(pushes.main(["pushes.py", "push", str(self.main), "agent/issue-7"]), 1)
+            self.assertEqual(pushes.main(["pushes.py", "push", str(self.main), "main"]), 2)
+        self.assertIn("Couldn't push agent/issue-7", out.getvalue())
 
 
 if __name__ == "__main__":

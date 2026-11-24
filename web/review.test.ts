@@ -717,3 +717,57 @@ test('a comment the dispatcher answered with a run, and each line comment it quo
   assert.deepEqual(answered?.comments.map(one => one.run), [158, 159])
   assert.equal(answered?.waiting, false)
 })
+
+test('post attribution follows its original run through edits, and legacy and unknown posts keep their signatures',
+  async () => {
+    storeFixture(`import os
+p = "me/game"
+signature = "\\n\\n<sub>Posted by agent-desk</sub>\\n<!-- agent-desk -->"
+old = "An earlier note." + signature
+claude = store.request_run(p, "agent", "4")
+store.run_started(claude, "claude.service")
+os.environ["AGENT_DESK_RUN"] = str(claude)
+issue = store.create(p, "issue", "Agent issue", "Description", number=1001)
+comment = store.comment(p, issue, "## Decisions Needed\\n\\n- Paint it?" + signature)
+store.run_posting_identity(claude, "claude-opus-4-6", "anthropic", "0.2.3")
+store.run_ended(claude, "succeeded")
+codex = store.request_run(p, "agent", str(issue))
+store.run_started(codex, "codex.service", account="codex")
+store.run_posting_identity(codex, "gpt-6.2-sol", "openai", "0.2.4")
+os.environ["AGENT_DESK_RUN"] = str(codex)
+review = store.create(p, "review", "Agent review", "Description", branch="agent/issue-4", fixes=[issue], number=1002)
+store.comment(p, review, "Check this line.", path="a.txt", line=2)
+store.edit_comment(p, comment, "## Decisions Needed\\n\\n- Stain it?" + signature, note="Reworded the question.")
+store.run_result(claude, model="opus")
+store.run_posting_identity(claude, "changed", "openai", "9.9.9")
+unknown = store.request_run(p, "agent", str(issue))
+store.run_started(unknown, "unknown.service")
+os.environ["AGENT_DESK_RUN"] = str(unknown)
+store.comment(p, issue, old)
+os.environ["AGENT_DESK_RUN"] = "999999"
+store.comment(p, issue, old)
+os.environ.pop("AGENT_DESK_RUN")
+os.environ["AGENT_DESK_AUTHOR"] = "desk"
+store.comment(p, issue, old)
+os.environ.pop("AGENT_DESK_AUTHOR")
+store.comment(p, issue, "Please check the finish.", to_agent=True)
+`, storePath())
+    const item = issuePreviewOf(desk, 1001)
+    const review = await previewOf(desk, 1002)
+    const claude = { login: 'agent', posting: { provider: 'anthropic', model: 'claude-opus-4-6', version: '0.2.3' } }
+    const codex = { login: 'agent', posting: { provider: 'openai', model: 'gpt-6.2-sol', version: '0.2.4' } }
+    assert.deepEqual(item?.author, claude)
+    assert.deepEqual(review?.author, codex)
+    assert.deepEqual(review?.lineComments[0]?.author, codex)
+    const [edited, unknown, older, deskNote, sent] = item!.comments
+    assert.deepEqual(edited.author, claude)
+    assert.match(edited.html, /Reworded the question/)
+    assert.doesNotMatch(edited.html, /Posted by/)
+    assert.ok(edited.parts?.some(part => 'section' in part))
+    for (const [comment, login] of [[unknown, 'agent'], [older, 'agent'], [deskNote, 'desk']] as const) {
+      assert.deepEqual(comment.author, { login })
+      assert.match(comment.html, /Posted by agent-desk/)
+    }
+    assert.equal(sent.toAgent, true)
+    assert.match(sent.html, /@agent Please check the finish/)
+  })

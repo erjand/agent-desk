@@ -2,12 +2,25 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 
-import { ui } from './app-state.js'
-import { PROJECT_WIDTH_LIMIT, ProjectCell, projectWidth, Runner, Runners, runnerCard, SlotRow } from './app-runners.js'
+import { drawWith, ui } from './app-state.js'
+import { AgentSlotsRow, GpuSlotsRow, PROJECT_WIDTH_LIMIT, ProjectCell, projectWidth, Runner, Runners, runnerCard,
+  SlotRow } from './app-runners.js'
+
+// The posts the page sent, which the stubbed fetch answers with an empty 200.
+const posted: { path: string; data: unknown }[] = []
+Object.assign(globalThis, {
+  fetch: async (path: string, init: { body: string }) => {
+    posted.push({ path, data: JSON.parse(init.body) })
+    return { ok: true, status: 200, json: async () => ({}) }
+  },
+})
+drawWith(() => undefined)
 
 afterEach(() => {
   ui.server = null
   ui.tab = 'all'
+  ui.slotsSaving.clear()
+  posted.length = 0
 })
 
 // The text a drawn element holds, in order, with a space around each element's, since htm drops the space between
@@ -147,4 +160,88 @@ test("a group's first Project cell holds its chip and the full title to hover, a
   assert.equal(under.props.title, undefined)
   assert.equal(squash(textOf(under)), '')
   assert.equal(ProjectCell({ desk: 'demo', chip: null }), null)
+})
+
+test('a project\'s agent stepper shows its count, and with an override the config\'s count and Reset', async () => {
+  ui.server = { desks: [{ id: 'game', title: 'Game', board: null, cards: [] }] }
+  const buttons = (drawn: Drawn) => elementsOf(drawn).filter(one => one.type === 'button')
+  const plain = AgentSlotsRow({ desk: 'game', agents: { count: 3, config: 3, override: false }, tone: 'busy' })
+  assert.equal(squash(textOf(plain)), 'agent − 3 + slots')
+  assert.deepEqual(buttons(plain).map(one => one.props['aria-label']), ['One agent slot fewer', 'One agent slot more'])
+  assert.equal(classOf(cellsOf(plain)[0] as Element), 'runner working')
+
+  const lowered = AgentSlotsRow({ desk: 'game', agents: { count: 1, config: 3, override: true }, tone: 'full' })
+  assert.equal(squash(textOf(lowered)), 'agent − 1 of 3 + slot Reset')
+  const [fewer, more, reset] = buttons(lowered) as Element[]
+  await (fewer?.props.onClick as () => Promise<void>)()
+  await (more?.props.onClick as () => Promise<void>)()
+  await (reset?.props.onClick as () => Promise<void>)()
+  assert.deepEqual(posted, [{ path: '/api/slots', data: { desk: 'game', agent: 0 } },
+    { path: '/api/slots', data: { desk: 'game', agent: 2 } },
+    { path: '/api/slots', data: { desk: 'game', reset: 'agent' } }])
+  assert.equal(ui.slotsSaving.size, 0, 'the stepper takes presses again once the server answers')
+
+  // − stops at 0, and every button waits while a change is on its way.
+  const none = () => AgentSlotsRow({ desk: 'game', agents: { count: 0, config: 3, override: true }, tone: 'full' })
+  assert.deepEqual(buttons(none()).map(one => one.props.disabled), [true, false, false])
+  ui.slotsSaving.add('game')
+  assert.deepEqual(buttons(none()).map(one => one.props.disabled), [true, true, true])
+})
+
+test('the stepper leads its project\'s group, which a project at 0 agent slots keeps', () => {
+  const runner = (key: string, kind: string, number: number) => ({ key, runner: kind, number, title: key, text: key })
+  const game = { id: 'game', title: 'Game', cards: [], agentSlots: { count: 0, config: 2, override: true },
+    board: { error: null, runners: [runner('unit-1', 'agent', 4)], checks: [], slots: [] } }
+  const tools = { id: 'tools', title: 'Tools', cards: [], agentSlots: { count: 0, config: 2, override: true },
+    board: { error: null, runners: [], checks: [], slots: [] } }
+  ui.server = { desks: [game, tools] }
+  const groups = elementsOf(Runners({ shown: new Set() })).filter(one => one.type === 'tbody')
+  // Lowered below the agents working, the group keeps their rows and shows none free.
+  assert.deepEqual(groups.map(one => squash(textOf(one))),
+    ['Game agent − 0 of 2 + slots Reset agent #4 unit-1', 'Tools agent − 0 of 2 + slots Reset'])
+  const rows = elementsOf(groups[0] as Drawn).filter(one => one.type === 'tr')
+  assert.deepEqual(rows.map(one => squash(textOf(cellsOf(one)[0]?.props.children as Drawn))), ['Game', ''])
+})
+
+test('a project\'s gpu stepper shows the agent count while unset, never more, and steps and resets its own kind',
+  async () => {
+  ui.server = { desks: [{ id: 'game', title: 'Game', board: null, cards: [] }] }
+  const buttons = (drawn: Drawn) => elementsOf(drawn).filter(one => one.type === 'button') as Element[]
+  const agents = { count: 3, config: 3, override: false }
+  const unset = GpuSlotsRow({ desk: 'game', agents, gpu: { count: null, config: null, override: false }, busy: 1 })
+  assert.equal(squash(textOf(unset)), 'gpu − 3 + slots')
+  assert.deepEqual(buttons(unset).map(one => one.props.disabled), [false, true])
+  assert.equal(classOf(cellsOf(unset)[0] as Element), 'runner working')
+
+  // An override above a lowered agent count shows at the agent count, and its tone turns full with every slot busy.
+  const lowered = { count: 1, config: 3, override: true }
+  const over = GpuSlotsRow({ desk: 'game', agents: lowered, gpu: { count: 2, config: null, override: true }, busy: 1 })
+  assert.equal(squash(textOf(over)), 'gpu − 1 of 1 + slot Reset')
+  assert.equal(classOf(cellsOf(over)[0] as Element), 'runner full')
+
+  const set = GpuSlotsRow({ desk: 'game', agents, gpu: { count: 1, config: 2, override: true }, busy: 0 })
+  assert.equal(squash(textOf(set)), 'gpu − 1 of 2 + slot Reset')
+  assert.equal(buttons(set)[2]?.props.title, 'Back to the 2 gpu slots .agent-desk.json sets')
+  for (const button of buttons(set)) {
+    await (button.props.onClick as () => Promise<void>)()
+  }
+  assert.deepEqual(posted, [{ path: '/api/slots', data: { desk: 'game', gpu: 0 } },
+    { path: '/api/slots', data: { desk: 'game', gpu: 2 } },
+    { path: '/api/slots', data: { desk: 'game', reset: 'gpu' } }])
+})
+
+test('the gpu stepper sits under the agent stepper, and each agent slot working a gpu issue is marked', () => {
+  const runner = (key: string, number: number, labels: string[]) => ({ key, runner: 'agent', number, title: key,
+    text: key, labels })
+  ui.server = { desks: [{ id: 'game', title: 'Game', cards: [], agentSlots: { count: 3, config: 3, override: false },
+    gpuSlots: { count: 1, config: null, override: true },
+    board: { error: null, runners: [runner('unit-1', 4, ['gpu']), runner('unit-2', 5, ['bug'])], checks: [],
+      slots: [{ kind: 'agent', busy: 2, total: 3 }] } }] }
+  const [group] = elementsOf(Runners({ shown: new Set() })).filter(one => one.type === 'tbody')
+  assert.equal(squash(textOf(group as Drawn)), 'Game agent − 3 + slots gpu − 1 of 3 + slot Reset '
+    + 'agent gpu #4 unit-1 agent #5 unit-2 agent free')
+  const rows = elementsOf(group as Drawn).filter(one => one.type === 'tr')
+  assert.equal(classOf(cellsOf(rows[1] as Element)[1] as Element), 'runner full')
+  const marks = (row: Element | undefined) => elementsOf(row as Drawn).filter(one => classOf(one) === 'gpu-mark').length
+  assert.deepEqual([marks(rows[2]), marks(rows[3])], [1, 0])
 })

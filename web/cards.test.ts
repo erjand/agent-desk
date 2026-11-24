@@ -143,3 +143,12 @@ test("a review the merge queue stopped on keeps its card and state, and the stop
   assert.deepEqual(cards.map(card => [card.id, card.stage, card.state, card.note]),
     [['game:264', 'merging', 'stopped', 'README.md uncommitted in the main checkout']])
 })
+
+test('a working card takes its runner row\'s stall mark with its note, and Stop Command\'s question', () => {
+  const ask = 'Stop Bash: cargo test … after 12 min? The agent goes on with its failure.'
+  const cards = cardsOf('game', { ...EMPTY, runners: [{ key: 'unit-4', text: 'agent     Fix', runner: 'agent',
+    state: 'working', title: 'Fix', number: 31, note: 'stalled 12 min in Bash: cargo test …', stalled: true,
+    stopAsk: ask, actions: ['open', 'stop-command', 'pause'] }] })
+  assert.deepEqual(cards.map(card => [card.id, card.stage, card.note, card.stalled, card.stopAsk, card.actions]), [
+    ['game:31', 'working', 'stalled 12 min in Bash: cargo test …', true, ask, ['open', 'stop-command', 'pause']]])
+})

@@ -4,8 +4,9 @@
 // First, so the server's modules read the temporary folders it sets.
 import './test-env.ts'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { execSync } from 'node:child_process'
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import type { Socket } from 'node:net'
 
@@ -17,14 +18,17 @@ import { desks } from './state.ts'
 import type { Desk } from './state.ts'
 import { TEST_HOME } from './test-env.ts'
 
-// The fake claude: it logs its arguments and folder, keeps the session's transcript where Claude Code does, and
-// streams a reply in two deltas a moment apart, then a tool call, then the result. FAKE_CLAUDE_MODE `hang` stops after
-// the first delta until it is killed, and `fail` prints to standard error and exits 1 without a result.
+// The fake claude: it logs its arguments, its folder, and the ANTHROPIC_API_KEY it got, keeps the session's transcript
+// where Claude Code does, and streams a reply in two deltas a moment apart, then a tool call, then the result, which
+// reports the session's cost so far as FAKE_CLAUDE_COST, or $0.25.
+// FAKE_CLAUDE_MODE `hang` stops after the first delta until it is killed, and `fail` prints to standard error and exits
+// 1 without a result.
 const FAKE = `#!${process.execPath}
 const fs = require('node:fs')
 const path = require('node:path')
 const args = process.argv.slice(2)
-fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, cwd: process.cwd() }) + '\\n')
+fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, cwd: process.cwd(),
+  apiKey: process.env.ANTHROPIC_API_KEY ?? null }) + '\\n')
 if (process.env.FAKE_CLAUDE_MODE === 'fail') {
   process.stderr.write('No conversation found with that session ID')
   process.exit(1)
@@ -51,7 +55,8 @@ if (process.env.FAKE_CLAUDE_MODE === 'hang') {
     keep({ type: 'assistant', message: { content: [{ type: 'text', text: 'Two issues need you.' }, tool] } })
     say({ type: 'assistant', message: { content: [{ type: 'text', text: 'Two issues need you.' }] } })
     say({ type: 'assistant', message: { content: [tool] } })
-    say({ type: 'result', subtype: 'success', is_error: false, result: 'Two issues need you.' })
+    say({ type: 'result', subtype: 'success', is_error: false, result: 'Two issues need you.',
+      total_cost_usd: Number(process.env.FAKE_CLAUDE_COST ?? '0.25') })
   }, 300)
 }
 `
@@ -73,8 +78,8 @@ desks.set('yard', { id: 'yard', repo: 'me/yard', owner: 'me', title: 'Yard', mai
 const patches: ChatPatch[] = []
 onChat(patch => patches.push(patch))
 
-/** Each run of the fake claude: its arguments and the folder it ran in. */
-function runs(): { args: string[]; cwd: string }[] {
+/** Each run of the fake claude: its arguments, the folder it ran in, and the ANTHROPIC_API_KEY it got. */
+function runs(): { args: string[]; cwd: string; apiKey: string | null }[] {
   return readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
@@ -180,6 +185,95 @@ test('a first message whose claude never starts leaves no session to resume', as
   assert.ok(runs().at(-1)?.args.includes('--session-id'))
 })
 
+test('each turn bills the account set as it starts, and never the server\'s ANTHROPIC_API_KEY', async () => {
+  const hold = join(TEST_HOME, 'state', 'agent-desk', 'hold.json')
+  const key = join(TEST_HOME, 'config', 'agent-desk', 'anthropic-api-key')
+  const account = (name: string) => {
+    mkdirSync(dirname(hold), { recursive: true })
+    writeFileSync(hold, JSON.stringify({ state: 'running', account: name }))
+  }
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-from-the-server'
+  try {
+    await clearChat()
+    const before = runs().length
+    account('api')
+    await sendChat('On the key?', null)
+    await idle()
+    assert.equal(runs().length, before)
+    const note = chatSnapshot().items.at(-1)
+    assert.equal(note?.role, 'note')
+    assert.match(note?.text ?? '', /^Claude Code didn't start: the account is api, but no API key is set/)
+    assert.equal(chatSnapshot().session, null)
+    mkdirSync(dirname(key), { recursive: true })
+    writeFileSync(key, 'sk-ant-made-up-KEYS', { mode: 0o600 })
+    await sendChat('On the key now?', null)
+    await idle()
+    const api = runs().at(-1)
+    assert.equal(api?.apiKey, null)
+    const settings = JSON.parse(api?.args[(api?.args.indexOf('--settings') ?? 0) + 1] ?? '{}')
+    assert.equal(execSync(settings.apiKeyHelper, { encoding: 'utf8' }), 'sk-ant-made-up-KEYS')
+    assert.ok(!JSON.stringify(api?.args).includes('sk-ant-made-up-KEYS'))
+    account('subscription')
+    await sendChat('On the plan?', null)
+    await idle()
+    const plan = runs().at(-1)
+    assert.equal(plan?.apiKey, null)
+    assert.ok(!plan?.args.includes('--settings'))
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY
+    rmSync(hold, { force: true })
+    rmSync(key, { force: true })
+  }
+})
+
+test('each turn records what it cost, and a turn while the API budget holds is refused, saying why', async () => {
+  const hold = join(TEST_HOME, 'state', 'agent-desk', 'hold.json')
+  const key = join(TEST_HOME, 'config', 'agent-desk', 'anthropic-api-key')
+  const ledger = join(TEST_HOME, 'state', 'agent-desk', 'chat-spend.jsonl')
+  let session: string | null = null
+  // The turns of this test's session, since an earlier test's last turn may still be on its way to the ledger.
+  const turns = (): { session: string; account: string; reported: number; cost: number }[] => {
+    try {
+      return readFileSync(ledger, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+        .filter(one => one.session === session)
+    } catch {
+      return []
+    }
+  }
+  mkdirSync(dirname(hold), { recursive: true })
+  mkdirSync(dirname(key), { recursive: true })
+  writeFileSync(key, 'sk-ant-made-up-KEYS', { mode: 0o600 })
+  writeFileSync(hold, JSON.stringify({ state: 'running', account: 'api', apiBudget: { on: true, dollars: 1 } }))
+  try {
+    await clearChat()
+    process.env.FAKE_CLAUDE_COST = '0.6'
+    await sendChat('What did that cost?', null)
+    await idle()
+    session = chatSnapshot().session
+    await until(() => turns().length === 1)
+    // Claude Code reports a resumed session's total so far, so the second turn cost 0.90 of its 1.50.
+    process.env.FAKE_CLAUDE_COST = '1.5'
+    await sendChat('And now?', null)
+    await idle()
+    await until(() => turns().length === 2)
+    assert.deepEqual(turns().map(one => [one.session, one.account, one.reported, Math.round(one.cost * 100) / 100]),
+      [[session, 'api', 0.6, 0.6], [session, 'api', 1.5, 0.9]])
+    const before = runs().length
+    await sendChat('One more?', null)
+    await idle()
+    assert.equal(runs().length, before)
+    const note = chatSnapshot().items.at(-1)
+    assert.equal(note?.role, 'note')
+    assert.match(note?.text ?? '',
+      /^Claude Code didn't start: the API budget holds new turns: \$[0-9.]+ of \$1\.00 this month;/)
+  } finally {
+    delete process.env.FAKE_CLAUDE_COST
+    rmSync(hold, { force: true })
+    rmSync(key, { force: true })
+    rmSync(ledger, { force: true })
+  }
+})
+
 test('Clear Chat forgets the session, and the next message starts a new one', async () => {
   const old = chatSnapshot().session
   await clearChat()
@@ -261,11 +355,42 @@ test('a stream without partial messages still shows the reply\'s text, and a fai
   assert.equal(turn.result, true)
 })
 
+// The cases of tests/test_agent_log.py's SummarizeTests, so the chat's tool lines read as the Agent Log's.
 test('a tool call\'s line names its most telling input\'s first line, cut short', () => {
-  assert.equal(summarize({ command: 'ls\n-la', description: 'List' }), 'ls')
+  assert.equal(summarize({ command: 'git add -A\ngit commit' }), 'git add -A')
   assert.equal(summarize({ description: 'List' }), 'List')
-  assert.equal(summarize({ other: 1 }), '')
-  assert.equal(summarize({ command: 'x'.repeat(200) }).length, 160)
+  assert.equal(summarize({ todos: [] }), '')
+  const long = summarize({ command: 'x'.repeat(500) })
+  assert.equal(long.length, 160)
+  assert.ok(long.endsWith('…'))
+})
+
+test('a command with a description shows the description, then its first line, cut whole', () => {
+  assert.equal(summarize({ command: 'cargo test -p gpu --lib\necho done', description: 'Run the stuck-device test' }),
+    'Run the stuck-device test · cargo test -p gpu --lib')
+  const long = summarize({ command: 'x'.repeat(500), description: 'Build' })
+  assert.equal(long.length, 160)
+  assert.ok(long.startsWith('Build · xxx'))
+  assert.ok(long.endsWith('…'))
+})
+
+test('a command opening with a heredoc shows the first program after it', () => {
+  for (const [command, shown] of [
+    ['python3 - <<\'EOF\'\nimport os\nEOF\ncargo test -p gpu --lib', 'cargo test -p gpu --lib'],
+    ['git commit -m "$(cat <<\'EOF\'\nFix it\nEOF\n)" && git push', 'git push'],
+    ['cat <<-END >notes\n\tline\n\tEND\n\n# then build\nmake', 'make'],
+    ['paste <<A <<"B"\n1\nA\n2\nB\njust test', 'just test'],
+  ] as const) {
+    assert.equal(summarize({ command }), shown, command)
+  }
+})
+
+test('a heredoc with no program after it, a described heredoc, and a here-string show the first line', () => {
+  assert.equal(summarize({ command: 'git commit -m "$(cat <<\'EOF\'\nFix it\nEOF\n)"' }),
+    'git commit -m "$(cat <<\'EOF\'')
+  assert.equal(summarize({ command: 'python3 - <<\'EOF\'\nx\nEOF\ncargo test', description: 'Probe the device' }),
+    'Probe the device · python3 - <<\'EOF\'')
+  assert.equal(summarize({ command: 'grep x <<< "$text"\nls' }), 'grep x <<< "$text"')
 })
 
 test('the claude command is AGENT_DESK_CLAUDE, then claude on PATH, then the native installer\'s', () => {

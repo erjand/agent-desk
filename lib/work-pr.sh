@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sends a headless Claude Code agent back to a review of an agent/<slug> branch other than agent/issue-<n>, such as a
+# Sends a headless agent back to a review of an agent/<slug> branch other than agent/issue-<n>, such as a
 # chore's or an interactive session's, with the user's request:
 #   REQUEST="@agent Merge main ..." agent-desk work-pr 537
 # The dispatcher runs it when the user mentions @agent on such a review, as the inbox's Fix conflicts button does, and
@@ -46,17 +46,15 @@ work_pr_main() {
     # The run waits here, holding its slot, until the machine has the memory its kind of run needs.
     if [[ -n $name ]]; then
         desk_memory_start "chore/$name"
-        desk_model_flags chore "$name"
+        desk_runner_flags chore "$name" || return 1
     else
         desk_memory_start agent
-        desk_model_flags agent
+        desk_runner_flags agent || return 1
     fi
-    desk_note review "$pr" "An agent started on \`$branch\`$run_link. To take over, run \`claude --resume \
-$session\` in \`$dest\`."
+    desk_note review "$pr" "An agent started on \`$branch\`$run_link. $(desk_takeover_note "$dest" "$session")"
 
-    if [[ ! -d $dest ]] && ! (cd "$main" && "$desk_lib/worktree.sh" "$slug" "$base"); then
-        setup=$(desk_config worktree.setup "")
-        desk_note review "$pr" "The agent didn't start: the worktree setup, \`$setup\`, failed$run_link."
+    if [[ ! -d $dest ]] && ! desk_make_worktree "$slug" "$base"; then
+        desk_note review "$pr" "The agent didn't start: $desk_worktree_failed$run_link."
         exit 1
     fi
 
@@ -77,7 +75,7 @@ review without a push."
     status=0
     stream=$(mktemp)
     # The run's stream-json goes to a file too, for its length and turns in the run log.
-    desk_claude_run "$dest" "$stream" "$prompt" --session-id "$session" || status=$?
+    desk_run "$dest" "$stream" "$prompt" "$session" || status=$?
     left=$(desk_left_task "$stream" "$status")
 
     python3 -B "$desk_lib/run_log.py" record "$desk_model" "$desk_effort" "$stream" "$pr" --start feedback || true

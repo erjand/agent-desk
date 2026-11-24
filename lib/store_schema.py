@@ -197,12 +197,50 @@ MIGRATIONS = [
         "ALTER TABLE runs ADD COLUMN gpu_queued REAL",
         "ALTER TABLE runs ADD COLUMN gpu_held REAL",
     ],
+    [
+        # Each issue's place in its project's list order, which the board lists Open, Blocked, Needs Design, Backlog,
+        # and Ideas in, the higher value first. Every issue holds one, so the place is ready when it leaves the start
+        # order or reopens. The issues filed already take their numbers, the newest first.
+        "ALTER TABLE items ADD COLUMN list_rank INTEGER",
+        "UPDATE items SET list_rank = number WHERE kind = 'issue'",
+    ],
+    [
+        # The account the dispatcher chooses at startup, or NULL while the run waits. Codex issue runs record
+        # `codex`. Claude runs record the account from lib/account.py and default to the plan.
+        "ALTER TABLE runs ADD COLUMN account TEXT",
+        "UPDATE runs SET account = 'subscription' WHERE status != 'requested'",
+    ],
+    [
+        # The base a check merged into its head and that base's commit, which lib/checks.py records as it merges, or
+        # which the dispatcher names when it queues a re-check; NULL for a check that never got as far. `recheck` is 1
+        # for a check the dispatcher queued because a ready review's base moved after its head's check, and 0 for a
+        # check of a moved head or one the merge queue asked for.
+        "ALTER TABLE checks ADD COLUMN base TEXT",
+        "ALTER TABLE checks ADD COLUMN base_sha TEXT",
+        "ALTER TABLE checks ADD COLUMN recheck INTEGER NOT NULL DEFAULT 0",
+    ],
+    [
+        # The total cost a run's Claude Code session reported in the run's last `result` event, which counts the
+        # session's earlier runs too when the run resumed it. `run_result` counts a run's `cost` as what that total grew
+        # by since the last run of the same `session` reported one.
+        "ALTER TABLE runs ADD COLUMN reported REAL",
+    ],
+    [
+        "ALTER TABLE runs ADD COLUMN posting_model TEXT",
+        "ALTER TABLE runs ADD COLUMN posting_provider TEXT",
+        "ALTER TABLE runs ADD COLUMN posting_version TEXT",
+        "ALTER TABLE items ADD COLUMN author_run INTEGER REFERENCES runs(id) ON DELETE SET NULL",
+        "ALTER TABLE comments ADD COLUMN author_run INTEGER REFERENCES runs(id) ON DELETE SET NULL",
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 # The first schema with `items.rank`. A read-only store on an older database lists the start order by number.
 RANK_SCHEMA = 10
 # The first schema with `gpu_calls`. A read-only store on an older database lists no GPU waits.
 GPU_SCHEMA = 12
+# The first schema with `items.list_rank`. A read-only store on an older database lists its issues by number, the
+# highest first.
+LIST_SCHEMA = 13
 
 
 class StoreError(Exception):

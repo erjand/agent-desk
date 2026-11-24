@@ -149,12 +149,24 @@ export function choreRuns(repo: string): ChoreRun[] {
 
 /** An issue or a review as the store holds it: `state` is closed or a workflow state such as open or queued. */
 export type StoredItem = { number: number; kind: 'issue' | 'review'; title: string; body: string; state: string
-  stateReason: string | null; author: string | null; createdAt: string }
+  stateReason: string | null; author: string | null; author_run?: number | null; createdAt: string }
 
 /** One of a project's issues or reviews, or null when it has none by that number. */
 export function storedItem(repo: string, number: number): StoredItem | null {
-  return rows<StoredItem>('SELECT number, kind, title, body, state, state_reason AS stateReason, author,'
+  return rows<StoredItem>('SELECT items.*, state_reason AS stateReason,'
     + ' created_at AS createdAt FROM items WHERE project = ? AND number = ?', repo, number)[0] ?? null
+}
+
+export type PostingIdentity = { model: string; version: string; provider?: 'anthropic' | 'openai' }
+
+export function storedPosting(repo: string, run: number): PostingIdentity | undefined {
+  const [row] = rows<{ posting_model?: string | null; posting_version?: string | null
+    posting_provider?: string | null }>('SELECT * FROM runs WHERE project = ? AND id = ?', repo, run)
+  if (row?.posting_model && row.posting_version) {
+    const provider = row.posting_provider
+    return { model: row.posting_model, version: row.posting_version,
+      ...provider === 'anthropic' || provider === 'openai' ? { provider } : {} }
+  }
 }
 
 /**
@@ -230,16 +242,16 @@ export function choreReviews(repo: string): ChoreReview[] {
  * null when never.
  */
 export type StoredComment = { id: number; author: string | null; body: string; createdAt: string; toAgent: boolean
-  editedAt: string | null }
+  editedAt: string | null; author_run?: number | null }
 
 /** A comment's row as `SELECT *` reads it, where a store lib/store.py hasn't yet migrated lacks the newer columns. */
 type CommentRow = { id: number; author: string | null; body: string; created_at: string; to_agent: number
   edited_at?: string | null; path: string | null; line: number | null; head_sha: string | null
-  sent_in?: number | null }
+  sent_in?: number | null; author_run?: number | null }
 
 function commentOf(row: CommentRow): StoredComment {
   return { id: row.id, author: row.author, body: row.body, createdAt: row.created_at, toAgent: row.to_agent === 1,
-    editedAt: row.edited_at ?? null }
+    editedAt: row.edited_at ?? null, author_run: row.author_run }
 }
 
 /** An item's conversation, oldest first: its comments, leaving out a review's comments on lines of its diff. */
@@ -323,27 +335,30 @@ export function storedLinked(repo: string, number: number, kind: string, outward
       .sort((a, b) => a - b) }))
 }
 
-/** A branch check as the store holds it: its status is queued, running, passed, failed, timed-out, or lost. */
-export type StoredCheck = { id: number; name: string; status: string; attempt: number }
+/**
+ * A branch check as the store holds it: its status is queued, running, passed, failed, timed-out, or lost, and
+ * `recheck` is 1 for one the dispatcher queued after the review's base moved.
+ */
+export type StoredCheck = { id: number; name: string; status: string; attempt: number; recheck: number }
 
 /**
  * The checks of `head` on `branch` that the review shows, as lib/store.py's newest_checks picks them: the newest
- * attempt, or the failed first attempt while the second it queued waits or runs. None while no check of the head was
- * queued, or each one was superseded or cancelled.
+ * attempt, or the failed first attempt while the second it queued waits or runs, or the passed check while a re-check
+ * of a newer base waits or runs. None while no check of the head was queued, or each one was superseded or cancelled.
  */
 export function storedChecks(repo: string, branch: string, head: string | null): StoredCheck[] {
   if (!head) {
     return []
   }
-  const [newest, before] = rows<StoredCheck>('SELECT id, name, status, attempt FROM checks WHERE project = ?'
+  const [newest, before] = rows<StoredCheck>('SELECT id, name, status, attempt, recheck FROM checks WHERE project = ?'
     + " AND branch = ? AND head_sha = ? AND status NOT IN ('superseded', 'cancelled') ORDER BY id DESC LIMIT 2",
     repo, branch, head)
   if (newest === undefined) {
     return []
   }
-  const retrying = ['queued', 'running'].includes(newest.status) && before !== undefined
-    && ['failed', 'timed-out', 'lost'].includes(before.status)
-  return [retrying && before ? before : newest]
+  const standing = ['queued', 'running'].includes(newest.status) && before !== undefined
+    && (['failed', 'timed-out', 'lost'].includes(before.status) || (newest.recheck === 1 && before.status === 'passed'))
+  return [standing && before ? before : newest]
 }
 
 /** Whether check `id` is one of the project's. */

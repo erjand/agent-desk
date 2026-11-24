@@ -7,7 +7,8 @@ The machine checks cover the commands agent-desk runs, the git identity the agen
 on PATH, the Claude Code plugin and its skills, that the state folder is private to its owner, that nothing is left of
 the GitHub API budget queue, the GitHub response cache, or the failure write-ups' ledger, the local store's database,
 the dispatcher, the backup, chore, and merge timers, the web page's service, the agentdesk.slice file that caps the
-runs' memory, lingering, and that the weekly usage limit, while on, reads the plan's usage. Given a project, it also
+runs' memory, lingering, the account the desk's Claude processes bill, with its API key's file on `api` and a monthly
+API budget that is on, and that the weekly usage limit, while on, reads the plan's usage. Given a project, it also
 checks that its .agent-desk.json parses, warns when it sets no `test` command, and checks that
 ~/.config/agent-desk/projects and the store's projects table record its main checkout, and that each of its chores names
 a skill Claude Code finds. For a project whose `host` is `github`, it warns when `gh` can't reach GitHub, which releases
@@ -25,6 +26,8 @@ import sys
 from collections import namedtuple
 from pathlib import Path
 
+import account
+import budget
 import chore_skills
 import desk_path
 import run_units
@@ -143,6 +146,9 @@ def config_problems(text):
     minutes = config.get("testMinutes")
     if minutes is not None and (isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0):
         problems.append("testMinutes must be a whole number of minutes above 0")
+    recheck = config.get("testOnBaseMove")
+    if recheck is not None and not isinstance(recheck, bool):
+        problems.append("testOnBaseMove must be true or false")
     limits = config.get("limitMinutes")
     if limits is not None:
         if not isinstance(limits, dict):
@@ -156,6 +162,10 @@ def config_problems(text):
     shrink = lookup(config, "resources.shrinkClaims")
     if shrink is not None and not isinstance(shrink, bool):
         problems.append("resources.shrinkClaims must be true or false")
+    for key in ("worktree.setup", "worktree.teardown"):
+        value = lookup(config, key)
+        if value is not None and not isinstance(value, str):
+            problems.append(f'{key} must be a command run with bash -c, or "" for none')
     for key in ("chores.paused", "worktree.seeds", "sync.skipWhile"):
         value = lookup(config, key)
         if value is not None and not isinstance(value, list):
@@ -389,12 +399,49 @@ def check_leftovers(state, cache):
                  + ", ".join(map(str, left)), "rm -r " + " ".join(map(str, left)))
 
 
+def check_account(state=None, path=None):
+    """What the desk's Claude processes bill, and on `api` whether the key's file is there, holds a key, and is
+    private to its owner."""
+    state = hold.status() if state is None else state
+    path = path or account.KEY
+    chosen = account.current(state)
+    if chosen == "subscription":
+        return Check("ok", "the account is subscription: the desk's runs and Chat bill the Claude plan")
+    problem = account.key_problem(path)
+    if problem:
+        why, fix = problem
+        return Check("fail", f"the account is api, but {why}", fix)
+    return Check("ok", f"the account is api: the desk's runs and Chat bill the API key ending in "
+                 f"{account.ending(account.read_key(path))}")
+
+
+def check_budget(state=None, desk=None, now=None):
+    """On `api`, whether the API budget is on, since without one nothing stops the runs' spend on the key."""
+    state = hold.status() if state is None else state
+    if account.current(state) != "api":
+        return Check("ok", "the API budget waits for the api account")
+    limit = budget.budget_of(state)
+    if limit is None or not limit["on"]:
+        return Check("warn", "the account is api with no API budget on, so nothing holds new runs however much the "
+                     "key spends", "agent-desk account budget <dollars>")
+    try:
+        held = budget.holds(state, desk, now)
+    except (store.StoreError, sqlite3.Error) as problem:
+        return Check("warn", f"the API budget of {budget.dollars(limit['dollars'])} a month can't read the month's "
+                     f"spend from the store, so runs start: {problem}", "see the store check above")
+    return Check("ok", f"the API budget of {budget.dollars(limit['dollars'])} a month is on"
+                 + (f", and holds new runs: {held}" if held else ""))
+
+
 def check_usage(state=None, now=None, get=None):
     """Whether the weekly usage limit, while on, reads the plan's usage, since it lets runs start when it can't."""
     state = hold.status() if state is None else state
     limit = usage.limit_of(state)
     if limit is None or not limit["on"]:
         return Check("ok", "the weekly usage limit is off")
+    if account.current(state) != "subscription":
+        return Check("ok", f"the weekly usage limit of {limit['percent']}% waits for the subscription, since the "
+                     "account is api")
     reason, problem = usage.check(state, now, get)
     if problem:
         return Check("warn", f"the weekly usage limit of {limit['percent']}% can't read usage, so runs start: "
@@ -533,7 +580,7 @@ def main(argv):
     checkout = argv[3] if len(argv) == 4 else root
     machine = [*check_commands(), check_cgroup(), check_path(root), *check_plugin(root, checkout),
                check_state(store.STATE), check_leftovers(store.STATE, CACHE), check_store(store.DATABASE),
-               check_usage()]
+               check_account(), check_budget(), check_usage()]
     if shutil.which("systemctl") and shutil.which("loginctl"):
         machine += [*check_services(root), check_slice(), check_linger()]
     report("Machine", machine)

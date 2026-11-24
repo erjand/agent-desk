@@ -37,12 +37,12 @@ class ChecksMixin:
 
     def merge_targets(self, project):
         """
-        Each open review's branch and base, with the branch's head when the dispatcher watches it, and the base and
-        base head its merge was last tried against with that try's result.
+        Each open review's branch, base, and draft flag, with the branch's head when the dispatcher watches it, and the
+        base and base head its merge was last tried against with that try's result.
         """
         rows = self.db.execute(
-            "SELECT reviews.branch, reviews.base AS review_base, branches.head_sha, branches.base, branches.base_sha,"
-            " branches.mergeable FROM reviews JOIN items ON items.project = reviews.project"
+            "SELECT reviews.branch, reviews.base AS review_base, reviews.draft, branches.head_sha, branches.base,"
+            " branches.base_sha, branches.mergeable FROM reviews JOIN items ON items.project = reviews.project"
             " AND items.number = reviews.number LEFT JOIN branches ON branches.project = reviews.project"
             " AND branches.branch = reviews.branch WHERE reviews.project = ? AND items.state != 'closed'"
             " ORDER BY reviews.number", (project,)).fetchall()
@@ -53,7 +53,9 @@ class ChecksMixin:
         The checks of `head` on `branch`, as `--json checks` prints them: the newest attempt, or none while no check of
         the head was queued or each one was superseded or cancelled. A first attempt that failed queued a second, and
         the failure stands until the second ends, so the review shows failing while its retry waits or runs, and
-        passes once the retry passes.
+        passes once the retry passes. The head's last result stands the same way while a re-check of a newer base
+        waits or runs. Each names the base it merged and that base's commit, None before it merged one, and whether
+        it was a re-check.
         """
         if not head:
             return []
@@ -63,11 +65,24 @@ class ChecksMixin:
                                (project, branch, head, *UNCHECKED)).fetchall()
         if not rows:
             return []
-        row = rows[0]
-        if row["status"] in ("queued", "running") and len(rows) > 1 and rows[1]["status"] in CHECK_FAILURES:
-            row = rows[1]
+        row = dict(rows[0])
+        if row["status"] in ("queued", "running") and len(rows) > 1 and (
+                rows[1]["status"] in CHECK_FAILURES or (row.get("recheck") and rows[1]["status"] == "passed")):
+            row = dict(rows[1])
         return [{"name": row["name"], "status": row["status"], "attempt": row["attempt"], "log": row["log_path"],
-                 "startedAt": row["started_at"], "endedAt": row["ended_at"]}]
+                 "startedAt": row["started_at"], "endedAt": row["ended_at"], "base": row.get("base"),
+                 "baseSha": row.get("base_sha"), "recheck": bool(row.get("recheck"))}]
+
+    def base_broke(self, project, branch, head):
+        """
+        Whether the newest check of `head` on `branch` is a re-check that failed, retry included: the head passed its
+        check against an older base and fails merged with a newer one, which a fix can adapt it to.
+        """
+        marks = ", ".join("?" * len(UNCHECKED))
+        row = self.db.execute(f"SELECT recheck, status FROM checks WHERE project = ? AND branch = ? AND head_sha = ?"
+                              f" AND status NOT IN ({marks}) ORDER BY id DESC LIMIT 1",
+                              (project, branch, head, *UNCHECKED)).fetchone()
+        return bool(row) and bool(row["recheck"]) and row["status"] in CHECK_FAILURES
 
     def check(self, check):
         row = self.db.execute("SELECT * FROM checks WHERE id = ?", (check,)).fetchone()
@@ -81,6 +96,12 @@ class ChecksMixin:
         rows = self.db.execute(f"SELECT * FROM checks WHERE status IN ({marks}) AND (? IS NULL OR project = ?)"
                                " AND (? IS NULL OR branch = ?) ORDER BY id",
                                (*statuses, project, project, branch, branch)).fetchall()
+        return [dict(row) for row in rows]
+
+    def checks_of_head(self, project, branch, head):
+        """Every check of `head` on `branch`, oldest first."""
+        rows = self.db.execute("SELECT * FROM checks WHERE project = ? AND branch = ? AND head_sha = ? ORDER BY id",
+                               (project, branch, head)).fetchall()
         return [dict(row) for row in rows]
 
     def checked(self, project, branch, head):
@@ -131,11 +152,13 @@ class ChecksMixin:
                             mergeable=mergeable)
         return True
 
-    def _check_queue(self, project, branch, head, attempt):
-        check = self.db.execute("INSERT INTO checks (project, branch, number, head_sha, name, status, attempt)"
-                                " VALUES (?, ?, ?, ?, 'test', 'queued', ?)",
-                                (project, branch, self.review_number(project, branch), head, attempt)).lastrowid
-        self._event(project, None, "check-queued", check=check, branch=branch, head=head, attempt=attempt)
+    def _check_queue(self, project, branch, head, attempt, base=None, base_sha=None, recheck=False):
+        check = self.db.execute("INSERT INTO checks (project, branch, number, head_sha, name, status, attempt, base,"
+                                " base_sha, recheck) VALUES (?, ?, ?, ?, 'test', 'queued', ?, ?, ?, ?)",
+                                (project, branch, self.review_number(project, branch), head, attempt, base, base_sha,
+                                 int(recheck))).lastrowid
+        extra = {"base": base, "base_sha": base_sha, "recheck": True} if recheck else {}
+        self._event(project, None, "check-queued", check=check, branch=branch, head=head, attempt=attempt, **extra)
         return check
 
     def _check_end(self, row, status, name=None):
@@ -145,11 +168,35 @@ class ChecksMixin:
         self._event(row["project"], None, "check-ended", check=row["id"], branch=row["branch"], head=row["head_sha"],
                     name=name or row["name"], status=status, attempt=row["attempt"])
 
-    def check_queue(self, project, branch, head):
-        """Queues a check of `head` on `branch`, and returns its id."""
+    def check_queue(self, project, branch, head, base=None, base_sha=None, recheck=False):
+        """
+        Queues a check of `head` on `branch`, and returns its id. A re-check names the base and the commit of it to
+        merge; any other check merges its base's newest commit when it starts.
+        """
         with self.write():
             self._project(project)
-            return self._check_queue(project, branch, head, 1)
+            return self._check_queue(project, branch, head, 1, base, base_sha, recheck)
+
+    def base_moved(self, project, branch, base_sha):
+        """
+        Ends the queued and running re-checks of `branch` that merge another commit of its base than `base_sha` as
+        superseded, and returns the ones that were running, whose units the caller stops.
+        """
+        query = ("SELECT * FROM checks WHERE project = ? AND branch = ? AND recheck = 1 AND base_sha IS NOT ?"
+                 " AND status IN ('queued', 'running') ORDER BY id")
+        # The dispatcher asks every second, so a branch with nothing to supersede costs a read and no write.
+        if self.db.execute(query, (project, branch, base_sha)).fetchone() is None:
+            return []
+        with self.write():
+            left = [dict(row) for row in self.db.execute(query, (project, branch, base_sha)).fetchall()]
+            for row in left:
+                self._check_end(row, "superseded")
+        return [row for row in left if row["status"] == "running"]
+
+    def check_merges(self, check, base, base_sha):
+        """Records the base a check merges into its head and that base's commit, as the check starts its merge."""
+        with self.write():
+            self.db.execute("UPDATE checks SET base = ?, base_sha = ? WHERE id = ?", (base, base_sha, check))
 
     def check_waits(self, check, gate, reason):
         """
@@ -190,5 +237,7 @@ class ChecksMixin:
                 return False
             self._check_end(row, status, name)
             if rerun and row["attempt"] == 1:
-                self._check_queue(row["project"], row["branch"], row["head_sha"], 2)
+                # A re-check's second attempt merges the same commit of its base; another check's merges the newest.
+                carried = (row["base"], row["base_sha"], True) if row["recheck"] else ()
+                self._check_queue(row["project"], row["branch"], row["head_sha"], 2, *carried)
         return True

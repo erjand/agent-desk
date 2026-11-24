@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { barHeight, boxOf, CommentForm, logLines, onDetailScroll, preview, sendOf, showTabTop, shownReview, StatusNote,
-  tabsOf, titleTarget } from './app-detail.js'
+import { Actions, barHeight, boxOf, CommentForm, logLines, onDetailScroll, preview, RunLog, sendOf, showTabTop, shownReview,
+  StatusNote, tabsOf, titleTarget } from './app-detail.js'
 import { BodyEdit, canSave, commentEdit, commentEditable, commentField, EditButton, EditedMark, editing,
   editingLabels, editKey, LabelsButton, LabelsEdit, MarkdownBox, toggleLabels, writeLabels } from './app-edit.js'
 import { Icon, Label, LabelPicker, STATE_LABELS } from './app-parts.js'
@@ -742,5 +742,55 @@ test('pressing a label in the picker posts it to /api/edit and shows the stored 
     ui.drafts.delete(editKey('game', 12, 'labels'))
     ui.toasts = []
     ui.server = null
+  }
+})
+
+test('a run\'s log sentence keeps a space on each side of its command, and a card without a log shows none', () => {
+  const log = 'journalctl --user -u agent-desk-agent-game-7-3.service'
+  const sentence = (card: Record<string, unknown>, issue?: number) => text(RunLog({ card, issue }) as Tree)
+  // A failed run's card, and a stopped issue's card that stands for its failed run.
+  assert.equal(sentence({ run: 3, log }), `Read the run's log in a terminal with ${log} Copy.`)
+  assert.equal(sentence({ log }, 7),
+    `Read the run's log in a terminal with ${log} Copy, or its agent's session in the Agent Log tab.`)
+  assert.equal(RunLog({ card: { run: 3 }, issue: 7 }), null)
+})
+
+test('Start, Unpick, Designed, Move to Backlog, Cancel Run, and Resume ask to confirm: the first press and Cancel '
+  + 'post nothing, and Confirm posts the action', async () => {
+  const real = globalThis.fetch
+  const sent: unknown[] = []
+  globalThis.fetch = (async (path: string, init: { body: string }) => {
+    sent.push([path, JSON.parse(init.body)])
+    return { ok: true, status: 202, json: async () => ({}) }
+  }) as unknown as typeof fetch
+  const buttons = (card: object) => find(Actions({ card }) as Tree, one => one.type === 'button')
+  const pressed = (card: object, label: string) => {
+    const button = buttons(card).find(one => text(one).trim() === label)
+    assert.ok(button, `no ${label} button`)
+    return (button.props.onClick as () => unknown)()
+  }
+  try {
+    for (const [action, label] of [['start', 'Start'], ['unpick', 'Unpick'], ['designed', 'Designed'],
+      ['to-backlog', 'Move to Backlog'], ['cancel', 'Cancel Run'], ['unpause', 'Resume']]) {
+      const card = { id: 'game:41', desk: 'game', key: 'queued-41', actions: ['open', action] }
+      ui.confirming = null
+      pressed(card, label)
+      assert.deepEqual(ui.confirming, { id: 'game:41', action })
+      assert.deepEqual(buttons(card).map(one => text(one).trim()), [`Confirm ${label}`, 'Cancel'])
+      pressed(card, 'Cancel')
+      assert.equal(ui.confirming, null)
+      pressed(card, label)
+      assert.deepEqual(sent, [], `${label} posts nothing before its confirm`)
+      await pressed(card, `Confirm ${label}`)
+      assert.equal(ui.confirming, null)
+      assert.deepEqual(sent, [['/api/act', { desk: 'game', key: 'queued-41', action }]])
+      sent.length = 0
+    }
+    // A move in the start order acts at once.
+    await pressed({ id: 'game:41', desk: 'game', key: 'queued-41', actions: ['top'] }, 'Move to Top')
+    assert.deepEqual(sent, [['/api/act', { desk: 'game', key: 'queued-41', action: 'top' }]])
+  } finally {
+    globalThis.fetch = real
+    ui.confirming = null
   }
 })

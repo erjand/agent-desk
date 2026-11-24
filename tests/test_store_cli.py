@@ -56,6 +56,8 @@ class CommandTest(StoreCase):
         self.assertEqual([one["number"] for one in self.store.order(REPO)], [2, 1, 3])
         self.assertEqual(self.cli("queue", "order", "2", "--to", "3"), (0, "#2 is 3 of 3 in the start order.", ""))
         self.assertEqual(self.cli("queue", "order", "2", "--to", "1"), (0, "#2 is 1 of 3 in the start order.", ""))
+        self.assertEqual(self.cli("queue", "order", "2", "--bottom"), (0, "#2 is 3 of 3 in the start order.", ""))
+        self.assertEqual(self.cli("queue", "order", "2", "--top"), (0, "#2 is 1 of 3 in the start order.", ""))
         status, out, err = self.cli("queue", "order", "2", "--to", "0")
         self.assertEqual((status, out), (1, ""))
         self.assertIn("0 isn't a place", err)
@@ -63,7 +65,8 @@ class CommandTest(StoreCase):
         status, out, err = self.cli("queue", "order", "4", "--top")
         self.assertEqual((status, out), (1, ""))
         self.assertIn("#4 is open, and only a queued or waiting issue", err)
-        for argv in (("3",), ("--up",), ("3", "--up", "--down"), ("3", "--to", "2", "--top"), ("3", "--to", "two")):
+        for argv in (("3",), ("--up",), ("3", "--up", "--down"), ("3", "--to", "2", "--top"), ("3", "--to", "two"),
+                     ("3", "--top", "--bottom"), ("--bottom",)):
             with self.subTest(argv=argv), mock.patch("sys.stderr", io.StringIO()):
                 try:
                     status = self.cli("queue", "order", *argv)[0]
@@ -71,6 +74,71 @@ class CommandTest(StoreCase):
                     status = stopped.code
                 self.assertNotEqual(status, 0)
         self.assertEqual([one["number"] for one in self.store.order(REPO)], [2, 1, 3])
+
+    def test_queue_order_sort_sorts_and_prints_the_order_and_refuses_an_issue_or_a_move_with_it(self):
+        for title in ("Paint", "Sand", "Oil"):
+            self.cli("issue", "create", "--title", title, "--label", "agent-ready")
+        self.cli("issue", "edit", "1", "--add-blocked-by", "3")
+        self.cli("queue", "order", "2", "--top")
+        last = self.store.last_event()
+        self.assertEqual(self.cli("queue", "order", "--sort"), (0, "1\t#2\tqueued\tSand\n2\t#3\tqueued\tOil\n"
+                                                                   "3\t#1\tqueued\tPaint", ""))
+        self.assertEqual(self.events(last), [(None, "queue-sorted")])
+        status, out, err = self.cli("queue", "order", "3", "--sort")
+        self.assertEqual((status, out), (1, ""))
+        self.assertIn("--sort sorts the whole order, so it takes no issue", err)
+        for argv in (("--sort", "--top"), ("3", "--to", "1", "--sort")):
+            with self.subTest(argv=argv), mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    self.cli("queue", "order", *argv)
+                self.assertNotEqual(stopped.exception.code, 0)
+        self.assertEqual(self.store.last_event(), last + 1)
+
+    def test_list_order_prints_the_order_and_moves_an_issue_in_it(self):
+        for title in ("Paint", "Sand", "Oil", "Queued"):
+            self.cli("issue", "create", "--title", title)
+        self.cli("issue", "edit", "2", "--status", "needs-design")
+        self.cli("issue", "edit", "4", "--add-label", "agent-ready")
+        self.assertEqual(self.cli("list", "order"), (0, "1\t#2\tneeds-design\tSand\n2\t#3\topen\tOil\n"
+                                                        "3\t#1\topen\tPaint", ""))
+        last = self.store.last_event()
+        self.assertEqual(self.cli("list", "order", "1", "--top"), (0, "#1 is 1 of 3 in the list order.", ""))
+        self.assertEqual(self.cli("list", "order", "#1", "--after", "#3"), (0, "#1 is 3 of 3 in the list order.", ""))
+        self.assertEqual(self.cli("list", "order", "3", "--before", "2"), (0, "#3 is 1 of 3 in the list order.", ""))
+        self.assertEqual(self.cli("list", "order", "3", "--bottom"), (0, "#3 is 3 of 3 in the list order.", ""))
+        self.assertEqual([event["type"] for event in self.store.events_since(last)], ["list-moved"] * 4)
+        self.assertEqual([one["number"] for one in self.store.list_order(REPO)], [2, 1, 3])
+        for argv, message in ((("4", "--top"), "#4 is queued, so the start order places it"),
+                              (("1", "--before", "1"), "#1 can't move next to itself"),
+                              (("9", "--top"), "has no issue #9")):
+            with self.subTest(argv=argv):
+                status, out, err = self.cli("list", "order", *argv)
+                self.assertEqual((status, out), (1, ""))
+                self.assertIn(message, err)
+        for argv in (("3",), ("--top",), ("3", "--top", "--bottom"), ("3", "--before", "2", "--after", "1"),
+                     ("3", "--before", "two"), ("3", "--reset", "1", "2"), ("--reset",)):
+            with self.subTest(argv=argv), mock.patch("sys.stderr", io.StringIO()):
+                try:
+                    status = self.cli("list", "order", *argv)[0]
+                except SystemExit as stopped:
+                    status = stopped.code
+                self.assertNotEqual(status, 0)
+        self.assertEqual([one["number"] for one in self.store.list_order(REPO)], [2, 1, 3])
+
+    def test_list_order_reset_deals_the_places_out_by_number_and_prints_the_issues_it_reset(self):
+        for title in ("Paint", "Sand", "Oil", "Wax"):
+            self.cli("issue", "create", "--title", title)
+        self.cli("list", "order", "1", "--top")
+        self.cli("list", "order", "2", "--before", "4")
+        last = self.store.last_event()
+        self.assertEqual(self.cli("list", "order", "--reset", "1", "#2", "3"),
+                         (0, "1\t#3\topen\tOil\n2\t#2\topen\tSand\n4\t#1\topen\tPaint", ""))
+        # #4 keeps its own place between them.
+        self.assertEqual([one["number"] for one in self.store.list_order(REPO)], [3, 2, 4, 1])
+        self.assertEqual([event["type"] for event in self.store.events_since(last)], ["list-reset"])
+        last = self.store.last_event()
+        self.assertEqual(self.cli("list", "order", "--reset", "3", "1")[0], 0)
+        self.assertEqual(self.store.last_event(), last)
 
     def test_a_close_posts_its_comment_in_the_same_write_so_a_refused_close_leaves_none(self):
         self.cli("issue", "create", "--title", "One")
@@ -315,6 +383,124 @@ class CommandTest(StoreCase):
         row = self.store.db.execute("SELECT path, next_number FROM projects WHERE slug = ?", (REPO,)).fetchone()
         self.assertEqual((row["path"], row["next_number"]), ("/home/me/game", 2))
 
+
+    def test_project_list_prints_each_project_and_its_checkout_in_the_files_order(self):
+        store.PROJECTS.write_text(f"org/other /elsewhere\n{REPO} /home/me/my game\nno-checkout\n")
+        self.assertEqual(self.cli("project", "list"), (0, f"org/other /elsewhere\n{REPO} /home/me/my game", ""))
+        status, out, err = self.cli("project", "list", "--json")
+        self.assertEqual((status, err), (0, ""))
+        self.assertEqual(json.loads(out), [{"repo": "org/other", "checkout": "/elsewhere"},
+                                           {"repo": REPO, "checkout": "/home/me/my game"}])
+
+    def test_project_list_of_a_missing_or_empty_projects_file_prints_nothing_but_an_empty_json_list(self):
+        self.assertFalse(store.PROJECTS.exists())
+        self.assertEqual(self.cli("project", "list"), (0, "", ""))
+        self.assertEqual(self.cli("project", "list", "--json"), (0, "[]", ""))
+        store.PROJECTS.write_text("")
+        self.assertEqual(self.cli("project", "list"), (0, "", ""))
+
+    def test_project_list_runs_from_bin_agent_desk_without_opening_a_store(self):
+        config = Path(self.folder.name) / "config"
+        (config / "agent-desk").mkdir(parents=True)
+        (config / "agent-desk" / "projects").write_text(f"{REPO} /home/me/game\n")
+        state = Path(self.folder.name) / "untouched-state"
+        env = dict(os.environ, XDG_CONFIG_HOME=str(config), XDG_STATE_HOME=str(state))
+        done = subprocess.run([str(LIB.parent / "bin" / "agent-desk"), "project", "list"], env=env,
+                              capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, f"{REPO} /home/me/game\n", ""))
+        self.assertFalse(state.exists())
+
+
+class ReviewDiffTest(StoreCase):
+    """`review diff` and the size fields, read from git in a main checkout the projects file records."""
+
+    def setUp(self):
+        super().setUp()
+        root = Path(self.folder.name)
+        self.checkout = root / "repo"
+        (root / "gitconfig").write_text("[user]\n\tname = Tester\n\temail = t@example.com\n"
+                                        "[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n")
+        patch = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+                                             "GIT_CONFIG_NOSYSTEM": "1"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.git("init", "-q", str(self.checkout), here=False)
+        (self.checkout / "keep.txt").write_text("one\ntwo\n")
+        self.git("add", "keep.txt")
+        self.git("commit", "-q", "-m", "start")
+        store.PROJECTS.write_text(f"{REPO} {self.checkout}\n")
+        # `review create` records the branch's head from git where it runs.
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.checkout)
+
+    def git(self, *args, here=True):
+        return subprocess.run(["git", *(("-C", str(self.checkout)) if here else ()), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def branch(self, name, **files):
+        """Commits `files` on a new branch `name` cut from main, and returns to main."""
+        self.git("checkout", "-q", "-b", name, "main")
+        for path, text in files.items():
+            (self.checkout / path).write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", name)
+        self.git("checkout", "-q", "main")
+
+    def test_an_open_review_diffs_its_branch_against_where_it_left_its_base(self):
+        self.branch("agent/issue-1", **{"keep.txt": "one\n2\nthree\n", "new.txt": "a\n"})
+        # A later commit on main stays out of the review's diff, as gh pr diff leaves it out.
+        (self.checkout / "main.txt").write_text("main\n")
+        self.git("add", "main.txt")
+        self.git("commit", "-q", "-m", "main moves")
+        self.cli("review", "create", "--branch", "agent/issue-1", "--title", "One")
+        status, out, _ = self.cli("review", "diff", "agent/issue-1")
+        self.assertEqual(status, 0)
+        self.assertIn("+++ b/new.txt", out)
+        self.assertIn("-two\n+2\n+three", out)
+        self.assertNotIn("main.txt", out)
+        shaped = json.loads(self.cli("review", "view", "1", "--json", "mergedAt,additions,deletions,changedFiles")[1])
+        self.assertEqual(shaped, {"mergedAt": None, "additions": 3, "deletions": 1, "changedFiles": 2})
+
+    def test_a_merged_review_diffs_its_merge_commit_and_lists_by_merge_time(self):
+        self.branch("agent/issue-1", **{"one.txt": "a\nb\n"})
+        self.branch("agent/issue-2", **{"two.txt": "c\n"})
+        for number, branch in ((1, "agent/issue-1"), (2, "agent/issue-2")):
+            self.cli("review", "create", "--branch", branch, "--title", f"Review {number}")
+            self.git("merge", "-q", "--no-ff", "-m", f"Merge {branch}", branch)
+            # The branch moves on after its merge, which the merged review's diff leaves out.
+            self.git("branch", "-f", branch, "main~1")
+            with mock.patch.object(store, "now", return_value=f"2026-11-1{number}T12:00:00Z"):
+                self.assertEqual(self.cli("review", "merge", str(number), "--sha", self.git("rev-parse", "main"))[0],
+                                 0)
+        status, out, _ = self.cli("review", "diff", "1")
+        self.assertEqual(status, 0)
+        self.assertIn("+++ b/one.txt", out)
+        self.assertNotIn("two.txt", out)
+
+        status, out, _ = self.cli("review", "list", "--merged-since", "2026-11-12T00:00:00Z", "--json",
+                                  "number,mergedAt,additions,deletions,changedFiles")
+        self.assertEqual((status, json.loads(out)), (0, [{"number": 2, "mergedAt": "2026-11-12T12:00:00Z",
+                                                          "additions": 1, "deletions": 0, "changedFiles": 1}]))
+        self.assertEqual(json.loads(self.cli("review", "list", "--merged-since", "2026-11-11", "--json", "number")[1]),
+                         [{"number": 2}, {"number": 1}])
+        # --since still filters on creation, which both reviews passed.
+        self.assertEqual(json.loads(self.cli("review", "list", "--state", "merged", "--since", "2026-11-12",
+                                             "--json", "number")[1]), [{"number": 2}, {"number": 1}])
+        status, _, err = self.cli("review", "list", "--merged-since", "2026-11-11", "--state", "open")
+        self.assertEqual(status, 1)
+        self.assertIn("can't go with --state open", err)
+
+    def test_a_review_whose_branch_is_gone_diffs_its_recorded_head_or_says_why_it_cant(self):
+        self.branch("agent/issue-1", **{"one.txt": "a\n"})
+        self.cli("review", "create", "--branch", "agent/issue-1", "--title", "One")
+        self.cli("review", "create", "--branch", "agent/issue-9", "--title", "Never pushed")
+        self.git("branch", "-D", "agent/issue-1")
+        self.assertIn("+++ b/one.txt", self.cli("review", "diff", "1")[1])
+        status, _, err = self.cli("review", "diff", "2")
+        self.assertEqual(status, 1)
+        self.assertIn("The branch agent/issue-9 is gone", err)
+        self.assertEqual(json.loads(self.cli("review", "view", "2", "--json", "additions,changedFiles")[1]),
+                         {"additions": None, "changedFiles": None})
 
 
 class ScriptTest(StoreCase):

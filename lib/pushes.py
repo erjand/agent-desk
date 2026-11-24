@@ -3,6 +3,8 @@
     python3 pushes.py status <main checkout> [--json]   shows how far main is ahead of origin and how its push went
     python3 pushes.py tick <main checkout> [--json]     pushes main and the agent branches that moved, as each
                                                        `agent-desk merges tick` does
+    python3 pushes.py push <main checkout> <agent/slug> pushes one agent branch that moved, as the cleanup after its
+                                                       review closes does, and exits 1 when the push fails
 
 Only the desk writes main on origin, so main moves on this machine first and origin follows. A project whose config sets
 `host` to `none` pushes nothing. When main holds commits that origin's main lacked at its last fetch, a tick fetches
@@ -17,9 +19,10 @@ origin from agent-desk's own main checkout publishes the release with scripts/re
 origin's main holds.
 
 After main, a tick pushes each agent/* branch whose head differs from origin's copy, in one `git push` that never
-forces, and notes when it last sent one, and the branches that failed with git's reason. A failed branch push blocks
-nothing, and a tick whose main push failed leaves the branches for the next. The state lives in
-~/.local/state/agent-desk/pushes/<owner>__<repo>.json.
+forces, and skips a branch whose head the local main holds, as a run's branch does until its agent commits, so a run
+that commits nothing leaves no branch on origin. It notes when it last sent one, and the branches that failed with
+git's reason. A failed branch push blocks nothing, and a tick whose main push failed leaves the branches for the next.
+The state lives in ~/.local/state/agent-desk/pushes/<owner>__<repo>.json.
 """
 
 import fcntl
@@ -206,18 +209,53 @@ def push_main(checkout, state, now, say):
 
 
 def agent_branches(checkout):
-    """Each local agent/* branch, and whether its head matches origin's copy as last fetched or pushed."""
+    """
+    Each local agent/* branch to keep on origin, and whether its head matches origin's copy as last fetched or pushed.
+    A branch whose head the local main holds, as a run's branch before its agent commits, has nothing to push, so it
+    counts only while origin's copy matches it.
+    """
     listed = git(checkout, "for-each-ref", "--format=%(refname) %(objectname)", BRANCHES,
                  "refs/remotes/origin/agent/")
     refs = dict(line.split(" ", 1) for line in listed.stdout.splitlines() if " " in line)
-    return {name.removeprefix("refs/heads/"): refs.get("refs/remotes/origin/" + name.removeprefix("refs/heads/")) == sha
-            for name, sha in refs.items() if name.startswith(BRANCHES)}
+    held = set(git(checkout, "for-each-ref", "--format=%(refname)", "--merged", "refs/heads/main",
+                   BRANCHES).stdout.split()) if rev(checkout, "refs/heads/main") else set()
+    matches = {name: refs.get("refs/remotes/origin/" + name.removeprefix("refs/heads/")) == sha
+               for name, sha in refs.items() if name.startswith(BRANCHES)}
+    return {name.removeprefix("refs/heads/"): same for name, same in matches.items() if same or name not in held}
+
+
+def send(checkout, names):
+    """Pushes agent branches in one `git push` that never forces, and returns git's result and the ones it failed."""
+    done = git(checkout, "push", "--porcelain", "origin", *(f"refs/heads/{name}:refs/heads/{name}" for name in names),
+               timeout=PUSH_SECONDS)
+    failed = [name for name in names if any(line.startswith("!") and f"refs/heads/{name}:" in line
+                                            for line in done.stdout.splitlines())]
+    if done.returncode != 0 and not failed:
+        failed = list(names)
+    return done, failed
+
+
+def push_branch(checkout, branch, say=print):
+    """
+    Pushes one agent branch whose head differs from origin's copy, as a tick would, so origin holds its commits before
+    the cleanup after its review closes judges them. Returns False when the push failed, as with origin out of reach,
+    and True when origin holds the branch or the project pushes nothing. It writes no state, and the next tick finds
+    the branch pushed.
+    """
+    if not pushes_to_host(checkout) or agent_branches(checkout).get(branch, True):
+        return True
+    done, failed = send(checkout, [branch])
+    if failed:
+        say(f"Couldn't push {branch} to origin: {what_failed(done)}")
+        return False
+    say(f"Pushed {branch} to origin.")
+    return True
 
 
 def push_branches(checkout, state, say, now=None):
     """
-    Pushes each agent/* branch whose head differs from origin's copy, and notes when a push last sent one, and the
-    ones that failed with why.
+    Pushes each agent/* branch whose head differs from origin's copy and holds a commit the local main lacks, and notes
+    when a push last sent one, and the ones that failed with why.
     """
     now = int(time.time() if now is None else now)
     moved = sorted(name for name, matches in agent_branches(checkout).items() if not matches)
@@ -225,12 +263,7 @@ def push_branches(checkout, state, say, now=None):
         state.pop("branches", None)
         state.pop("branchesError", None)
         return
-    done = git(checkout, "push", "--porcelain", "origin", *(f"refs/heads/{name}:refs/heads/{name}" for name in moved),
-               timeout=PUSH_SECONDS)
-    failed = [name for name in moved if any(line.startswith("!") and f"refs/heads/{name}:" in line
-                                            for line in done.stdout.splitlines())]
-    if done.returncode != 0 and not failed:
-        failed = moved
+    done, failed = send(checkout, moved)
     if len(failed) < len(moved):
         state["branchesPushedAt"] = now
     if failed:
@@ -328,6 +361,8 @@ def run_tick(checkout, repo, say=print):
 def main(argv):
     as_json = "--json" in argv
     args = [arg for arg in argv[1:] if arg != "--json"]
+    if len(args) == 3 and args[0] == "push" and args[2].startswith("agent/"):
+        return 0 if push_branch(args[1], args[2]) else 1
     if len(args) != 2 or args[0] not in ("status", "tick"):
         print(__doc__.strip(), file=sys.stderr)
         return 2

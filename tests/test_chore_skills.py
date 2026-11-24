@@ -87,6 +87,35 @@ class ResolvesTest(unittest.TestCase):
         self.assertFalse(self.resolves("art:draw-one"))
         self.assertFalse(self.resolves("draw-one"))
 
+    def test_skill_file_names_the_file_each_place_holds(self):
+        skill(self.checkout / ".claude", "audit")
+        skill(self.home, "refactor")
+        (self.home / "commands").mkdir()
+        (self.home / "commands" / "tidy.md").write_text("Tidy one file.\n")
+        inbox = self.root / "inbox"
+        plugin(inbox, "agent-desk")
+        skill(inbox, "work-issue")
+        os.environ["CLAUDE_CODE_PLUGIN_DIRS"] = str(inbox)
+        found = lambda name: chore_skills.skill_file(name, self.checkout)  # noqa: E731
+        self.assertEqual(found("audit"), self.checkout / ".claude" / "skills" / "audit" / "SKILL.md")
+        self.assertEqual(found("refactor"), self.home / "skills" / "refactor" / "SKILL.md")
+        self.assertEqual(found("tidy"), self.home / "commands" / "tidy.md")
+        self.assertEqual(found("agent-desk:work-issue"), inbox / "skills" / "work-issue" / "SKILL.md")
+        self.assertIsNone(found("missing"))
+
+    def test_the_projects_skill_comes_before_the_users(self):
+        skill(self.checkout / ".claude", "audit")
+        skill(self.home, "audit")
+        self.assertEqual(chore_skills.skill_file("audit", self.checkout),
+                         self.checkout / ".claude" / "skills" / "audit" / "SKILL.md")
+
+    def test_a_name_that_climbs_out_of_the_folder_finds_nothing(self):
+        skill(self.home, "audit")
+        (self.home / "skills" / "deep" / "audit").mkdir(parents=True)
+        (self.home / "skills" / "deep" / "audit" / "SKILL.md").write_text("x")
+        for name in ("..", ".", "deep/audit", "../skills/audit", ""):
+            self.assertIsNone(chore_skills.skill_file(name, self.checkout), name)
+
 
 class MainTest(unittest.TestCase):
     def test_it_warns_once_for_each_missing_skill_and_exits_0(self):
@@ -101,6 +130,21 @@ class MainTest(unittest.TestCase):
         lines = out.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn("no skill named singleshot-untested-one", lines[0])
+
+    def test_file_mode_prints_the_skills_path_or_the_same_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            skill(home, "audit")
+            answers = []
+            for name in ("audit", "gone"):
+                out = io.StringIO()
+                with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home), "CLAUDE_CODE_PLUGIN_DIRS": ""}), \
+                        contextlib.redirect_stdout(out):
+                    self.assertEqual(chore_skills.main(["chore_skills.py", "--file", tmp, name]), 0)
+                answers.append(json.loads(out.getvalue()))
+        self.assertEqual(answers[0], {"path": str(home / "skills" / "audit" / "SKILL.md")})
+        self.assertEqual(answers[1], {"warning": chore_skills.warning("gone")})
+        self.assertIn("no skill named gone", answers[1]["warning"])
 
 
 if __name__ == "__main__":

@@ -12,19 +12,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+import budget  # noqa: E402
 import chore_rename  # noqa: E402
 import run_log  # noqa: E402
 import store  # noqa: E402
 
 
 class RunLogTest(unittest.TestCase):
-    def test_a_runs_length_turns_and_cost_come_from_its_last_result_event(self):
+    def test_a_runs_length_turns_session_and_its_total_come_from_its_last_result_event(self):
         stream = "\n".join(json.dumps(event) for event in [
+            {"type": "system", "subtype": "init", "session_id": "s-1"},
             {"type": "assistant", "message": {"content": []}},
             {"type": "result", "duration_ms": 786000, "num_turns": 14, "total_cost_usd": 1.2345},
         ])
-        self.assertEqual(run_log.result_of(stream), {"minutes": 13.1, "turns": 14, "cost": 1.23})
-        self.assertEqual(run_log.result_of("not json"), {"minutes": None, "turns": None, "cost": None})
+        self.assertEqual(run_log.result_of(stream),
+                         {"minutes": 13.1, "turns": 14, "reported": 1.2345, "session": "s-1"})
+        self.assertEqual(run_log.result_of("not json"),
+                         {"minutes": None, "turns": None, "reported": None, "session": None})
 
     def test_a_record_stores_the_result_labels_and_start_on_the_run_agent_desk_run_names(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -44,6 +48,15 @@ class RunLogTest(unittest.TestCase):
             self.assertEqual([(event["number"], event["type"]) for event in desk.events_since()][-1],
                              (40, "run-result"))
 
+    def test_the_session_command_records_the_session_on_the_run_agent_desk_run_names(self):
+        with tempfile.TemporaryDirectory() as folder:
+            desk = store.Store(Path(folder) / "desk.sqlite")
+            self.addCleanup(desk.close)
+            run = desk.request_run("org/game", "fix", "40")
+            self.assertEqual(run_log.main(["run_log.py", "session", "s-9"], {"AGENT_DESK_RUN": str(run)}, desk), 0)
+            self.assertEqual(desk.run(run)["session"], "s-9")
+            self.assertEqual(run_log.main(["run_log.py", "session", "s-9"], {}, desk), 0)
+
     def test_a_record_outside_a_dispatched_run_stores_nothing(self):
         with tempfile.TemporaryDirectory() as folder:
             desk = store.Store(Path(folder) / "desk.sqlite")
@@ -55,6 +68,71 @@ class RunLogTest(unittest.TestCase):
     def test_a_record_without_the_options_leaves_their_fields_out(self):
         self.assertEqual(run_log.options(["opus", "high", "/tmp/s"]), (["opus", "high", "/tmp/s"], None, None))
         self.assertEqual(run_log.options(["--labels", "", "--start", "sideways"]), ([], [], None))
+
+
+class SessionCostTest(unittest.TestCase):
+    """A run that takes up an earlier run's session counts only what the session's reported total grew by."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(folder.name)
+        self.desk = store.Store(self.folder / "desk.sqlite")
+        self.addCleanup(self.desk.close)
+
+    def started(self, session, kind="agent", target="12"):
+        """A run of `kind` that started `session`, as desk_claude_run records it before claude starts."""
+        run = self.desk.request_run("org/game", kind, target)
+        self.assertEqual(run_log.main(["run_log.py", "session", session], {"AGENT_DESK_RUN": str(run)}, self.desk), 0)
+        return run
+
+    def finished(self, run, session, total, start="new"):
+        """Records the run's result from a stream whose result event reports the session's total so far."""
+        stream = self.folder / f"stream-{run}"
+        stream.write_text("\n".join(json.dumps(event) for event in [
+            {"type": "system", "subtype": "init", "session_id": session},
+            {"type": "result", "session_id": session, "duration_ms": 60000, "num_turns": 3,
+             "total_cost_usd": total}]))
+        status = run_log.main(["run_log.py", "record", "opus", "high", str(stream), "--start", start],
+                              {"AGENT_DESK_RUN": str(run)}, self.desk)
+        self.assertEqual(status, 0)
+        return self.desk.run(run)
+
+    def test_a_fresh_run_counts_the_whole_total_its_session_reported(self):
+        row = self.finished(self.started("fresh"), "fresh", 2.345)
+        self.assertEqual((row["session"], row["reported"], row["cost"]), ("fresh", 2.345, 2.35))
+
+    def test_a_run_resumed_after_one_that_stopped_early_counts_only_what_the_total_grew_by(self):
+        self.finished(self.started("s"), "s", 5.0)
+        row = self.finished(self.started("s"), "s", 8.25, "resumed")
+        self.assertEqual((row["reported"], row["cost"]), (8.25, 3.25))
+        third = self.finished(self.started("s"), "s", 9.0, "resumed")
+        self.assertEqual(third["cost"], 0.75)
+
+    def test_a_run_resumed_after_one_cut_off_keeps_the_cut_off_runs_spend(self):
+        cut = self.started("s")
+        self.assertEqual((self.desk.run(cut)["session"], self.desk.run(cut)["cost"]), ("s", None))
+        row = self.finished(self.started("s"), "s", 6.5, "resumed")
+        self.assertEqual(row["cost"], 6.5)
+
+    def test_a_run_resumed_after_a_cut_off_one_counts_from_the_last_report_before_it(self):
+        self.finished(self.started("s"), "s", 5.0)
+        self.started("s")
+        row = self.finished(self.started("s"), "s", 12.0, "resumed")
+        self.assertEqual(row["cost"], 7.0)
+
+    def test_another_sessions_reports_and_a_total_that_shrank_count_whole(self):
+        self.finished(self.started("other"), "other", 4.0)
+        self.assertEqual(self.finished(self.started("s", "fix", "40"), "s", 3.0)["cost"], 3.0)
+        self.assertEqual(self.finished(self.started("s", "fix", "40"), "s", 1.0, "resumed")["cost"], 1.0)
+
+    def test_the_budget_counts_each_runs_own_spend(self):
+        for total, start in ((5.0, "new"), (8.0, "resumed")):
+            run = self.started("s", "chore", "audit")
+            self.assertTrue(self.desk.run_started(run, f"unit-{run}", account="api"))
+            self.finished(run, "s", total, start)
+        now = time.time()
+        self.assertEqual(budget.run_spend(self.desk, now - 3600, now + 3600), 8.0)
 
 
 def old_line(**fields):

@@ -7,8 +7,8 @@
 
 A release folds the entries waiting in changelog.d/ into a `## [X.Y.Z] - <date>` section of CHANGELOG.md, deletes
 them, and sets VERSION and the plugin's plugin.json to the new version. Without a bump, the entries pick the version:
-below 1.0.0, a **Breaking** or **Workflows** entry bumps the minor number and anything else the patch number; from
-1.0.0 on, **Breaking** bumps the major number, **Workflows** the minor, and anything else the patch.
+a **Breaking** entry bumps the minor number below 1.0.0 and the major number from 1.0.0 on, and anything else bumps the
+patch number.
 
 The script runs from a clean checkout of main that matches origin. It commits the release on agent/release-X.Y.Z,
 opens a review of that branch titled `Release X.Y.Z` in the local store with `agent-desk review create`, whose body is
@@ -41,7 +41,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
 BREAKING = "**Breaking**:"
-WORKFLOWS = "**Workflows**:"
 SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 BRANCH_PREFIX = "agent/release-"
 PLUGIN = Path("inbox/.claude-plugin/plugin.json")
@@ -133,16 +132,8 @@ def bumped(current, part):
 
 
 def markers(items):
-    """The markers among the items' leading text: Breaking, Workflows, both, or neither."""
-    found = set()
-    for item in items:
-        text = item[2:]
-        if text.startswith(BREAKING):
-            found.add(BREAKING)
-            text = text[len(BREAKING):].lstrip()
-        if text.startswith(WORKFLOWS):
-            found.add(WORKFLOWS)
-    return found
+    """The markers among the items' leading text: Breaking or none."""
+    return {BREAKING for item in items if item[2:].startswith(BREAKING)}
 
 
 def choose_version(current, sections, bump=None):
@@ -154,11 +145,9 @@ def choose_version(current, sections, bump=None):
             raise ReleaseError(f"{bump} isn't above the current version {current}")
         return bump
     found = markers([item for items in sections.values() for item in items])
-    if parse_version(current)[0] == 0:
-        return bumped(current, "minor" if found else "patch")
-    if BREAKING in found:
-        return bumped(current, "major")
-    return bumped(current, "minor" if WORKFLOWS in found else "patch")
+    if BREAKING not in found:
+        return bumped(current, "patch")
+    return bumped(current, "minor" if parse_version(current)[0] == 0 else "major")
 
 
 def section_text(version, day, sections):

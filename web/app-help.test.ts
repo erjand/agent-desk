@@ -29,12 +29,18 @@ test('no two rows in the dialog show the same key, and every row says what its k
 
 test('the dialog shows its sections in order, each with its keys in order', () => {
   assert.deepEqual(helpSections().map(([title, rows]) => [title, rows.map(([key]) => key)]), [
-    ['Move Around', ['/', 'j / ↓', 'k / ↑', '← / →', 'o / Enter', '1-9']],
-    ['Issues', ['a', 's', 'z', 'e', 'g', 'n', 'b', 'u', 'q', 'c']],
-    ['Start Order', ['[', ']', '{']],
-    ['Runs', ['r', 't', 'd', 'x', 'w']],
+    ['Move Around', ['/', 'j / ↓', 'k / ↑', '← / →', 'o / Enter', '1-9', '-', '+ / =']],
+    ['Issues', ['a', 's', 'z', 'e', 'v', 'n', 'b', 'u', 'q', 'c']],
+    ['Order', ['[', ']', '{', '}']],
+    ['Runs', ['r', 't', 'd', 'x', 'w', '!']],
     ['Reviews', ['m', 'f', 'p', 'l']],
-    ['Panels', ['\\', 'h', '`', 'i', '?']],
+    ['Panels', ['\\', 'h', '`', 'g', 'i', '?']],
     ['Confirm and Cancel', ['y', 'Esc', 'A-Z']],
   ])
+})
+
+test('the moves\' keys say they work in Queued and in the five groups the list order sets', () => {
+  const order = helpSections().find(([title]) => title === 'Order')?.[1]
+  assert.deepEqual(order, [['[', 'Move Up, in Queued, Open, Blocked, Needs Design, Backlog, or Ideas'],
+    [']', 'Move Down'], ['{', 'Move to Top'], ['}', 'Move to Bottom']])
 })

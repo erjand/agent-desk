@@ -47,6 +47,13 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(self.problems({**CONFIG, "testMinutes": minutes}),
                              ["testMinutes must be a whole number of minutes above 0"])
 
+    def test_test_on_base_move_must_be_true_or_false(self):
+        for value in (True, False):
+            self.assertEqual(self.problems({**CONFIG, "testOnBaseMove": value}), [])
+        for value in ("yes", 1):
+            self.assertEqual(self.problems({**CONFIG, "testOnBaseMove": value}),
+                             ["testOnBaseMove must be true or false"])
+
     def test_limit_minutes_must_name_run_kinds_with_whole_minutes_above_0(self):
         self.assertEqual(self.problems({**CONFIG, "limitMinutes": {"agent": 360, "benchmark": 480}}), [])
         self.assertEqual(self.problems({**CONFIG, "limitMinutes": 360}),
@@ -98,8 +105,15 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.problems({**CONFIG, "slots": 3}), ["slots must be an object of run kinds to counts"])
         problems = self.problems({**CONFIG, "slots": {"agents": 3, "fix": -1, "chore": 1.5, "check": True}})
         self.assertEqual(problems, [
-            "slots.agents isn't a slot; the slots are agent, chore, fix, check, benchmark",
+            "slots.agents isn't a slot; the slots are agent, chore, fix, check, benchmark, gpu",
             *[f"slots.{kind} must be a whole number of runs, 0 or more" for kind in ("fix", "chore", "check")]])
+
+    def test_the_worktree_setup_and_teardown_must_be_commands_when_set(self):
+        worktree = {"seeds": [], "setup": "just build", "teardown": "just drop-db"}
+        self.assertEqual(self.problems({**CONFIG, "worktree": worktree}), [])
+        problems = self.problems({**CONFIG, "worktree": {"setup": ["just build"], "teardown": 1}})
+        self.assertEqual(problems, ['worktree.setup must be a command run with bash -c, or "" for none',
+                                    'worktree.teardown must be a command run with bash -c, or "" for none'])
 
     def test_lists_must_be_lists(self):
         problems = self.problems({**CONFIG, "worktree": {"seeds": ".env"}})

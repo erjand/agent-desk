@@ -17,10 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 import backup  # noqa: E402
 import board  # noqa: E402
+import budget  # noqa: E402
 import fixes  # noqa: E402
 import hold  # noqa: E402
 import merges  # noqa: E402
 import pushes  # noqa: E402
+import run_stall  # noqa: E402
 import store  # noqa: E402
 
 REPO = "org/game"
@@ -55,6 +57,8 @@ class BoardCase(unittest.TestCase):
                    mock.patch.object(pushes, "STATE", self.folder / "pushes"),
                    mock.patch.object(fixes, "STATE", self.folder / "fixes"),
                    mock.patch.object(hold, "HOLD", self.folder / "hold.json"),
+                   mock.patch.object(budget, "LEDGER", self.folder / "chat-spend.jsonl"),
+                   mock.patch.object(run_stall, "folder", lambda: self.folder / "stalls"),
                    mock.patch.object(board, "machine", lambda: "desk-1"),
                    mock.patch.object(board, "web_address", lambda: "http://127.0.0.1:7480")]
         for patch in patches:
@@ -121,8 +125,12 @@ class GoldenTest(BoardCase):
         self.at("11:00")
         run = desk.request_run(REPO, "agent", str(working))
         desk.run_started(run, f"agent-desk-agent-org-game-{working}-{run}.service")
+        # The working run's test binary sits in a futex wait, so its run's watch flagged it.
+        self.stall(run, {"since": "2026-11-10T11:48:00Z", "tool": "Bash", "summary": "cargo test --workspace"})
         stopped = desk.request_run(REPO, "agent", str(holder))
         desk.run_started(stopped, "u.service")
+        # The run ended without its watch clearing the stall, as when a kill ends it at once.
+        self.stall(stopped, {"since": "2026-11-10T11:10:00Z", "tool": "Bash", "summary": "make"})
         self.at("11:30")
         desk.run_ended(stopped, "failed", 1)
         merges.save(merges.state_path(REPO), {"queue": [{"pr": reviews["merging"], "added": NOW}], "dropped": []})
@@ -132,6 +140,10 @@ class GoldenTest(BoardCase):
         board.chores_path(REPO).write_text("\n".join(CHORES) + "\n")
         backup.save(store.DATABASE, {"at": NOW - 600, "remote": "origin", "committedAt": NOW - 600,
                                      "pushedAt": NOW - 3000, "waiting": True})
+
+    def stall(self, run, saved):
+        run_stall.folder().mkdir(parents=True, exist_ok=True)
+        run_stall.path_of(run).write_text(json.dumps(saved))
 
     def test_the_board_read_matches_the_golden_file_the_panes_tests_read(self):
         self.seed()
@@ -156,10 +168,22 @@ class GoldenTest(BoardCase):
     def test_the_read_carries_the_default_slots_and_the_running_retry(self):
         self.seed()
         read = board.read(self.store, REPO, NOW)
-        self.assertEqual(read["slots"], {"agent": 3, "chore": 1, "fix": 1, "check": 2, "benchmark": 2})
+        self.assertEqual(read["slots"], {"agent": 3, "chore": 1, "fix": 1, "check": 2, "benchmark": 2, "gpu": None})
         failing = next(one for one in read["reviews"] if one["title"] == "The failing review")
         self.assertEqual(read["checks"], [{"branch": failing["branch"], "review": failing["number"],
                                            "head": "failing-head", "startedAt": "2026-11-10T10:45:00Z"}])
+
+
+    def test_a_working_run_carries_its_saved_stall_and_an_ended_or_unreadable_one_none(self):
+        self.seed()
+        runs = {run["status"]: run for run in board.read(self.store, REPO, NOW)["runs"]}
+        self.assertEqual(runs["running"]["stalled"], {"since": "2026-11-10T11:48:00Z", "tool": "Bash",
+                                                      "summary": "cargo test --workspace"})
+        self.assertNotIn("stalled", runs["failed"])
+        for broken in ("{", "[]", '{"since": 5, "tool": "Bash"}', '{"since": "2026-11-10T11:48:00Z"}'):
+            with self.subTest(broken):
+                run_stall.path_of(runs["running"]["id"]).write_text(broken)
+                self.assertNotIn("stalled", board.read(self.store, REPO, NOW)["runs"][0])
 
 
 class WebAddressTest(unittest.TestCase):
@@ -219,13 +243,45 @@ class ReadTest(BoardCase):
         self.assertEqual(read["queue"], {"queue": [], "dropped": [], "ahead": 2, "push": {"state": "ok"},
                                          "agentBranches": {"pushed": 0, "waiting": 0}})
 
+    def test_a_ready_reviews_passed_check_says_how_many_merges_its_base_took_since(self):
+        checkout, config = self.folder / "repo", self.folder / "gitconfig"
+        config.write_text("[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM="1")
+
+        def git(*args):
+            return subprocess.run(["git", "-C", str(checkout), *args], check=True, capture_output=True,
+                                  text=True).stdout.strip()
+
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True, capture_output=True)
+        git("commit", "-q", "--allow-empty", "-m", "start")
+        checked = git("rev-parse", "HEAD")
+        git("branch", "agent/issue-1")
+        git("branch", "side")
+        git("checkout", "-q", "side")
+        git("commit", "-q", "--allow-empty", "-m", "side")
+        git("checkout", "-q", "main")
+        git("merge", "-q", "--no-ff", "-m", "Merge one", "side")
+        git("commit", "-q", "--allow-empty", "-m", "merged two")
+        self.store.project(REPO, str(checkout))
+        review = self.store.create(REPO, "review", "One", branch="agent/issue-1")
+        draft = self.store.create(REPO, "review", "Two", branch="agent/issue-2", draft=True)
+        for branch in ("agent/issue-1", "agent/issue-2"):
+            self.store.branch_moved(REPO, branch, checked, None)
+            self.store.merge_tried(REPO, branch, checked, "main", git("rev-parse", "main"), "MERGEABLE")
+            check = self.store.check_queue(REPO, branch, checked)
+            self.store.check_merges(check, "main", checked)
+            self.store.check_ended(check, "passed")
+        shown = {one["number"]: one["checks"][0] for one in board.read(self.store, REPO, NOW)["reviews"]}
+        self.assertEqual(shown[review]["behind"], 2)
+        self.assertNotIn("behind", shown[draft])
+
     def test_the_projects_config_sets_its_slots_over_the_defaults(self):
         checkout = self.folder / "repo"
         checkout.mkdir()
         (checkout / ".agent-desk.json").write_text(json.dumps({"slots": {"agent": 1, "fix": 0, "check": "two"}}))
         self.store.project(REPO, str(checkout))
         self.assertEqual(board.read(self.store, REPO, NOW)["slots"],
-                         {"agent": 1, "chore": 1, "fix": 0, "check": 2, "benchmark": 2})
+                         {"agent": 1, "chore": 1, "fix": 0, "check": 2, "benchmark": 2, "gpu": None})
 
     def test_the_slot_overrides_agent_desk_slots_sets_lay_over_the_config(self):
         checkout = self.folder / "repo"
@@ -234,7 +290,7 @@ class ReadTest(BoardCase):
         self.store.project(REPO, str(checkout))
         hold.HOLD.write_text(json.dumps({"state": "running", "slots": {REPO: {"agent": 1, "fix": 4}}}))
         self.assertEqual(board.read(self.store, REPO, NOW)["slots"],
-                         {"agent": 1, "chore": 1, "fix": 4, "check": 2, "benchmark": 2})
+                         {"agent": 1, "chore": 1, "fix": 4, "check": 2, "benchmark": 2, "gpu": None})
 
     def test_a_running_check_of_a_branch_without_a_review_names_none_and_ended_ones_leave(self):
         running, ended = (self.store.check_queue(REPO, branch, "h1") for branch in ("agent/chore-audit", "agent/x"))

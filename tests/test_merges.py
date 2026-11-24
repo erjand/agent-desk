@@ -17,7 +17,6 @@ import fixes  # noqa: E402
 import merges  # noqa: E402
 import store  # noqa: E402
 
-LIB = Path(__file__).resolve().parents[1] / "lib"
 NOW = 1_800_000_000
 MAIN = "m1"
 REPO = "owner/repo"
@@ -81,6 +80,12 @@ class MainBrokeTest(unittest.TestCase):
     def test_checks_that_main_broke_go_to_a_fix(self):
         self.assertEqual(decide(found=[check("failed", attempt=2)], item={"passed": True}), ("fix", merges.BROKE))
 
+    def test_a_failed_re_check_after_main_moved_goes_to_the_fix_without_merging_main_in(self):
+        rechecked = {**check("failed", attempt=2), "recheck": True}
+        self.assertEqual(decide(found=[rechecked], has_main=False), ("fix", merges.BROKE))
+        # A re-check still running leaves the review to its usual steps.
+        self.assertEqual(decide(found=[{**check("running"), "recheck": True}], has_main=False), ("update", None))
+
     def test_checks_that_failed_before_main_merged_in_drop_the_review(self):
         self.assertEqual(decide(found=[check("failed")], item={"passed": False}), ("drop", "checks failed"))
 
@@ -115,6 +120,21 @@ class FixStepTest(unittest.TestCase):
 
     def test_a_review_no_fix_will_come_for_leaves_at_once(self):
         self.assertEqual(fix_step(chosen={"auto": False, "maxTries": 2}), ("drop", merges.CONFLICTS))
+
+    def test_a_conflicting_head_notes_whether_its_checks_passed_for_the_fix_that_follows(self):
+        item = {"brokenHead": "h0", "brokenAt": NOW - 60}
+        merges.fix_step(pr(mergeable="CONFLICTING"), 1, [], set(), MAIN, item, NOW, fixes.DEFAULTS, merges.CONFLICTS,
+                        [check()])
+        self.assertEqual(item, {"conflictHead": "h1", "conflictAt": NOW, "conflicted": True, "passed": True})
+        item = {}
+        merges.fix_step(pr(mergeable="CONFLICTING"), 1, [], set(), MAIN, item, NOW, fixes.DEFAULTS, merges.CONFLICTS,
+                        [check("failed")])
+        self.assertFalse(item["passed"])
+
+    def test_the_cause_names_what_broke_a_queued_reviews_checks(self):
+        state = {"queue": [{"pr": 1, "brokenHead": "h1", "conflicted": True}, {"pr": 2, "brokenHead": "h2"},
+                           {"pr": 3, "conflicted": True}]}
+        self.assertEqual([merges.cause(state, n) for n in (1, 2, 3, 4)], ["conflict", "main", None, None])
 
     def test_a_review_leaves_once_its_head_has_conflicted_for_fix_wait(self):
         item = {"conflictHead": "h1", "conflictAt": NOW - merges.FIX_WAIT}
@@ -252,13 +272,18 @@ class GitCase(unittest.TestCase):
     def head(self, branch):
         return git(self.main, "rev-parse", f"refs/heads/{branch}")
 
-    def finish(self, branch, status="passed", head=None):
-        """Ends the check of the branch's head, queuing one first when none waits."""
+    def finish(self, branch, status="passed", head=None, log=None):
+        """Ends the check of the branch's head, queuing one first when none waits, with `log` as its log, and returns
+        the check's number."""
         head = head or self.head(branch)
         waiting = [row for row in self.desk.checks(("queued", "running"), REPO, branch) if row["head_sha"] == head]
         number = waiting[-1]["id"] if waiting else self.desk.check_queue(REPO, branch, head)
-        self.desk.check_started(number, self.root / "check.log")
+        path = self.root / f"check-{number}.log"
+        if log is not None:
+            path.write_text(log)
+        self.desk.check_started(number, path)
         self.desk.check_ended(number, status)
+        return number
 
     def queue(self, *numbers):
         return {"queue": [{"pr": number, "added": NOW} for number in numbers], "dropped": []}
@@ -457,11 +482,11 @@ class TickTest(GitCase):
     def test_a_failed_check_drops_the_review_and_the_queue_goes_on(self):
         first, _ = self.review("issue-7", {"seven.txt": "7\n"})
         second, _ = self.review("issue-8", {"eight.txt": "8\n"})
-        self.finish("agent/issue-7", "failed")
+        check_id = self.finish("agent/issue-7", "failed")
         self.finish("agent/issue-8")
         state = self.tick(self.queue(first, second))
         self.assertEqual([one["pr"] for one in state["dropped"]], [first])
-        self.assertEqual(state["dropped"][0]["reason"], "checks failed")
+        self.assertEqual(state["dropped"][0]["reason"], f"checks failed (check {check_id})")
         # The second took main, since the first never landed, and waits for its check.
         self.assertEqual(state["queue"], [])
         self.assertTrue((self.main / "eight.txt").exists())
@@ -522,6 +547,99 @@ class TickTest(GitCase):
         self.assertEqual(self.tick(self.queue(number))["queue"], [])
         self.assertEqual(self.head("main"), main)
         self.assertEqual(self.merged_sha(number), self.head("local-desk"))
+
+
+# A check's log as cargo-nextest prints two failed tests, each with libtest's own line about it.
+NEXTEST_LOG = """== Test: just test
+        PASS [   0.002s] ( 1/9) gpu slots::a_handle_no_slot_ever_had_fails
+        FAIL [   3.054s] ( 2/9) gameplay::reload a_session_reads_changed_data_again_and_keeps_the_last_good_data
+    test a_session_reads_changed_data_again_and_keeps_the_last_good_data ... FAILED
+        FAIL [   3.161s] ( 3/9) gameplay::reload a_watching_session_reloads_by_itself
+    test a_watching_session_reloads_by_itself ... FAILED
+     Summary [  10.935s] 3/9 tests run: 1 passed, 2 failed
+        FAIL [   3.054s] ( 2/9) gameplay::reload a_session_reads_changed_data_again_and_keeps_the_last_good_data
+        FAIL [   3.161s] ( 3/9) gameplay::reload a_watching_session_reloads_by_itself
+error: test run failed
+"""
+NAMED = "gameplay::reload a_session_reads_changed_data_again… and 1 more"
+
+
+class ConflictFixTest(GitCase):
+    """A queued review whose check passed, then a main that conflicts with it, and a fix that resolves the conflict."""
+
+    def setUp(self):
+        super().setUp()
+        self.number, self.folder = self.review("issue-7", {"shared.txt": "one\nTWO\nthree\n"}, worktree=True)
+        self.finish("agent/issue-7")
+        self.conflicting = self.head("agent/issue-7")
+        self.move_main({"shared.txt": "one\n2\nthree\n"})
+        self.state = self.tick(self.queue(self.number))
+        self.assertEqual(self.state["queue"][0]["note"], f"{merges.CONFLICTS}; auto-fix resolving")
+        fixes.note(fixes.ledger_path(REPO), self.now, self.number, self.conflicting, self.head("main"))
+
+    def resolve(self):
+        """The fix's agent merges main, keeps the branch's side, and commits; returns the new head."""
+        subprocess.run(["git", "-C", str(self.folder), "merge", "-q", "main"], capture_output=True)
+        git(self.folder, "checkout", "-q", "--ours", "shared.txt")
+        git(self.folder, "add", "shared.txt")
+        git(self.folder, "commit", "-q", "--no-edit")
+        self.now += 60
+        return self.head("agent/issue-7")
+
+    def test_a_fix_whose_head_passes_lands(self):
+        fixed = self.resolve()
+        self.finish("agent/issue-7")
+        main = self.head("main")
+        self.assertEqual(self.tick(self.state)["queue"], [])
+        self.assertEqual(git(self.main, "log", "-1", "--format=%P", self.head("main")).split(), [main, fixed])
+
+    def test_a_fix_whose_head_fails_holds_the_queue_for_a_second_fix_that_repairs_it(self):
+        fixed = self.resolve()
+        self.finish("agent/issue-7", "failed", log=NEXTEST_LOG)
+        state = self.tick(self.state)
+        [item] = state["queue"]
+        self.assertEqual(item["note"], f"{merges.BROKE}; auto-fix adapting it to main")
+        self.assertEqual((item["brokenHead"], item["passed"]), (fixed, True))
+        self.assertEqual(merges.cause(state, self.number), "conflict")
+        self.assertEqual(state["dropped"], [])
+        # lib/fixes.py starts the fix of what main broke on the conflict fix's head.
+        prs = [{"number": self.number, "headRefName": "agent/issue-7", "headRefOid": fixed, "baseRefName": "main",
+                "mergeable": "MERGEABLE", "isDraft": False}]
+        plan = fixes.plan(prs, set(), fixes.read_ledger(fixes.ledger_path(REPO), self.now),
+                          {"main": self.head("main")}, fixes.DEFAULTS, queue=[self.number],
+                          broken={self.number: item["brokenHead"]})
+        self.assertEqual([verdict for _, verdict in plan], ["start"])
+
+        self.commit(self.folder, {"seven.txt": "adapted\n"}, "adapt to main")
+        repaired = self.head("agent/issue-7")
+        self.finish("agent/issue-7")
+        main = self.head("main")
+        self.assertEqual(self.tick(state)["queue"], [])
+        self.assertEqual(git(self.main, "log", "-1", "--format=%P", self.head("main")).split(), [main, repaired])
+
+    def test_a_fix_whose_head_fails_leaves_once_the_tries_run_out_naming_the_tests(self):
+        fixed = self.resolve()
+        check_id = self.finish("agent/issue-7", "failed", log=NEXTEST_LOG)
+        state = self.tick(self.state)
+        self.assertEqual(state["queue"][0]["brokenHead"], fixed)
+        # The fix of what main broke tried this head against this main and committed nothing.
+        fixes.note(fixes.ledger_path(REPO), self.now, self.number, fixed, self.head("main"))
+        self.now += 60
+        state = self.tick(state)
+        self.assertEqual(state["queue"], [])
+        why = f"{merges.BROKE}; auto-fix couldn't make them pass: {NAMED} (check {check_id})"
+        self.assertEqual(state["dropped"][0]["reason"], why)
+        self.assertEqual(self.desk.item(REPO, self.number)["comments"][-1]["body"],
+                         f"Left the merge queue on {fixed[:7]}: {why}.{merges.DESK_MARK}")
+
+    def test_a_fix_whose_head_fails_after_failing_checks_leaves_naming_the_tests(self):
+        # The conflicting head's checks had failed, so the fix's failure isn't main's doing.
+        self.state["queue"][0]["passed"] = False
+        self.resolve()
+        check_id = self.finish("agent/issue-7", "failed", log=NEXTEST_LOG)
+        state = self.tick(self.state)
+        self.assertEqual(state["queue"], [])
+        self.assertEqual(state["dropped"][0]["reason"], f"checks failed: {NAMED} (check {check_id})")
 
 
 class BatchTest(GitCase):
@@ -681,119 +799,6 @@ class CommandTest(GitCase):
                 with mock.patch.object(merges, "STATE", self.root / "merges"):
                     self.assertEqual([item["pr"] for item in merges.load(merges.state_path(REPO), NOW)["queue"]], [5])
 
-
-class AfterLandingTest(GitCase):
-    def test_a_landing_on_the_main_checkout_runs_the_sync_unless_a_program_runs_there(self):
-        (self.main / ".agent-desk.json").write_text('{"sync": {"run": "touch synced", "skipWhile": ["nothing-here"]}}')
-        landed = [("main", "a", "b")]
-        merges.after_landing(self.main, landed, self.said.append, desk_root=self.root)
-        self.assertTrue((self.main / "synced").exists())
-        (self.main / "synced").unlink()
-        with mock.patch.object(merges, "running_in", return_value="godot"):
-            merges.after_landing(self.main, landed, self.said.append, desk_root=self.root)
-        self.assertFalse((self.main / "synced").exists())
-        self.assertIn(f"Skipped the sync: godot is running in {self.main.resolve()}.", self.said)
-
-    def test_a_landing_on_another_branch_runs_nothing(self):
-        (self.main / ".agent-desk.json").write_text('{"sync": {"run": "touch synced"}}')
-        git(self.main, "branch", "local-desk")
-        merges.after_landing(self.main, [("local-desk", "a", "b")], self.said.append, desk_root=self.root)
-        self.assertFalse((self.main / "synced").exists())
-
-    def test_a_landing_that_changes_the_dispatcher_restarts_it_in_the_desks_own_checkout(self):
-        before = self.head("main")
-        (self.main / "lib").mkdir()
-        after = self.commit(self.main, {"lib/dispatch.py": "x\n"}, "change the dispatcher")
-        calls = []
-
-        def run(args, **_):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0)
-
-        merges.after_landing(self.main, [("main", before, after)], self.said.append, desk_root=self.main, run=run)
-        self.assertIn(["systemctl", "--user", "restart", merges.DISPATCH_UNIT], calls)
-        self.assertNotIn(["systemctl", "--user", "restart", merges.WEB_UNIT], calls)
-        calls.clear()
-        merges.after_landing(self.main, [("main", before, after)], self.said.append, desk_root=self.root, run=run)
-        self.assertEqual(calls, [])
-
-    def test_a_landing_that_changes_the_web_pages_code_restarts_its_server_when_it_runs(self):
-        before = self.head("main")
-        (self.main / "inbox" / "hooks").mkdir(parents=True)
-        after = self.commit(self.main, {"inbox/hooks/board.ts": "x\n"}, "change the board")
-        calls, active = [], {"code": 0}
-
-        def run(args, **_):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, active["code"] if "is-active" in args else 0)
-
-        merges.after_landing(self.main, [("main", before, after)], self.said.append, desk_root=self.main, run=run)
-        self.assertIn(["systemctl", "--user", "restart", merges.WEB_UNIT], calls)
-        self.assertNotIn(["systemctl", "--user", "restart", merges.DISPATCH_UNIT], calls)
-        self.assertIn(f"Restarted {merges.WEB_UNIT}.", self.said)
-        calls.clear()
-        active["code"] = 3
-        merges.after_landing(self.main, [("main", before, after)], self.said.append, desk_root=self.main, run=run)
-        self.assertEqual(calls, [["systemctl", "--user", "--quiet", "is-active", merges.WEB_UNIT]])
-
-    def test_the_web_pages_code_is_everything_under_web_and_the_pane_hooks(self):
-        self.assertTrue(merges.runs_from({"README.md", "web/server.ts"}, merges.WEB_CODE))
-        self.assertTrue(merges.runs_from({"inbox/hooks/board.ts"}, merges.WEB_CODE))
-        self.assertTrue(merges.runs_from({"web/vendor/preact-htm.js"}, merges.WEB_CODE))
-        self.assertFalse(merges.runs_from({"inbox/skills/work-issue/SKILL.md", "lib/web.sh", "webby/x"},
-                                          merges.WEB_CODE))
-        code = merges.dispatcher_code(LIB.parent)
-        self.assertTrue(merges.runs_from({"lib/store.py"}, code))
-        self.assertFalse(merges.runs_from({"lib/store.pyc", "lib/storage.py"}, code))
-
-    def test_the_dispatchers_code_is_dispatch_py_and_every_lib_module_it_imports_directly_or_through_another(self):
-        lib = self.root / "walk" / "lib"
-        lib.mkdir(parents=True)
-        files = {
-            "dispatch.py": "import os\nimport hold, store  # noqa\nfrom run_units import x\n",
-            "hold.py": "from . import nothing\n",
-            "store.py": "import json\n\n\ndef later():\n    import review_checks\n",
-            "review_checks.py": "from checks.part import y\n",
-            "checks.py": "import store\n",
-            "run_units.py": "this is not python(\n",
-            "web_only.py": "import dispatch\n",
-        }
-        for name, text in files.items():
-            (lib / name).write_text(text)
-        self.assertEqual(merges.dispatcher_code(lib.parent), tuple(sorted(
-            f"lib/{name}.py" for name in ("dispatch", "hold", "store", "review_checks", "checks", "run_units"))))
-        self.assertEqual(merges.dispatcher_code(self.root / "empty"), ("lib/dispatch.py",))
-
-    def test_a_change_to_any_lib_module_the_dispatcher_loads_restarts_it(self):
-        with tempfile.TemporaryDirectory() as state:
-            loaded = subprocess.run(
-                [sys.executable, "-I", "-c", "import os, sys\nsys.path.insert(0, sys.argv[1])\nimport dispatch\n"
-                 "print('\\n'.join(sorted(name for name, module in list(sys.modules.items())\n"
-                 "    if os.path.dirname(os.path.abspath(getattr(module, '__file__', None) or '')) == sys.argv[1])))",
-                 str(LIB)], capture_output=True, text=True, env={**os.environ, "XDG_STATE_HOME": state}, check=True)
-        modules = loaded.stdout.split()
-        self.assertIn("dispatch", modules)
-        self.assertIn("checks", modules)
-        code = merges.dispatcher_code(LIB.parent)
-        for name in modules:
-            self.assertTrue(merges.runs_from({f"lib/{name}.py"}, code), f"a change to lib/{name}.py restarts nothing")
-
-    def test_a_landing_that_changes_a_module_the_dispatcher_imports_restarts_it(self):
-        (self.main / "lib").mkdir()
-        self.commit(self.main, {"lib/dispatch.py": "import run_units\n", "lib/run_units.py": "import branch_watch\n"},
-                    "add the dispatcher")
-        calls = []
-
-        def run(args, **_):
-            calls.append(args)
-            return subprocess.CompletedProcess(args, 0)
-
-        for name, restarts in (("lib/branch_watch.py", True), ("lib/web_only.py", False), ("lib/run_units.py", True)):
-            calls.clear()
-            before = self.head("main")
-            after = self.commit(self.main, {name: "x\n"}, f"change {name}")
-            merges.after_landing(self.main, [("main", before, after)], self.said.append, desk_root=self.main, run=run)
-            self.assertEqual(["systemctl", "--user", "restart", merges.DISPATCH_UNIT] in calls, restarts, name)
 
 if __name__ == "__main__":
     unittest.main()

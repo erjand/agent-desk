@@ -100,33 +100,53 @@ Follow AGENTS.md throughout. Keep the change to what the issue asks. File anythi
 cleanup, or a refactor, with the `/agent-desk:create-issue` skill, and name it in the review. Filing needs no
 permission: the user triages new issues before any agent works one, so file instead of asking in the review whether to.
 
+When you first edit a file the Agent desk section lists as serial and the issue lacks that file's `serial` or
+`serial:<group>` label, add the label at once with `agent-desk issue edit <n> --add-label <label>`, before you go on.
+An issue holds its groups' slots while it is in progress, so from then on another issue of the group waits for yours
+before its run starts; until the label lands, one can start beside you on the same files.
+
 Before opening the review, count the lines of each source file you changed. File a cleanup issue for every one over
 1000 lines, or over the limit the project's conventions set, unless an open issue already covers it. The issue names
 the file, its size, and the split you'd make.
 
 ## Step 5: Verify
 
-- Run the project's tests, as its Agent desk section names them, and add tests for new logic the way AGENTS.md
-  describes.
+- In a project whose `.agent-desk.json` sets a `test` command, run the tests that cover the code you changed and
+  added, and leave the full suite to the branch check: Step 6 waits for it to run that command on your commit merged
+  with its base. Run the full suite yourself when you can't tell which tests cover the change, such as a change to a
+  shared helper or a build setting. In a project with no `test` command, no branch check runs, so run the project's
+  tests as its Agent desk section names them. Either way, add tests for new logic the way AGENTS.md describes.
 - For anything seen on screen, capture it the way the Agent desk section describes, at the places and times the
   issue's Done When names. Look at every picture you take.
 - Go through the issue's Done When list and check each item you can.
+- Wait on a long run, such as a benchmark or a render, with a loop or Monitor that stops on an error line, such as
+  `ERROR:`, as well as on the run's end, and stop the run when one appears. A run that fails every frame otherwise
+  holds the GPU, and every agent queued behind it, until its timeout.
 
 ## Step 6: Open or update the review
 
 1. Commit with a message in the repository's style, ending with the `Co-Authored-By` line your harness specifies.
-2. If you haven't opened the draft review yet, write its description to a file, from
+2. Merge the base into your branch before you open the review and before each wait for the checks in item 8, so the
+   check never spends its turn finding a conflict you could have resolved first. The base is your review's base when
+   you iterate, and otherwise the branch a `base:<branch>` label names, or `main`. Read only local branches and fetch
+   nothing. `git log --oneline HEAD..<base>` lists the base's commits your branch lacks; when it lists none, go on.
+   Otherwise run `git merge --no-edit <base>`, resolve any conflict and commit the merge, and run the tests that cover
+   the files both your branch and the base changed. Merge and never rebase or force-push, as the conflict fixes do.
+3. If you haven't opened the draft review yet, write its description to a file, from
    `.github/pull_request_template.md` when the project has one, and open it:
 
    ```bash
    agent-desk review create --branch agent/issue-<n> --title "<title>" --body-file <file> --draft --fixes <n>
    ```
 
+   Title the review as the create-issue skill titles an issue, for a reviewer scanning the board: a capitalized
+   imperative of about 80 characters or fewer, with no trailing period, that names in plain words the outcome a user
+   or developer notices, and leaves the mechanism, the exact scope, and file and function names to the description.
    `--fixes <n>` closes the issue when the review merges into main. When the issue carries a `base:<branch>` label,
    add `--base <branch>`: agent-desk cut your branch from that base and merges the review into it. When iterating,
    update the description with `agent-desk review edit <review> --body-file <file>`, and reply to each comment you
    addressed with `agent-desk review comment <review> --body-file <file>`.
-3. Start the description with a `## Summary` of one or two plain sentences that tell the user what the review changes
+4. Start the description with a `## Summary` of one or two plain sentences that tell the user what the review changes
    for them and why, in words they can follow without reading the code. Keep file paths, function names, and other
    identifiers out of it: the per-file changes and the verification come after it. The project's template, when it
    has one, shapes those later sections.
@@ -141,28 +161,41 @@ the file, its size, and the split you'd make.
    When the Summary leaves the cause unclear, as with many bug fixes, follow it with a `## Why` section that walks
    through one concrete example before the list of changes. Each time you update the description on a later
    iteration, reread the Summary and rewrite it if the review now changes something else.
-4. When the review needs the user's answer, such as a choice you made provisionally and want confirmed before merge, put
+5. When the review needs the user's answer, such as a choice you made provisionally and want confirmed before merge, put
    a `## Decisions Needed` section first in the description, with the Summary directly under it, using numbered
    decisions and lettered options in the format Step 3 gives, unless the project's own header rule places another
-   section above it. Leave the heading out when nothing needs an answer, and never write an empty section or `None`.
+   section above it. Under each decision's options, add a line naming the option the branch implements, so the user
+   can tell whether an answer needs more work. When the branch implements none of them, write `none` and say in a
+   sentence what it does instead. Update the line whenever a later commit changes which option the branch holds.
+
+   ```markdown
+   ### 1. Should the banner pause combat?
+
+   - **A. Pause combat** while it shows: the player reads it, and every fight runs two seconds longer.
+   - **B. Overlay it** ✅ *my pick*: combat stays fast, and the banner fades over the board.
+
+   **On this branch:** B.
+   ```
+
+   Leave the heading out when nothing needs an answer, and never write an empty section or `None`.
    Pointers to what to review first and notes that need no answer go elsewhere.
-5. For a change you can see, such as a model, lighting, or UI, upload the pictures that show it best with
+6. For a change you can see, such as a model, lighting, or UI, upload the pictures that show it best with
    `agent-desk shots <review> <picture>...` and put the Markdown it prints in the review's verification notes, each
    picture under a line saying what it shows. Two to four pictures usually cover it. After a fix, upload again and
    replace the pictures. The command keeps the pictures on this machine and needs no network. When it fails, keep
    the pictures in your worktree, name each one's path in the verification notes under the line saying what it
    shows, and say the upload failed.
-6. Run each description edit as its own command, apart from comments on other issues or reviews. A permission check
+7. Run each description edit as its own command, apart from comments on other issues or reviews. A permission check
    that blocks one part of a combined command stops all of it. After each edit, read the description back with
    `agent-desk review view <review> --json body` and fix any placeholder or missing picture.
-7. Wait for the local checks with `agent-desk review checks <review> --watch`. The desk checks your branch's newest
+8. Wait for the local checks with `agent-desk review checks <review> --watch`. The desk checks your branch's newest
    commit merged with its review's base once the branch stands still for a minute, and the command returns when that
    check ends: status 0 when it passed, 1 when it failed, with the path of its log. Read the log, fix the failure,
-   commit, and wait again. When it says the project sets no test command, say so in the description. Run the command
-   in the foreground, with the longest timeout your shell tool allows, and run it again if it times out before the
-   check ends. Never leave it running in the background, and end your turn only after it returns: a headless run ends
-   30 seconds after your final message and stops whatever you left running.
-8. When the checks pass and the description you read back says what you checked, run
+   commit, merge the base as item 2 says, and wait again. When it says the project sets no test command, say so in
+   the description. Run the command in the foreground, with the longest timeout your shell tool allows, and run it
+   again if it times out before the check ends. Never leave it running in the background, and end your turn only after
+   it returns: a headless run ends 30 seconds after your final message and stops whatever you left running.
+9. When the checks pass and the description you read back says what you checked, run
    `agent-desk review ready <review>`. If an item in Done When stays unchecked, say why there.
 
 ## Finish

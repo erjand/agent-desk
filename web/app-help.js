@@ -13,21 +13,23 @@ export const REVIEW = 'review:'
 export const SECTIONS = [
   ['Move Around', [['/', 'Search the List'], ['j / ↓', 'Next Card'], ['k / ↑', 'Previous Card'],
     ['← / →', 'Previous or Next Tab'], ['o / Enter', 'Show the Card, or Open a Failed Run\'s Log'],
-    ['1-9', 'All, Then Each Project']]],
+    ['1-9', 'All, Then Each Project'], ['-', 'Collapse Every Group'], ['+ / =', 'Expand Every Group']]],
   ['Issues', ['ready', 'start', 'unpick', 'restart', 'designed', 'to-open', 'to-backlog', 'unblock', 'unpause',
     'close']],
-  ['Start Order', ['up', 'down', 'top']],
-  ['Runs', ['resume', 'retry', 'dismiss', 'cancel', 'pause']],
+  ['Order', ['up', 'down', 'top', 'bottom']],
+  ['Runs', ['resume', 'retry', 'dismiss', 'cancel', 'pause', 'stop-command']],
   ['Reviews', ['merge', 'fix', 'undraft', `${REVIEW}close`]],
   ['Panels', [['\\', 'Show or Hide Runners'], ['h', 'Show or Hide History, in Place of Runners'],
-    ['`', 'Show or Hide Chat, in Place of Runners (Backtick)'],
+    ['`', 'Show or Hide Chat, in Place of Runners (Backtick)'], ['g', 'Show or Hide GitHub, in Place of Runners'],
     ['i', 'New Issue, in Place of the Card'], ['?', 'These Keys']]],
   ['Confirm and Cancel', [['y', 'Confirm, or Press the Action\'s Key Again'],
     ['Esc', 'Cancel, or Close the Card or the New Issue Form'], ['A-Z', 'Letter Keys Work in Either Case']]],
 ]
 
-// What a key does where its button's label alone doesn't say: Retry reads Continue on an agent's timed-out run.
-const HELP_LABELS = { retry: 'Retry, or Continue a Timed-Out Agent Run' }
+// What a key does where its button's label alone doesn't say: Retry reads Continue on an agent's timed-out run, and
+// the moves work in Queued's start order and in the five groups' list order.
+const HELP_LABELS = { retry: 'Retry, or Continue a Timed-Out Agent Run',
+  up: 'Move Up, in Queued, Open, Blocked, Needs Design, Backlog, or Ideas' }
 
 // Each section's title and its rows as a key and what it does.
 export function helpSections() {

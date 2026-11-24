@@ -7,7 +7,7 @@ import { deskOf, draw, listedCard, remember, select, shownDesks, ui, visit } fro
 // The History column's spans, the one it starts on, and how many rows a page holds.
 const HISTORY_RANGES = [['24h', '24 h', 1], ['3d', '3 days', 3], ['7d', '7 days', 7], ['30d', '30 days', 30],
   ['custom', 'Custom', 0]]
-const HISTORY_PAGE = 20
+const HISTORY_PAGE = 30
 // How long a read of the column's rows stays fresh while it shows.
 const HISTORY_MS = 60_000
 // The column's sortable columns: the key each sorts by, its heading, and whether it sorts as a number, newest or

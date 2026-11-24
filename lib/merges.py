@@ -7,6 +7,10 @@
     python3 merges.py remove <main checkout> <n>...     takes reviews out of the queue
     python3 merges.py tick <main checkout> [--json]     moves the queue on, has lib/pushes.py push what it merged,
                                                        then shows the queue
+    python3 merges.py cause <main checkout> <n>         prints `conflict` when the queue holds review n for checks
+                                                       that fail since a fix resolved its conflicts with main, `main`
+                                                       when they fail since the queue merged main in, and else nothing,
+                                                       for lib/fix.sh
 
 The queue reads each review's branch, draft flag, and checks from the local store, and each branch's head from git in
 the main checkout. It merges, tests, and lands reviews with no GitHub call. A review's check, which lib/checks.py runs,
@@ -24,10 +28,12 @@ of the new head. A worktree that can't take the merge, as with uncommitted chang
 one, keeps its review waiting with a note that names the cause, and the tick goes on to the reviews behind it. Once a
 check of a head that holds main passes, the tick fast-forwards main to a merge commit of the review, whose files match
 the tested head, and goes on to the next. A review from an agent branch that conflicts with main, or whose checks passed
-until the tick merged main into it and fail since, holds the queue while lib/fixes.py has an agent resolve its conflicts
-or adapt it to main, for up to FIX_WAIT. A review whose checks fail, that no fix mends, or that can't take main leaves
-the queue, says why in a comment on the review, and Needs You shows why for a day, or until its branch moves. A project
-without a `test` command has no checks, so its reviews merge once they hold main, one at a time.
+until the tick merged main into it, or until a fix resolved its conflicts with main, and fail since, or whose re-check
+after main moved failed, holds the queue while lib/fixes.py has an agent resolve its conflicts or adapt it to main, for
+up to FIX_WAIT. A review whose checks fail, that no fix mends, or that can't take main leaves the queue, says why in a
+comment on the review, naming the first failing tests and the check as lib/failures.py reads them from its log, and
+Needs You shows why for a day, or until its branch moves. A project without a `test` command has no checks, so its
+reviews merge once they hold main, one at a time.
 
 Each fast-forward holds the main checkout's lock, .git/agent-desk-main.lock, which a release also takes. When a worktree
 has the base branch checked out, as the main checkout has main, the tick moves it with `git merge --ff-only`, and never
@@ -35,10 +41,10 @@ while it holds uncommitted changes to a tracked file the merge changes: the queu
 until the changes are committed or undone. Once main moves, the tick records each review merged with its merge commit.
 Before it decides anything for a review, the tick checks whether the review's base already holds its head, as after a
 tick that moved main and died before saving the queue, or a store that couldn't record the merge, and records the review
-merged with the commit already there, so no review merges twice. After the tick lets go of the queue, it restarts the
-dispatcher and the web page's server when the merge changed their code in agent-desk's own checkout, runs the config's
-`sync.run` in the main checkout unless a program in `sync.skipWhile` runs there, and has lib/pushes.py push main to
-origin.
+merged with the commit already there, so no review merges twice. After the tick lets go of the queue, lib/landing.py
+writes current bytecode for lib/ in agent-desk's own checkout, which no `python3 -B` script writes, and restarts the
+dispatcher and the web page's server there when the merge changed their code. It then runs the config's `sync.run` in
+the main checkout unless a program in `sync.skipWhile` runs there, and the tick has lib/pushes.py push main to origin.
 
 The queue lives in ~/.local/state/agent-desk/merges/<owner>__<repo>.json. A tick that finds another tick under way
 changes nothing and shows the queue as that one left it. Each review lands on its own base, main for most, and "main"
@@ -46,7 +52,6 @@ above means that base: a review that targets another branch, as an issue labelle
 takes in, and merges into that branch, and a batch holds only reviews that share the oldest one's base.
 """
 
-import ast
 import fcntl
 import json
 import os
@@ -59,10 +64,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import checks  # noqa: E402
+import failures  # noqa: E402
 import fixes  # noqa: E402
+import landing  # noqa: E402
 import pushes  # noqa: E402
 import store  # noqa: E402
-from config import lookup, read as read_config  # noqa: E402
+from config import read as read_config  # noqa: E402
 
 STATE = store.STATE / "merges"
 # How long Needs You shows why a review left the queue.
@@ -72,6 +79,8 @@ FIX_WAIT = 3600
 # What decide gives fix_step to mend: a conflict with main, or checks that passed until main merged in.
 CONFLICTS = "conflicts with main"
 BROKE = "main broke its checks"
+# Why a review leaves for its head's failed checks, which a note naming the failing tests follows.
+FAILED = "checks failed"
 # Ends every note agent-desk writes on a review, as lib/common.sh's desk_mark does.
 DESK_MARK = "\n\n<sub>Posted by agent-desk</sub>"
 # The most reviews one batch tests together.
@@ -81,12 +90,6 @@ BATCH_PREFIX = "merge-queue/"
 # The checks that wait or work, and those that passed, as the store's `checks` rows name them.
 PENDING = ("queued", "running")
 PASSED = "passed"
-# The module the dispatcher's serve process starts from; dispatcher_code finds the lib/ files it runs.
-DISPATCHER = "dispatch"
-DISPATCH_UNIT = "agent-desk-dispatch.service"
-# The folders the web page's server runs from, whose change in agent-desk's own checkout restarts it.
-WEB_CODE = ("web/", "inbox/hooks/")
-WEB_UNIT = "agent-desk-web.service"
 
 
 class GitError(Exception):
@@ -339,10 +342,12 @@ def decide(pr, found, has_main, main_sha, item, testing=True):
     The next step for the queue's oldest review, as (step, why): step is "drop", "wait", "check", "update", "fix",
     "merge", or "landed", and why says what a dropped review or a waiting one waits on. "landed" records as merged a
     review its base already holds, "fix" leaves to fix_step a review that conflicts with main (CONFLICTS), or whose
-    checks fail since the queue merged main into it after they passed (BROKE), and "check" queues a check of a head that
+    checks fail since the queue merged main into it after they passed, or failed their re-check after main moved
+    (BROKE), and "check" queues a check of a head that
     has none. `found` are its head's checks, `has_main` says whether the head holds main's newest commit `main_sha`,
     `testing` whether the project has a `test` command, and `item` is the review's place in the queue, which notes the
-    main merged into it last, whether its checks had passed then, and the head a fix of what main broke started from.
+    main merged into it last, whether its checks had passed then, or before a fix resolved its conflicts with main, and
+    the head a fix of what main broke started from.
     """
     if pr["state"] == "GONE":
         return "drop", "it's no longer in the store"
@@ -365,6 +370,9 @@ def decide(pr, found, has_main, main_sha, item, testing=True):
     # A fix of what main broke works this head, so main moving meanwhile doesn't merge in under it.
     if item.get("passed") and item.get("brokenHead") == pr["headRefOid"]:
         return "fix", BROKE
+    # The dispatcher's re-check after main moved found main broke the head's checks before the queue merged main in.
+    if any(one.get("recheck") and one["status"] in store.CHECK_FAILURES for one in found):
+        return "fix", BROKE
     if not has_main:
         if item.get("main") == main_sha:
             return "drop", "main merge didn't land"
@@ -381,30 +389,34 @@ def decide(pr, found, has_main, main_sha, item, testing=True):
             if "brokenHead" in item:
                 return "drop", f"{BROKE}; auto-fix couldn't make them pass"
             return "fix", BROKE
-        return "drop", "checks failed"
+        return "drop", FAILED
     return "merge", None
 
 
-def fix_step(pr, number, starts, active, main_sha, item, now, chosen, cause=CONFLICTS):
+def fix_step(pr, number, starts, active, main_sha, item, now, chosen, cause=CONFLICTS, found=()):
     """
     The next step for a queued review that conflicts with main, or whose checks main broke, as decide gives it with
     its `cause`: wait while lib/fixes.py will fix it or a fix works it, and drop it once a fix fails, after FIX_WAIT, or
-    when no fix will come. `starts` are the fixes ledger's, `active` the reviews a run works or waits to, and `item`
-    notes the head the queue first saw need a fix, and when. A fix that resolves conflicts moves the head, which may
-    conflict again later and waits afresh; a fix of what main broke gets one wait, since decide drops the review once a
-    later head fails.
+    when no fix will come. `starts` are the fixes ledger's, `active` the reviews a run works or waits to, `found` the
+    checks of a conflicting head, and `item` notes the head the queue first saw need a fix, and when. A fix that
+    resolves conflicts moves the head, which may conflict again later and waits afresh. Its head's checks that fail,
+    when the conflicting head's had passed, are main's doing as after the queue's own merge of main, and get a fix of
+    what main broke. That fix gets one wait, since decide drops the review once a later head fails.
     """
     broke = cause == BROKE
     if not chosen["auto"] or not fixes.AGENT_BRANCH.match(pr["headRefName"]):
-        return "drop", "checks failed" if broke else cause
+        return "drop", FAILED if broke else cause
     if broke:
         item.setdefault("brokenHead", pr["headRefOid"])
         since = int(item.setdefault("brokenAt", now))
     else:
-        # A head the fix's merge of main makes comes from the fix, not from the queue's merge of main.
-        item.pop("passed", None)
         if item.get("conflictHead") != pr["headRefOid"]:
-            item.update(conflictHead=pr["headRefOid"], conflictAt=now)
+            # The fix merges main as the queue's own merge would, so its head's checks fail by main's doing when this
+            # head's passed, and a fix of what main broke may follow once more.
+            for key in ("brokenHead", "brokenAt"):
+                item.pop(key, None)
+            item.update(conflictHead=pr["headRefOid"], conflictAt=now, conflicted=True,
+                        passed=bool(found) and all(one["status"] == PASSED for one in found))
         since = int(item["conflictAt"])
     tries = [start for start in starts if start[1] == number and start[2] == pr["headRefOid"]]
     if number not in active and (any(start[3] == main_sha for start in tries) or len(tries) >= int(chosen["maxTries"])):
@@ -461,6 +473,31 @@ def batch_step(batch, queue, main_sha, found, heads):
     if any(one["status"] != PASSED for one in found):
         return "fail", "checks failed"
     return "land", None
+
+
+def what_failed(desk, repo, head):
+    """
+    What failed on `head`, for the note of a review that leaves for failed checks: the first failing tests, as
+    lib/failures.py reads them from the newest failed check's log, after a colon, and the check's number, such as
+    `: gameplay::reload a_session… and 1 more (check 2025)`; empty when no check of the head failed.
+    """
+    failed = [row for row in desk.head_checks(repo, head) if row["status"] in store.CHECK_FAILURES] if head else []
+    if not failed:
+        return ""
+    newest = max(failed, key=lambda row: row["id"])
+    said = failures.check_summary(newest)
+    return f": {said} (check {newest['id']})" if said else f" (check {newest['id']})"
+
+
+def cause(state, number):
+    """
+    What broke the checks of review `number` that the queue holds for a fix of them: "conflict" when they fail since a
+    fix resolved its conflicts with main, "main" when since the queue merged main in, and None when it holds none.
+    """
+    item = next((item for item in state["queue"] if item["pr"] == number), None)
+    if not item or not item.get("brokenHead"):
+        return None
+    return "conflict" if item.get("conflicted") else "main"
 
 
 # How the queue moves on.
@@ -686,7 +723,7 @@ def step_one(at, state, seen, aside):
         if new is not None:
             # Checks that passed before main merged in and fail after it are main's doing, which a fix can mend.
             passed = bool(found) and all(one["status"] == PASSED for one in found)
-            for key in ("brokenHead", "brokenAt"):
+            for key in ("brokenHead", "brokenAt", "conflicted"):
                 item.pop(key, None)
             item.update(main=main_sha, updatedAt=at.now, passed=passed,
                         note="merged main; checks starting" if at.testing else "merged main")
@@ -703,7 +740,7 @@ def step_one(at, state, seen, aside):
         step = "fix"
     if step == "fix":
         step, why = fix_step(pr, number, fixes.read_ledger(fixes.ledger_path(at.repo), at.now),
-                             fixes.active_reviews(at.desk, at.repo), main_sha, item, at.now, at.chosen, why)
+                             fixes.active_reviews(at.desk, at.repo), main_sha, item, at.now, at.chosen, why, found)
     if step == "merge":
         made = merge_commit(at.checkout, main_sha, pr["headRefOid"], review_message(number, pr))
         if made is None:
@@ -728,6 +765,8 @@ def step_one(at, state, seen, aside):
     queue.remove(item)
     # A review that leaves ends a failed batch's search for the review that broke it, so batches grow again.
     state.pop("limit", None)
+    if why and (why == FAILED or why.startswith(BROKE)):
+        why += what_failed(at.desk, at.repo, pr.get("headRefOid"))
     if why:
         state["dropped"] = [one for one in state["dropped"] if one["pr"] != number]
         state["dropped"].append({"pr": number, "reason": why, "at": at.now, "head": pr.get("headRefOid")})
@@ -736,95 +775,6 @@ def step_one(at, state, seen, aside):
     else:
         at.say(f"#{number}: merged.")
     return True
-
-
-# After the queue's lock: what a landing on main starts.
-
-def running_in(folder, programs):
-    """The first of `programs` running with `folder` as its working directory, or None."""
-    for name in programs:
-        if not isinstance(name, str) or not name.strip():
-            continue
-        found = subprocess.run(["pgrep", name], capture_output=True, text=True)
-        for pid in found.stdout.split():
-            try:
-                if os.readlink(f"/proc/{pid}/cwd") == str(folder):
-                    return name
-            except OSError:
-                continue
-    return None
-
-
-def runs_from(files, code):
-    """Whether any of `files` is one of `code`'s files, or lies in one of its folders, which end in a slash."""
-    return any(name == part or (part.endswith("/") and name.startswith(part)) for name in files for part in code)
-
-
-def dispatcher_code(checkout):
-    """
-    The files the dispatcher runs from in `checkout`: lib/dispatch.py and each lib/ module it imports, directly or
-    through other lib/ modules, as its source in the checkout names them.
-    """
-    lib = Path(checkout) / "lib"
-    seen, todo = set(), [DISPATCHER]
-    while todo:
-        name = todo.pop()
-        path = lib / f"{name}.py"
-        if name in seen or not path.is_file():
-            continue
-        seen.add(name)
-        try:
-            tree = ast.parse(path.read_text(), str(path))
-        except (OSError, SyntaxError, ValueError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                todo.extend(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
-                todo.append(node.module.split(".")[0])
-    return tuple(sorted({f"lib/{name}.py" for name in seen | {DISPATCHER}}))
-
-
-def services(checkout):
-    """
-    Each service a landing in `checkout` restarts, the files or folders it runs from, and the command that installs it
-    again.
-    """
-    return ((DISPATCH_UNIT, dispatcher_code(checkout), "agent-desk dispatch install"),
-            (WEB_UNIT, WEB_CODE, "agent-desk web on"))
-
-
-def after_landing(checkout, landed, say, desk_root=None, run=subprocess.run):
-    """
-    Once main moved in the main checkout itself: restarts each active service whose code the merges changed in
-    agent-desk's own checkout, and runs the config's sync.run there unless a program in sync.skipWhile runs there.
-    """
-    checkout = Path(checkout).resolve()
-    moved = [(old, new) for base, old, new in landed if worktree_of(checkout, base) == checkout]
-    if not moved:
-        return
-    old, new = moved[0][0], moved[-1][1]
-    desk_root = Path(desk_root or Path(__file__).resolve().parent.parent).resolve()
-    changed = names(checkout, old, new) if checkout == desk_root else set()
-    for unit, code, install in services(checkout) if changed else ():
-        if not runs_from(changed, code):
-            continue
-        active = run(["systemctl", "--user", "--quiet", "is-active", unit], capture_output=True)
-        if active.returncode == 0:
-            restarted = run(["systemctl", "--user", "restart", unit], capture_output=True)
-            say(f"Restarted {unit}." if restarted.returncode == 0 else f"Couldn't restart {unit}; run {install}.")
-    config = read_config(checkout)
-    sync = lookup(config, "sync.run")
-    if not isinstance(sync, str) or not sync.strip():
-        return
-    skip = lookup(config, "sync.skipWhile")
-    busy = running_in(checkout, skip if isinstance(skip, list) else [])
-    if busy:
-        say(f"Skipped the sync: {busy} is running in {checkout}.")
-        return
-    # flock -o keeps the lock from the build servers and games the sync leaves running.
-    done = run(["flock", "-o", str(lock_path(checkout)), "bash", "-c", sync], cwd=checkout, stdin=subprocess.DEVNULL)
-    say(f"Ran the sync in {checkout}." if done.returncode == 0 else f"The sync in {checkout} failed.")
 
 
 # What the board and the command show.
@@ -873,12 +823,17 @@ def report(view, as_json):
 def main(argv):
     args = [arg for arg in argv[1:] if arg != "--json"]
     as_json = "--json" in argv
-    modes = ("status", "add", "remove", "tick")
-    if len(args) < 2 or args[0] not in modes or (args[0] in ("add", "remove")) != (len(args) > 2) \
-            or not all(arg.isdigit() for arg in args[2:]):
+    modes = ("status", "add", "remove", "tick", "cause")
+    if len(args) < 2 or args[0] not in modes or (args[0] in ("add", "remove", "cause")) != (len(args) > 2) \
+            or (args[0] == "cause" and len(args) != 3) or not all(arg.isdigit() for arg in args[2:]):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     mode, checkout, numbers = args[0], args[1], [int(arg) for arg in args[2:]]
+    if mode == "cause":
+        said = cause(load(state_path(os.environ["GH_REPO"]), int(time.time())), numbers[0])
+        if said:
+            print(said)
+        return 0
     if mode == "add" and store.author() == "agent":
         # Merging stays the person's choice. Like the dispatcher's check of a request's author, this stops a run from
         # queuing a merge by mistake, and a run that clears AGENT_DESK_RUN gets past it.
@@ -923,7 +878,7 @@ def main(argv):
         if mode != "status":
             save(path, state)
     if at is not None and at.landed:
-        after_landing(checkout, at.landed, say)
+        landing.after_landing(checkout, at.landed, say, names, worktree_of, lock_path(checkout))
     if mode == "tick":
         pushes.run_tick(checkout, repo, say)
     report(shown(state, pushes.shown(checkout, repo)), as_json)

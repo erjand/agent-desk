@@ -165,10 +165,13 @@ chores_main() {
     fi
 
     [[ $mode == tick ]] || { echo "usage: agent-desk chores status | tick | on | off" >&2; exit 2; }
-    # In Manual, while the desk holds new runs, while it gets ready to sleep, or while the weekly usage limit holds,
-    # the timer starts no chore.
-    if python3 -B "$desk_lib/hold.py" held; then
-        echo "The desk is in Manual, holds new runs, or is at its weekly usage limit, so no chore starts."
+    # Manual and Hold stop the timer for both runners. Claude's limits also stop Claude chores.
+    gate=()
+    if [[ $(desk_project_runner) =~ ^(codex|local)$ ]]; then
+        gate=(codex)
+    fi
+    if python3 -B "$desk_lib/hold.py" held "${gate[@]}"; then
+        echo "The desk is in Manual, holds new runs, or is at its weekly usage limit or API budget, so no chore starts."
         exit 0
     fi
     [[ -n $best ]] || { echo "No chore is due."; exit 0; }

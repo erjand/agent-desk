@@ -21,7 +21,7 @@ once, with list items under each:
 
 ### Changed
 
-- **Breaking**: **Workflows**: The agent workflow reads its time limit from `.agent-desk.json` instead of the
+- **Breaking**: The dispatcher reads each run's time limit from `.agent-desk.json` instead of the
   `AGENT_DESK_TIMEOUT` variable. (#52)
 ```
 
@@ -29,8 +29,7 @@ once, with list items under each:
   Nothing else goes in the file: no title, no prose between sections, and no other heading levels.
 - Each item starts with `- ` and reads as the released changelog would print it, ending with the issue number in
   parentheses as `CHANGELOG.md` does. An item wraps onto lines indented by two spaces.
-- An item that changed the workflow templates in `workflows/` starts with `**Workflows**:`. An item that breaks
-  something a user relies on, such as a command, a config key, or a label, starts with `**Breaking**:`. An item with
-  both puts `**Breaking**:` first. The markers appear nowhere else, and a release reads them to pick its version.
+- An item that breaks something a user relies on, such as a command, a config key, or a label, starts with
+  `**Breaking**:`. The marker appears nowhere else, and a release reads it to pick its version.
 
 `tests/test_changelog_d.py` checks every file here apart from this README.

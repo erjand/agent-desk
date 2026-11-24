@@ -1,6 +1,6 @@
 # agent-desk
 
-agent-desk hands a project's issues to headless Claude Code agents and brings their work back as reviews for you to
+agent-desk hands a project's issues to headless Claude Code or Codex agents and brings their work back as reviews for you to
 read. You file an issue, label it `agent-ready`, and agent-desk starts an agent in a worktree of its own. The agent
 writes the change, runs the tests, and opens a review. You read the diff, send the agent back with a comment, or press
 Merge. A web page and a pane beside the Claude Code chat show what each agent works on and what waits for you.
@@ -126,8 +126,8 @@ flowchart TD
     gates{"The dispatcher's gates: mode, usage limit, hold,<br/>blockers, serial group, slot, target, memory"}
     gates -->|"all clear"| unit["A systemd unit runs<br/>agent-desk work-issue"]
     unit --> worktree["A worktree on agent/issue-n,<br/>beside the main checkout"]
-    worktree --> claude["Claude Code works the issue<br/>with /agent-desk:work-issue"]
-    claude --> review["A review in the local store"]
+    worktree --> runner["The project runner works the issue<br/>with the work-issue skill"]
+    runner --> review["A review in the local store"]
     claude -.->|"needs a decision"| design["Needs Design:<br/>you answer on the issue"]
     design -.-> issue
     review --> check["The branch check runs the<br/>project's test command"]
@@ -176,6 +176,7 @@ Each project commits a `.agent-desk.json` in its main checkout:
 | --- | --- |
 | `title` | The project's name on the page and in the pane |
 | `host` | `github` to push `main` and publish releases there, or `none` for a project kept on this machine |
+| `issueRunner` | `claude` (default) or `codex` for headless agent runs |
 | `test` | The command each branch check runs; empty turns the checks off, so reviews merge untested |
 | `testMinutes`, `limitMinutes` | The time limits of a branch check and of each kind of run |
 | `env` | Environment variables each run and check gets |
@@ -225,7 +226,7 @@ another port. The service keeps the port through upgrades, and the pane opens it
 
 When a run fails, its card in Needs You names the `journalctl --user -u <unit>` command that prints its log, and the
 Agent Log tab shows the agent's session. `journalctl --user -u agent-desk-dispatch` prints the dispatcher's log, and a
-waiting card's note says which gate holds it, such as `waits for memory: 5.3 GB free of 9 GB needed`.
+waiting card's note says which gate holds it, such as `waits for memory: 5.3 GB free of 1 GB + 8 GB reserve`.
 
 ## Upgrade
 

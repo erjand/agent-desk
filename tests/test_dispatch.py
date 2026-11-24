@@ -14,6 +14,7 @@ import run_control  # noqa: E402
 import run_units  # noqa: E402
 import store  # noqa: E402
 from dispatch_case import REPO, DispatchCase  # noqa: E402
+from dispatch_comments import CLEAN_MINUTES  # noqa: E402
 
 
 class GateTest(DispatchCase):
@@ -109,9 +110,9 @@ class GateTest(DispatchCase):
         self.end(first)
         self.memory.ready = False
         self.memory.reason = memory.Shortfall("the run needs 1 GB and 8 GB stays free for the user, and 5.3 GB is free",
-                                              "memory: 5.3 GB free of 9 GB needed", 5.3, 9)
+                                              "memory: 5.3 GB free of 1 GB + 8 GB reserve", 5.3, 9)
         self.dispatcher.tick()
-        self.assertEqual(self.waits(third), ("memory", "memory: 5.3 GB free of 9 GB needed"))
+        self.assertEqual(self.waits(third), ("memory", "memory: 5.3 GB free of 1 GB + 8 GB reserve"))
         self.memory.ready = True
         self.time += dispatch.RETRY_SECONDS
         self.dispatcher.tick()
@@ -124,15 +125,15 @@ class GateTest(DispatchCase):
 
         def free(gb):
             self.memory.reason = memory.Shortfall(f"the run needs 1 GB and 8 GB stays free for the user, and {gb} GB is "
-                                                  "free", f"memory: {gb} GB free of 9 GB needed", gb, 9)
+                                                  "free", f"memory: {gb} GB free of 1 GB + 8 GB reserve", gb, 9)
             self.time += dispatch.RETRY_SECONDS
             self.dispatcher.tick()
             return self.waits(run)[1], sum(line.startswith(f"Run {run} waits:") for line in self.said)
 
-        self.assertEqual(free(5.3), ("memory: 5.3 GB free of 9 GB needed", 1))
-        self.assertEqual(free(5.6), ("memory: 5.3 GB free of 9 GB needed", 1))
-        self.assertEqual(free(4.9), ("memory: 5.3 GB free of 9 GB needed", 1))
-        self.assertEqual(free(5.8), ("memory: 5.8 GB free of 9 GB needed", 2))
+        self.assertEqual(free(5.3), ("memory: 5.3 GB free of 1 GB + 8 GB reserve", 1))
+        self.assertEqual(free(5.6), ("memory: 5.3 GB free of 1 GB + 8 GB reserve", 1))
+        self.assertEqual(free(4.9), ("memory: 5.3 GB free of 1 GB + 8 GB reserve", 1))
+        self.assertEqual(free(5.8), ("memory: 5.8 GB free of 1 GB + 8 GB reserve", 2))
         # Pressure is another reason, whatever the figures.
         self.memory.reason = memory.Shortfall("memory pressure is 12%, over 5%", "memory pressure under 5%, now 12%")
         self.time += dispatch.RETRY_SECONDS
@@ -390,7 +391,7 @@ class CleanTest(DispatchCase):
         self.assertEqual(Path(args[args.index("--") + 1]), run_units.AGENT_DESK)
         self.assertEqual(args[args.index("--slice") + 1], "agentdesk.slice")
         self.assertEqual(self.systemd.env()["GH_REPO"], REPO)
-        self.assertIn(f"RuntimeMaxSec={dispatch.CLEAN_MINUTES}min", self.systemd.properties())
+        self.assertIn(f"RuntimeMaxSec={CLEAN_MINUTES}min", self.systemd.properties())
         self.assertIn(f"Started the cleanup of agent/issue-7 in {unit}: review #{review} merged.", self.said)
 
     def test_a_review_closed_without_merging_starts_an_unmerged_cleanup(self):

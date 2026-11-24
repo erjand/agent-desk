@@ -1,5 +1,6 @@
 """The command line of agent-desk's store: `agent-desk issue`, `agent-desk review`, `agent-desk label`, `agent-desk
-queue`, and the `project add` that `agent-desk install` runs, each a read or write of lib/store.py's database.
+queue`, `agent-desk list`, `agent-desk project list`, and the `project add` that `agent-desk install` runs, each a read or write of
+lib/store.py's database except `project list`, which reads only the projects file.
 
     python3 store_cli.py issue create --title <t> [--body <b> | --body-file <f>] [--label <l>]... [--parent <n>]
                                       [--blocked-by <n>]...          prints the new issue's number
@@ -23,7 +24,10 @@ queue`, and the `project add` that `agent-desk install` runs, each a read or wri
                                        [--label <l>]...              prints the new review's number
     python3 store_cli.py review view <n | branch> [--json <fields>]
     python3 store_cli.py review list [--state open|closed|merged|all] [--head <branch>] [--base <branch>]
-                                     [--label <l>]... [--since <time>] [--limit <n>] [--json <fields>]
+                                     [--label <l>]... [--since <time>] [--merged-since <time>] [--limit <n>]
+                                     [--json <fields>]               --merged-since keeps the reviews merged at or
+                                                                     after a time, and refuses --state open|closed
+    python3 store_cli.py review diff <n | branch>                    prints the review's diff, as gh pr diff does
     python3 store_cli.py review comment <n> --body <b> [--path <file> --line <n> [--head-sha <commit>]]
                                        [--to-agent [--quotes <comment>]...] [--edit <comment> [--note <n>]]
     python3 store_cli.py review edit <n> [--title <t>] [--body <b>] [--add-label <l>]... [--remove-label <l>]...
@@ -34,12 +38,21 @@ queue`, and the `project add` that `agent-desk install` runs, each a read or wri
     python3 store_cli.py review merge <n> --sha <commit>             records the merge and closes the issues it fixes
     python3 store_cli.py label edit <name> --color <hex>             gives a label its color; `create` does the same
     python3 store_cli.py label list                                  prints each label's name and color
-    python3 store_cli.py queue order [<n> --up | --down | --top | --to <place>]
+    python3 store_cli.py queue order [<n> --up | --down | --top | --bottom | --to <place> | --sort]
                                                                      prints the start order of the queued and
                                                                      waiting issues, or moves issue n in it, --to
-                                                                     a place from 1
+                                                                     a place from 1, or with --sort sorts it as
+                                                                     lib/start_order.py does and prints it
+    python3 store_cli.py list order [<n> --before <m> | --after <m> | --top | --bottom | --reset <n>...]
+                                                                     prints the list order of the open issues
+                                                                     outside the start order, moves issue n right
+                                                                     above or below issue m or to the top or
+                                                                     bottom, or deals the places of the issues
+                                                                     named back out among them by number
     python3 store_cli.py project add <owner/repo> <main checkout>    records a project and its main checkout, as
                                                                      `agent-desk install` does
+    python3 store_cli.py project list [--json]                       prints each project in the projects file with
+                                                                     its main checkout, in the file's order
 
 The verbs and flags follow the gh commands the scripts call today, and `--json` prints the fields gh names the same
 way (`labels[].name`, `comments[].body`, `headRefName`), so a script pipes the output to jq as it passed `--jq`. The
@@ -54,6 +67,8 @@ from pathlib import Path
 
 import hold
 import review_checks
+import review_diff
+import run_units
 from run_control import cancel_waiting
 from store import (ISSUE_FIELDS, REVIEW_FIELDS, STATUSES, Store, StoreError, checkout_of, git,
                    repo_here)
@@ -82,6 +97,16 @@ def pick(shaped, fields, known):
         raise StoreError(f"Unknown JSON field{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}. The fields are "
                          f"{', '.join(known)}.")
     return {name: shaped.get(name) for name in names}
+
+
+def with_size(store, repo, shaped, fields):
+    """
+    `shaped` with the lines its review added and deleted and the files it changed, from git in the project's main
+    checkout, when `--json` names any of them. Only these fields run git, so a listing without them stays quick.
+    """
+    if "headRefName" not in shaped or not set(fields.split(",")) & set(review_diff.SIZE_FIELDS):
+        return shaped
+    return {**shaped, **review_diff.size(checkout_of(repo) or ".", store.review(repo, shaped["number"]))}
 
 
 def show(shaped):
@@ -128,7 +153,7 @@ def parser():
         view.add_argument("--json")
         view.add_argument("--comments", action="store_true", help="accepted for gh's sake; comments always print")
         listing = verb("list", number=False)
-        listing.add_argument("--state", "-s", default="open",
+        listing.add_argument("--state", "-s",
                              choices=("open", "closed", "all") + (("merged",) if kind == "review" else ()))
         listing.add_argument("--label", "-l", action="append", default=[])
         listing.add_argument("--limit", "-L", type=int, default=30)
@@ -178,6 +203,9 @@ def parser():
             create.add_argument("--fixes", type=int, action="append", default=[])
             listing.add_argument("--head", "-H")
             listing.add_argument("--base", "-B")
+            listing.add_argument("--merged-since", help="the reviews merged at or after a time, such as "
+                                                        "2026-11-13T00:00:00Z; the state defaults to merged")
+            verb("diff")
             comment.add_argument("--path")
             comment.add_argument("--line", type=int)
             comment.add_argument("--head-sha")
@@ -197,12 +225,26 @@ def parser():
     order.add_argument("--repo", "-R")
     order.add_argument("number", nargs="?")
     moves = order.add_mutually_exclusive_group()
-    for move in ("up", "down", "top"):
+    for move in ("up", "down", "top", "bottom"):
         moves.add_argument(f"--{move}", dest="move", action="store_const", const=move)
     moves.add_argument("--to", dest="move", type=int, metavar="PLACE", help="the place from 1 to move the issue to")
-    add = kinds.add_parser("project").add_subparsers(dest="verb", required=True).add_parser("add")
+    moves.add_argument("--sort", dest="move", action="store_const", const="sort",
+                       help="sort the order: the issues that can start now, then the ones that wait")
+    listing = kinds.add_parser("list").add_subparsers(dest="verb", required=True).add_parser("order")
+    listing.add_argument("--repo", "-R")
+    listing.add_argument("number", nargs="?", type=issue_number)
+    moves = listing.add_mutually_exclusive_group()
+    moves.add_argument("--before", metavar="M", type=issue_number, help="move the issue right above issue m")
+    moves.add_argument("--after", metavar="M", type=issue_number, help="move the issue right below issue m")
+    for move in ("top", "bottom"):
+        moves.add_argument(f"--{move}", dest="where", action="store_const", const=move)
+    moves.add_argument("--reset", nargs="+", metavar="N", type=issue_number,
+                       help="deal the places these issues hold back out among them, the highest number first")
+    project = kinds.add_parser("project").add_subparsers(dest="verb", required=True)
+    add = project.add_parser("add")
     add.add_argument("repo")
     add.add_argument("path")
+    project.add_parser("list").add_argument("--json", action="store_true")
     return top
 
 
@@ -229,6 +271,8 @@ def run(args, store):
         return ""
     if kind == "queue":
         return queue_order(store, repo, args)
+    if kind == "list":
+        return list_order(store, repo, args)
     known = ISSUE_FIELDS if kind == "issue" else REVIEW_FIELDS
     if verb == "create":
         if kind == "issue":
@@ -238,11 +282,16 @@ def run(args, store):
                       "head_sha": git("rev-parse", "--verify", "--quiet", f"refs/heads/{args.branch}")}
         return str(store.create(repo, kind, args.title, body_of(args), args.label, path=checkout_of(repo), **fields))
     if verb == "list":
-        found = store.items(repo, kind, state=args.state, status=getattr(args, "status", None), labels=args.label,
+        merged_since = getattr(args, "merged_since", None)
+        if merged_since and args.state in ("open", "closed"):
+            raise StoreError(f"--merged-since lists merged reviews, so it can't go with --state {args.state}.")
+        found = store.items(repo, kind, state=args.state or ("merged" if merged_since else "open"),
+                            status=getattr(args, "status", None), labels=args.label,
                             search=getattr(args, "search", None), head=getattr(args, "head", None),
-                            base=getattr(args, "base", None), limit=args.limit, since=args.since)
+                            base=getattr(args, "base", None), limit=args.limit, since=args.since,
+                            merged_since=merged_since)
         if args.json is not None:
-            return json.dumps([pick(one, args.json, known) for one in found])
+            return json.dumps([pick(with_size(store, repo, one, args.json), args.json, known) for one in found])
         return "\n".join("\t".join([str(one["number"]), one["status"], one["title"],
                                     ", ".join(label["name"] for label in one["labels"])]) for one in found)
     number = number_of(store, repo, args)
@@ -250,7 +299,12 @@ def run(args, store):
         return delete(store, repo, number, args.yes)
     if verb == "view":
         shaped = store.item(repo, number, kind)
-        return json.dumps(pick(shaped, args.json, known)) if args.json is not None else show(shaped)
+        if args.json is None:
+            return show(shaped)
+        return json.dumps(pick(with_size(store, repo, shaped, args.json), args.json, known))
+    if verb == "diff":
+        store.item(repo, number, kind)
+        return review_diff.diff(checkout_of(repo) or ".", store.review(repo, number)).rstrip("\n")
     store.item(repo, number, kind)
     if verb == "comment" and args.note is not None and args.edit is None:
         raise StoreError("--note says what an --edit changed, so it goes only with --edit.")
@@ -350,12 +404,17 @@ def delete(store, repo, number, yes):
 
 def queue_order(store, repo, args):
     """
-    The project's start order, one issue a line with its place, number, status, and title; or with a number and a
-    move, moves the issue and says where it went.
+    The project's start order, one issue a line with its place, number, status, and title, after sorting it with
+    `--sort`; or with a number and a move, moves the issue and says where it went.
     """
-    if (args.number is None) != (args.move is None):
-        raise StoreError("queue order takes an issue with --up, --down, --top, or --to, or none to print the order.")
-    if args.move is None:
+    if args.move == "sort" and args.number is not None:
+        raise StoreError("queue order --sort sorts the whole order, so it takes no issue.")
+    if args.move != "sort" and (args.number is None) != (args.move is None):
+        raise StoreError("queue order takes an issue with --up, --down, --top, --bottom, or --to, or none to print the "
+                         "order.")
+    if args.move == "sort":
+        store.sort_order(repo)
+    if args.move in (None, "sort"):
         return "\n".join(f"{place}\t#{one['number']}\t{one['status']}\t{one['title']}"
                          for place, one in enumerate(store.order(repo), start=1))
     text = args.number.lstrip("#")
@@ -365,15 +424,54 @@ def queue_order(store, repo, args):
     return f"#{text} is {place} of {len(store.order(repo))} in the start order."
 
 
+def list_order(store, repo, args):
+    """
+    The project's list order, one issue a line with its place, number, status, and title; or with a number and a move,
+    moves the issue and says where it went; or with `--reset`, deals the issues' places back out by number and prints
+    their lines.
+    """
+    moving = args.before is not None or args.after is not None or args.where is not None
+    if args.reset is not None and args.number is not None:
+        raise StoreError("list order --reset takes its issues after the flag, and no issue before it.")
+    if args.reset is None and (args.number is not None) != moving:
+        raise StoreError("list order takes an issue with --before, --after, --top, or --bottom, or none to print the "
+                         "order.")
+    if moving:
+        place, total = store.list_move(repo, args.number, before=args.before, after=args.after, where=args.where)
+        return f"#{args.number} is {place} of {total} in the list order."
+    if args.reset is not None:
+        store.list_reset(repo, args.reset)
+    return "\n".join(f"{place}\t#{one['number']}\t{one['status']}\t{one['title']}"
+                     for place, one in enumerate(store.list_order(repo), start=1)
+                     if args.reset is None or one["number"] in args.reset)
+
+
 # The verbs that only read, which open the store read-only.
-READING_VERBS = ("view", "list", "checks")
+READING_VERBS = ("view", "list", "checks", "diff")
+
+
+def project_list(as_json):
+    """
+    Each project in the projects file and its main checkout, a line each, or as a JSON list that is `[]` when the file
+    is missing or empty, where the lines are "".
+    """
+    listed = run_units.projects()
+    if as_json:
+        return json.dumps([{"repo": repo, "checkout": checkout} for repo, checkout in listed], indent=2)
+    return "\n".join(f"{repo} {checkout}" for repo, checkout in listed)
 
 
 def main(argv):
     args = parser().parse_args(argv)
+    if args.kind == "project" and args.verb == "list":
+        out = project_list(args.json)
+        if out:
+            print(out)
+        return 0
     try:
         reads = args.verb in READING_VERBS or (args.kind == "queue" and args.move is None) \
-            or (args.verb == "delete" and not args.yes)
+            or (args.kind == "list" and args.reset is None and args.where is None and args.before is None
+                and args.after is None) or (args.verb == "delete" and not args.yes)
         store = Store(read_only=args.kind != "project" and reads)
         try:
             if args.kind == "project":

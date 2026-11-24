@@ -14,8 +14,8 @@ import store
 LIB = Path(__file__).resolve().parent
 AGENT_DESK = LIB.parent / "bin" / "agent-desk"
 # A project's slots when its config leaves them out. `benchmark` caps the agent runs a `benchmark` issue may hold at
-# once.
-DEFAULT_SLOTS = {"agent": 3, "chore": 1, "fix": 1, "check": 2, "benchmark": 2}
+# once, and `gpu` those on issues labelled `gpu`, where None caps nothing beyond the agent slots.
+DEFAULT_SLOTS = {"agent": 3, "chore": 1, "fix": 1, "check": 2, "benchmark": 2, "gpu": None}
 # Each kind's time limit in minutes when the project's `limitMinutes` leaves it out. `benchmark` is the limit of an
 # agent run of an issue labelled `benchmark`.
 LIMIT_MINUTES = {"agent": 180, "benchmark": 300, "chore": 120, "fix": 90}

@@ -7,15 +7,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
-MARKERS = ("**Breaking**:", "**Workflows**:")
+MARKER = "**Breaking**:"
+# Released items in CHANGELOG.md carry this marker, which named the workflow templates agent-desk no longer has.
+RETIRED = "**Workflows**"
 NAME = re.compile(r"^[a-z0-9][a-z0-9.-]*\.md$")
-LEADING_MARKERS = re.compile(r"^(\*\*Breaking\*\*:\s*)?(\*\*Workflows\*\*:\s*)?")
+LEADING_MARKER = re.compile(r"^\*\*Breaking\*\*:\s*")
 
 
 def stray_markers(text, where):
-    """A problem for each marker in `text`, which holds an item's text after its leading markers."""
-    return [f"{where}: {marker} belongs only at an item's start, with **Breaking**: first"
-            for marker in MARKERS if marker.rstrip(":") in text]
+    """A problem for each marker in `text`, which holds an item's text after its leading marker."""
+    found = []
+    if MARKER.rstrip(":") in text:
+        found.append(f"{where}: {MARKER} belongs only at an item's start")
+    if RETIRED in text:
+        found.append(f"{where}: {RETIRED} is retired, since agent-desk has no workflow templates; mark a breaking "
+                     f"change with {MARKER} alone")
+    return found
 
 
 def problems(name, text):
@@ -47,7 +54,7 @@ def problems(name, text):
             else:
                 items[len(seen)] += 1
             in_item = True
-            rest = LEADING_MARKERS.sub("", line[2:])
+            rest = LEADING_MARKER.sub("", line[2:])
             if not rest.strip():
                 found.append(f"{where}: the item has no text")
             found.extend(stray_markers(rest, where))
@@ -80,12 +87,12 @@ def folder_problems(folder):
 GOOD = """### Added
 
 - `agent-desk doctor` checks each runner's service. (#52)
-- **Workflows**: The agent workflow names its version in a step summary, which wraps
+- **Breaking**: `agent-desk doctor` names its version in a summary, which wraps
   onto a second line. (#52)
 
 ### Fixed
 
-- **Breaking**: **Workflows**: `agent-desk install` drops the old `AGENT_DESK_TIMEOUT` variable. (#52)
+- **Breaking**: `agent-desk install` drops the old `AGENT_DESK_TIMEOUT` variable. (#52)
 """
 
 
@@ -109,7 +116,7 @@ class ProblemsTest(unittest.TestCase):
         found = problems(name, text)
         self.assertTrue(any(fragment in problem for problem in found), found)
 
-    def test_a_file_with_every_section_and_both_markers_passes(self):
+    def test_a_file_with_every_section_and_the_marker_passes(self):
         text = "".join(f"### {section}\n\n- **Breaking**: A {section.lower()} change. (#52)\n\n"
                        for section in SECTIONS)
         self.assertEqual(problems("issue-52.md", text), [])
@@ -137,13 +144,16 @@ class ProblemsTest(unittest.TestCase):
         self.assertProblem("### Added\n\n- A check\n\n  that wraps after a blank line. (#52)\n", "belong here")
         self.assertProblem("### Added\n\n-  \n", "no text")
 
-    def test_markers_belong_only_at_an_items_start(self):
-        self.assertProblem("### Changed\n\n- The pane changed. **Workflows**: too. (#52)\n", "only at an item's start")
+    def test_the_marker_belongs_only_at_an_items_start(self):
+        self.assertProblem("### Changed\n\n- The pane changed. **Breaking**: too. (#52)\n", "only at an item's start")
         self.assertProblem("### Changed\n\n- The pane changed, and\n  **Breaking**: so did a label. (#52)\n",
                            "only at an item's start")
-        self.assertProblem("### Changed\n\n- **Workflows**: **Breaking**: A label changed. (#52)\n",
-                           "only at an item's start")
         self.assertProblem("### Changed\n\n- **Breaking**:\n", "no text")
+
+    def test_the_retired_workflows_marker_fails_anywhere(self):
+        self.assertProblem("### Changed\n\n- **Workflows**: A job changed. (#52)\n", "is retired")
+        self.assertProblem("### Changed\n\n- **Breaking**: **Workflows**: A label changed. (#52)\n", "is retired")
+        self.assertProblem("### Changed\n\n- A label changed, and\n  **Workflows**: a job. (#52)\n", "is retired")
 
 
 if __name__ == "__main__":

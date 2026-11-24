@@ -1,15 +1,20 @@
 """Records what an agent-desk run's agent reported: the model and effort it ran with, how long it took, and its review.
 
+    python3 run_log.py session <session id>
     python3 run_log.py record <model> <effort> <stream> [review] [--labels <a,b>] [--start new|resumed|feedback]
     python3 run_log.py import [<path>]
 
-The run is the store's run that AGENT_DESK_RUN names, as the dispatcher sets it in every unit it starts; a script run
-by hand has none, and records nothing. The run's length, turns, and cost come from the `result` event that ends its
-stream-json. An agent run also records its issue's labels when it started, which pick its model and effort, and why it
-started: `new` on a fresh branch, `resumed` taking up a session a time limit cut off or that stopped early, or
-`feedback` returning to a branch with a new request. Each result lands in the run's row of the store's `runs` table,
-where the web page reads how each chore's speed and merged reviews change with its model and effort, and what each
-merged review cost. How the run ended, such as `stopped` for one that stopped early, is lib/run_end.py's to record.
+The run is the store's run that AGENT_DESK_RUN names, as the dispatcher sets it in every unit it starts; a script run by
+hand has none, and records nothing. `session` records the Claude Code session the run starts or takes up, before its
+agent starts, so a run cut off at its time limit names its session too. The run's length, turns, and cost come from the
+`result` event that ends its stream-json. That event reports the session's total cost so far, which holds the spend of
+the earlier runs of a session the run took up, so the store keeps the total and counts as the run's cost what it grew by
+since the session's last report, as `Store.run_result` describes. An agent run also records its issue's labels when it
+started, which pick its model and effort, and why it started: `new` on a fresh branch, `resumed` taking up a session a
+time limit cut off or that stopped early, or `feedback` returning to a branch with a new request. Each result lands in
+the run's row of the store's `runs` table, where the web page reads how each chore's speed and merged reviews change
+with its model and effort, and what each merged review cost. How the run ended, such as `stopped` for one that stopped
+early, is lib/run_end.py's to record.
 
 `import` copies the runs in the log agent-desk kept before the store, by default runs.jsonl in its state folder, into
 the `runs` table as finished runs, so the page counts them too. A line names its project in `repo`, its chore by the
@@ -21,7 +26,10 @@ what that run's row lacks. An import run again adds nothing.
 
 import json
 import os
+import re
+import sqlite3
 import sys
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -37,21 +45,51 @@ OLD_LOG = stores.STATE / "runs.jsonl"
 KINDS = ("agent", "chore", "fix")
 
 
+def posting_version():
+    """The installed launcher's version, read before the agent starts."""
+    try:
+        return (Path(__file__).resolve().parents[1] / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def record_identity(run, model, provider, version):
+    """Keep only a model identifier reported by the runner, with the run's launcher version."""
+    if (not isinstance(model, str) or model.lower() in ("default", "unknown", "codex")
+            or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}", model)
+            or not re.fullmatch(r"[0-9][a-zA-Z0-9.+-]*", version)):
+        return False
+    try:
+        with closing(Store()) as desk:
+            desk.run_posting_identity(int(run), model, provider, version)
+    except (OSError, sqlite3.Error, StoreError) as error:
+        print(f"agent-desk: Could not record the posting identity: {error}", file=sys.stderr)
+        return False
+    return True
+
+
 def result_of(stream_text):
-    """The run's length in minutes, turns, and cost in dollars from its stream-json's last `result` event, or Nones."""
-    found = {}
+    """
+    The run's length in minutes, turns, and the total cost in dollars its session reported, as `reported`, from its
+    stream-json's last `result` event, or Nones, and the session the stream's events name, or None.
+    """
+    found, session = {}, None
     for line in stream_text.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
-        if isinstance(event, dict) and event.get("type") == "result":
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "result":
             found = event
-    minutes = found.get("duration_ms")
+        if isinstance(event.get("session_id"), str) and event["session_id"]:
+            session = event["session_id"]
+    minutes, total = found.get("duration_ms"), found.get("total_cost_usd")
     return {"minutes": round(minutes / 60000, 1) if isinstance(minutes, (int, float)) else None,
             "turns": found.get("num_turns") if isinstance(found.get("num_turns"), int) else None,
-            "cost": round(found["total_cost_usd"], 2) if isinstance(found.get("total_cost_usd"), (int, float))
-            else None}
+            "reported": total if isinstance(total, (int, float)) and not isinstance(total, bool) else None,
+            "session": session}
 
 
 STARTS = ("new", "resumed", "feedback")
@@ -188,6 +226,17 @@ def main(argv, environ=os.environ, store=None):
             return 1
         print(f"Imported {path}: added {counts['added']} runs, filled in {counts['filled']} the store held, and "
               f"skipped {counts['held']} it held already and {counts['unread']} lines it couldn't read.")
+        return 0
+    if len(argv) == 3 and argv[1] == "session":
+        run = environ.get("AGENT_DESK_RUN", "")
+        if not run.isdigit() or not argv[2]:
+            return 0
+        store = store or Store()
+        try:
+            store.run_session(int(run), argv[2])
+        except StoreError as error:
+            print(f"agent-desk: {error}", file=sys.stderr)
+            return 1
         return 0
     args, labels, start = options(argv[2:])
     if len(argv) < 2 or argv[1] != "record" or len(args) not in (3, 4):

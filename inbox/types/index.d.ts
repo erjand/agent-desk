@@ -1,7 +1,7 @@
 /** What a row's buttons can do. */
 export type RowAction = 'open' | 'merge' | 'ready' | 'resume' | 'log' | 'retry' | 'dismiss' | 'fix' | 'close'
   | 'start' | 'restart' | 'designed' | 'to-open' | 'to-backlog' | 'unblock' | 'undraft' | 'cancel' | 'up' | 'down'
-  | 'top' | 'unpick' | 'pause' | 'unpause'
+  | 'top' | 'bottom' | 'unpick' | 'pause' | 'unpause' | 'stop-command'
 
 /** One line of the inbox: an issue, a PR, or a run. */
 export type Row = {
@@ -17,13 +17,23 @@ export type Row = {
   time?: string
   /** Drawn dimmed, as for an issue parked with on-hold or behind an open blocker. */
   dim?: boolean
+  /** Whether its run stalls on a command that left the CPU idle, which the web page draws in the warning tone. */
+  stalled?: boolean
+  /**
+   * What Stop Command asks before it stops a stalled run's command: the command's summary and how long it has run,
+   * such as `Stop Bash: cargo test … after 14 min? The agent goes on with its failure.`
+   */
+  stopAsk?: string
   /** The issue an agent PR's branch works, which the row shows in place of the PR's own number. */
   issue?: number
   /** Whether number is a PR's, which a row without an issue shows as PR <n>. */
   pr?: boolean
   /** The failed run a row stands for, which Dismiss hides. */
   run?: number
-  /** Whether Retry carries on the failed run's own Claude Code session, as on an agent's timed-out run on an issue. */
+  /**
+   * Whether Retry, or a stopped issue's Continue, carries on the failed run's own Claude Code session, as on an agent's
+   * timed-out run on an issue.
+   */
   continues?: boolean
   /**
    * A stopped issue's newest failed or cancelled agent run, which Continue reruns; without one, Continue starts a fresh

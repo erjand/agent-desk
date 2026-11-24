@@ -192,7 +192,17 @@ class StoreReviewsTest(unittest.TestCase):
     def test_a_review_whose_commits_git_lacks_changed_nothing(self):
         number = self.desk.create(REPO, "review", "Lost", branch=PREFIX + "9", head_sha="0" * 40)
         files = chore_ledger.git_files(str(self.main))
-        self.assertEqual(files(self.desk.item(REPO, number)), [])
+        self.assertEqual(files(self.desk.review(REPO, number)), [])
+
+    def test_a_rebase_merged_review_lists_the_files_of_all_its_rebased_commits(self):
+        number = self.desk.create(REPO, "review", "Rebased", branch=PREFIX + "5")
+        self.commit("later.py", "Main moved on")
+        for path in ("first.py", "second.py", "third.py"):
+            self.commit(path, f"Rebased {path}")
+        self.desk.merge(REPO, number, git("rev-parse", "HEAD", cwd=self.main))
+        self.desk.db.execute("UPDATE reviews SET merged_commits = 3 WHERE project = ? AND number = ?", (REPO, number))
+        found = chore_ledger.reviews(self.desk, REPO, PREFIX, chore_ledger.git_files(str(self.main)))
+        self.assertEqual([one["path"] for one in found[0]["files"]], ["first.py", "second.py", "third.py"])
 
     def test_brief_reads_the_store_and_git_without_gh(self):
         self.seed()

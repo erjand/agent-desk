@@ -42,8 +42,10 @@ class EndLeftoversTest(unittest.TestCase):
         return process
 
     def end_leftovers(self, unit, cwd=None):
-        # The helpers alone: sourcing all of common.sh needs a project's checkout, which the test folder isn't.
-        env = {key: value for key, value in os.environ.items() if key != "AGENT_DESK_UNIT"} | {"DESK_HELPERS_ONLY": "1"}
+        # The helpers alone: sourcing all of common.sh needs a project's checkout, which the test folder isn't. The
+        # processes the tests leave end at TERM, so the wait before KILL can be short.
+        env = {key: value for key, value in os.environ.items() if key != "AGENT_DESK_UNIT"} | {
+            "DESK_HELPERS_ONLY": "1", "AGENT_DESK_LEFTOVER_GRACE": "0.1"}
         if unit is not None:
             env["AGENT_DESK_UNIT"] = unit
         result = subprocess.run(["bash", "-c", f'source "{LIB}/common.sh" && desk_end_leftovers "$1"', "end",

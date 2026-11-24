@@ -47,7 +47,11 @@ Flag judgement calls to the user instead of guessing, such as a scope you narrow
 
 ## Step 4: Write it
 
-The title is a specific imperative under about 70 characters, such as "Model drinks for the store, café, and homes".
+Write the title for a reviewer scanning the board: a capitalized imperative of about 80 characters or fewer, with no
+trailing period, that names in plain words the outcome a user or developer notices. Leave the mechanism, the exact
+scope, and file and function names to the body. "Scroll Queued with the mousewheel while dragging a card" tells the
+reader what changes; "Replace native drag and drop with pointer events in app-drag.js" makes them open the issue.
+
 Write the body from `.github/ISSUE_TEMPLATE/task.md` when the project has one, leaving out its comments, or else
 with these sections:
 

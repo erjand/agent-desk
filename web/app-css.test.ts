@@ -125,10 +125,10 @@ test('the header, the tab band, and the list search sit on three surfaces, the h
   assert.match(css, /@media \(prefers-color-scheme: dark\) \{\s*header > nav button\[aria-current="true"\] \{ background: color-mix\(in srgb, var\(--tab-hue\) \d+%, var\(--panel\)\); \}/)
 })
 
-test("in light, the header's notices, disconnected status, gauges, and usage limit take deeper warning, error, and "
-  + 'green tones', () => {
+test("in light, the header's notices, disconnected status, gauges, usage limit, and GitHub count take deeper warning, "
+  + 'error, and green tones', () => {
   const css = readFileSync(new URL('app-header.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
-  const block = /@media \(prefers-color-scheme: light\) \{\s*header \.notice, header \.code-notice, header \.offline, header \.gauges, header \.usage \{([^{}]*)\}/.exec(css)
+  const block = /@media \(prefers-color-scheme: light\) \{\s*header \.notice, header \.code-notice, header \.offline, header \.gauges, header \.usage, header \.counter \{([^{}]*)\}/.exec(css)
   assert.ok(block, 'a light-only rule for the header text on --chrome')
   for (const name of ['--warning', '--error', '--gauge-ok']) {
     const value = new RegExp(`(?:^|;)\\s*${name}:\\s*([^;]+);`).exec(block[1])

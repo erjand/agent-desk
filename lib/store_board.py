@@ -1,7 +1,8 @@
 """
 The store's board: the one read that gives the inbox's board everything it shows of a project, and the helpers that
 shape an item's state and a review's merge as gh prints them. `Store` in `lib/store.py` inherits `BoardMixin`, whose
-methods use the store's `db`, `_row`, `order`, `review_number`, `newest_checks`, `live_runs`, and `asked_reviews`.
+methods use the store's `db`, `_row`, `order`, `list_order`, `review_number`, `newest_checks`, `live_runs`, and
+`asked_reviews`.
 `lib/store.py` imports `mergeable_of` and `outer_state` back for its own reads.
 """
 
@@ -36,9 +37,10 @@ class BoardMixin:
     def board(self, project, now=None):
         """
         Everything the inbox's board shows of a project, in one read, as `board --json` prints it: the open issues with
-        their workflow states, labels, blockers, and sub-issues, and for each in progress its comments and where its
-        agent/issue-<n> branch last merged; the open reviews with their heads' checks; the newest merged reviews; the
-        runs live_runs lists; and the reviews asked_reviews lists, whose agent runs the dispatcher hasn't asked for yet.
+        their workflow states, labels, blockers, sub-issues, and places in the start order or the list order, from 1,
+        and for each in progress its comments and where its agent/issue-<n> branch last merged; the open reviews with
+        their heads' checks and their bases' newest commits as the dispatcher last saw them; the newest merged reviews; the runs live_runs lists; and the reviews asked_reviews lists,
+        whose agent runs the dispatcher hasn't asked for yet.
         """
         issues = self.db.execute("SELECT * FROM items WHERE project = ? AND kind = 'issue' AND state != 'closed'"
                                  " ORDER BY number", (project,)).fetchall()
@@ -56,6 +58,7 @@ class BoardMixin:
                 total, done = subs.get(row["to_number"], (0, 0))
                 subs[row["to_number"]] = (total + 1, done + (row["state"] == "closed"))
         places = {one["number"]: index + 1 for index, one in enumerate(self.order(project))}
+        listed = {one["number"]: index + 1 for index, one in enumerate(self.list_order(project))}
         working = [row["number"] for row in issues if row["state"] == "in-progress"]
         for row in self.db.execute(f"SELECT number, body, created_at FROM comments WHERE project = ?"
                                    f" AND number IN ({', '.join('?' * len(working))}) ORDER BY id",
@@ -69,6 +72,8 @@ class BoardMixin:
                    "blockedBy": blockers.get(number, [])}
             if number in places:
                 one["position"] = places[number]
+            if number in listed:
+                one["listPosition"] = listed[number]
             if number in subs:
                 one["subIssues"] = {"total": subs[number][0], "completed": subs[number][1]}
             if row["state"] == "in-progress":
@@ -85,10 +90,12 @@ class BoardMixin:
             branch = branches.get(row["branch"])
             head = (branch or {}).get("head_sha") or row["head_sha"]
             checks = self.newest_checks(project, row["branch"], head)
+            # The base's newest commit, as the dispatcher last tried the head against it.
+            base_head = branch["base_sha"] if branch and branch["base"] == row["base"] else None
             reviews.append({"number": row["number"], "title": row["title"], "branch": row["branch"],
                             "base": row["base"], "head": head, "draft": bool(row["draft"]),
                             "createdAt": row["created_at"], "checks": checks,
-                            "mergeable": mergeable_of(checks, branch, head, row["base"])})
+                            "mergeable": mergeable_of(checks, branch, head, row["base"]), "baseHead": base_head})
         merged = [{"number": row["number"], "title": row["title"], "branch": row["branch"], "base": row["base"],
                    "mergedAt": row["closed_at"]} for row in self.db.execute(
             "SELECT items.number, items.title, items.closed_at, reviews.branch, reviews.base FROM items JOIN reviews"

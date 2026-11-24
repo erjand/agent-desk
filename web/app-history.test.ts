@@ -168,18 +168,18 @@ test('a heading sorts by its column, a second press flips it, and a tie goes new
   assert.deepEqual(titles(History()), ['Charlie', 'Bravo', 'alpha'])
 })
 
-test('the column pages through twenty rows at a time and starts again from the first page on a new sort', async () => {
-  const rows = Array.from({ length: 45 }, (_, i) => row(i + 1, `Merge ${i + 1}`,
+test('the column pages through thirty rows at a time and starts again from the first page on a new sort', async () => {
+  const rows = Array.from({ length: 65 }, (_, i) => row(i + 1, `Merge ${i + 1}`,
     new Date(Date.UTC(2026, 10, 16, 0, i)).toISOString()))
   const first = await drawn(rows)
-  assert.equal(titles(first).length, 20)
-  assert.equal(titles(first)[0], 'Merge 45')
-  assert.ok(squash(textOf(first)).includes('Previous 1–20 of 45 Next'))
+  assert.equal(titles(first).length, 30)
+  assert.equal(titles(first)[0], 'Merge 65')
+  assert.ok(squash(textOf(first)).includes('Previous 1–30 of 65 Next'))
   press(first, 'Next')
   press(History(), 'Next')
   const last = History()
   assert.deepEqual(titles(last), ['Merge 5', 'Merge 4', 'Merge 3', 'Merge 2', 'Merge 1'])
-  assert.ok(squash(textOf(last)).includes('41–45 of 45'))
+  assert.ok(squash(textOf(last)).includes('61–65 of 65'))
   const next = elementsOf(last).find(one => one.type === 'button' && squash(textOf(one.props.children as Drawn)) === 'Next')
   assert.equal(next?.props.disabled, true)
   press(last, 'Time')

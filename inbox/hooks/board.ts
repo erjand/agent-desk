@@ -2,23 +2,26 @@
 // web inbox (../../web/server.ts) both draw it, each through a Host of its own, so this file and the modules beside it
 // import nothing from either: no Claude Code module and no Node module.
 import type { Board, Chore, Row, RowAction } from '../types'
-import { checksPassed, dismissedRuns, failingNote } from './actions.ts'
-import { fixingRow, mergingRow, withOrderMoves } from './moves.ts'
+import { behindNote, checksPassed, dismissedRuns, failingNote } from './actions.ts'
+import { fixingRow, mergingRow, withListMoves, withOrderMoves } from './moves.ts'
 import { finishedLast, localSessionOf, resumeOf, startedSince, workedHere } from './notes.ts'
 import { readStore, run } from './run.ts'
-import { branchIssues, checkRows, type DeskRun, deskRuns, lastFailure, mergeWait, queuedWait, runningChecks, slotCounts,
-  timeLeft, unitFailures, unitRequests, unitRows, waitingChecks, waitingRequest, waitingRequests } from './units.ts'
+import { branchIssues, checkRows, continues, type DeskRun, deskRuns, endedAs, lastFailure, logOf, mergeWait, queuedWait,
+  runningChecks, slotCounts, stallNote, stopAsk, timeLeft, unitFailures, unitRequests, unitRows, waitingChecks,
+  waitingRequests } from './units.ts'
 
 // The workflow states of an issue the person queued for an agent, or that an agent works or waits to work.
 const AGENT_STATES = new Set(['queued', 'in-progress', 'waiting'])
 
 /**
  * A check of a review's head, as the store's `checks` table holds it: `test`, or `merge` or `setup` when that step
- * failed, with its status (`queued`, `running`, `passed`, `failed`, `timed-out`, or `lost`), its log, and when it
- * started and ended.
+ * failed, with its status (`queued`, `running`, `passed`, `failed`, `timed-out`, or `lost`), its log, when it
+ * started and ended, the base and the base's commit it merged, whether the dispatcher queued it as a re-check after
+ * the base moved, and for a ready review's passed check, how many merges its base took since.
  */
 export type Check = { name: string; status: string; attempt?: number; log?: string | null
-  startedAt?: string | null; endedAt?: string | null }
+  startedAt?: string | null; endedAt?: string | null; base?: string | null; baseSha?: string | null
+  recheck?: boolean; behind?: number }
 
 /**
  * An open issue as `agent-desk board --json` gives it: its workflow state, the labels that group it, its blockers, how
@@ -28,11 +31,15 @@ export type Check = { name: string; status: string; attempt?: number; log?: stri
 export type StoreIssue = { number: number; title: string; status: string; labels: string[]; createdAt: string
   updatedAt?: string; blockedBy: { number: number; state: string }[]; subIssues?: { total: number; completed: number }
   position?: number
+  listPosition?: number
   comments?: { body: string; createdAt: string }[]
   landed?: { base: string; basePr: { number: number; state: string } | null } | null }
-/** An open review as `agent-desk board --json` gives it, with its head's checks and whether it merges with its base. */
+/**
+ * An open review as `agent-desk board --json` gives it, with its head's checks, whether it merges with its base, and
+ * the base's commit the dispatcher last tried the head against.
+ */
 export type StoreReview = { number: number; title: string; branch: string; base: string; head: string | null
-  draft: boolean; createdAt: string; checks: Check[]; mergeable: string }
+  draft: boolean; createdAt: string; checks: Check[]; mergeable: string; baseHead?: string | null }
 /** A merged review as `agent-desk board --json` gives it. */
 type StoreMerged = { number: number; title: string; branch: string; base: string; mergedAt: string }
 /**
@@ -42,8 +49,8 @@ type StoreMerged = { number: number; title: string; branch: string; base: string
  * the page's address, such as `http://127.0.0.1:7480`.
  */
 export type StoreBoard = { repo: string; issues: StoreIssue[]; reviews: StoreReview[]; merged: StoreMerged[]
-  runs: unknown; asked?: unknown; checks?: unknown; waitingChecks?: unknown; slots?: unknown; queue?: unknown; fixes?: unknown; hold?: unknown; chores?: string[]; backup?: unknown; at?: string
-  machine?: string; web?: string }
+  runs: unknown; asked?: unknown; checks?: unknown; waitingChecks?: unknown; slots?: unknown; queue?: unknown; fixes?: unknown; hold?: unknown; chores?: string[]
+  account?: unknown; backup?: unknown; at?: string; machine?: string; web?: string }
 
 /** An open issue, with the web page's address for it. */
 type Issue = StoreIssue & { url: string }
@@ -157,6 +164,17 @@ function prRef(pr: { number: number; headRefName: string }): Pick<Row, 'number' 
 export function byStartOrder(a: Pick<StoreIssue, 'number' | 'position'>,
   b: Pick<StoreIssue, 'number' | 'position'>): number {
   return (a.position ?? Number.POSITIVE_INFINITY) - (b.position ?? Number.POSITIVE_INFINITY) || a.number - b.number
+}
+
+/**
+ * How two issues sort in their project's list order, the hand-set order of Open, Blocked, Needs Design, Backlog, and
+ * Ideas: by their places in it, and those without a place after, the highest number first, as a store older than the
+ * list order lists them all.
+ */
+export function byListOrder(a: Pick<StoreIssue, 'number' | 'listPosition'>,
+  b: Pick<StoreIssue, 'number' | 'listPosition'>): number {
+  const place = (issue: Pick<StoreIssue, 'listPosition'>) => issue.listPosition ?? Number.POSITIVE_INFINITY
+  return place(a) - place(b) || b.number - a.number
 }
 
 function names(issue: StoreIssue): Set<string> {
@@ -299,13 +317,14 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
     limit)
   const byNumber = new Map(issues.map(issue => [issue.number, issue]))
   const unitContext = { issues: byNumber, prs: prsByNumber, openPrs: new Set(prs.map(pr => pr.number)), issueOfPr,
-    serial, refOf, workRef, timeLeft: left, ago: (stamp: string) => ago(now, stamp) }
+    serial, refOf, workRef, timeLeft: left, ago: (stamp: string) => ago(now, stamp),
+    stalled: (stall: unknown) => stallNote(now, stall), stopAsk: (stall: unknown) => stopAsk(now, stall) }
 
   const ready = prs.filter(pr => !pr.isDraft)
   const readyHeads = new Set(ready.map(pr => pr.headRefName))
   // Ideas and Backlog hold their issues apart from the work to decide or queue soon.
   const parked = (issue: Issue) => isIdea(names(issue), issue.status) || isBacklog(names(issue), issue.status)
-  const undecided = issues.filter(issue => issue.status === 'needs-design' && !parked(issue))
+  const undecided = issues.filter(issue => issue.status === 'needs-design' && !parked(issue)).sort(byListOrder)
   const design: Row[] = undecided.map(issue => ({
     key: `decide-${issue.number}`, text: issue.title, number: issue.number, url: issue.url, title: issue.title,
     actions: ['open', 'designed', 'close'] as RowAction[] }))
@@ -333,11 +352,10 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
       const dropped = leftQueue.get(pr.number)
       const answered = dropped?.head != null && dropped.head !== pr.headRefOid
       const why = dropped === undefined || answered ? undefined : `left the merge queue: ${dropped.reason}`
-      const note = (conflicts ? fixPlan.get(pr.number) : failed) ?? why
+      const note = (conflicts ? fixPlan.get(pr.number) : failed) ?? why ?? behindNote(pr.checks)
       return { key: `pr-${pr.number}`, text: `${state}  ${pr.title}${note ? `  (${note})` : ''}`, ...prRef(pr),
         url: pr.url, actions, title: pr.title, state, ...(note ? { note } : {}), since: pr.createdAt }
     }),
-    ...unitFailures(units, unitContext),
   ]
 
   const inFlight = issues.filter(issue => isInFlight(issue.status, issue.number, readyHeads, agentStarted))
@@ -375,7 +393,7 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
   const finished = stalled.map((issue, index) => (!live[index] && finishedLast(notes[index] ?? [])
     ? drafts.get(`agent/issue-${issue.number}`) : undefined))
   const draftFailing = await Promise.all(finished.map(pr => (pr ? failingNote(host, project, pr) : undefined)))
-  needs.push(...stalled.flatMap((issue, index) => {
+  const stoppedIssues: Row[] = stalled.flatMap((issue, index) => {
     if (live[index]) {
       return []
     }
@@ -389,19 +407,29 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
         ...(conflicts ? { conflicts } : {}), since: draft.createdAt, actions }]
     }
     // Continue asks again for the issue's newest failed agent run that no agent went on from, or else starts a fresh
-    // run.
+    // run. The row stands for that run too: it says how the run ended, offers its Log, and waits from its end, which a
+    // later edit to the issue, such as another agent's comment, leaves alone.
     const resume = resumeOf(notes[index] ?? [])
-    const rerun = lastFailure(units, issue.number, ended => startedSince(commentsOf(issue), ended))
-    return [{ key: `stopped-${issue.number}`, text: `stopped  ${issue.title}`, number: issue.number, url: issue.url,
-      resume, ...(rerun === undefined ? {} : { rerun }), title: issue.title, state: 'stopped', since: issue.updatedAt,
-      actions: (resume ? ['open', 'resume', 'restart', 'close'] : ['open', 'restart', 'close']) as RowAction[] }]
-  }))
+    const failure = lastFailure(units, issue.number, ended => startedSince(commentsOf(issue), ended))
+    const ended = failure && endedAs(failure)
+    const log = failure && logOf(failure)
+    return [{ key: `stopped-${issue.number}`, text: `stopped  ${issue.title}${ended ? `  (${ended})` : ''}`,
+      number: issue.number, url: issue.url, resume, title: issue.title, state: 'stopped',
+      ...(failure ? { rerun: -failure.id, note: ended, ...(continues(failure) ? { continues: true } : {}) } : {}),
+      ...(log ? { log } : {}), since: failure?.ended_at ?? issue.updatedAt,
+      actions: ['open', ...(log ? ['log'] : []), ...(resume ? ['resume'] : []), 'restart', 'close'] as RowAction[] }]
+  })
+  // A failed run that a stopped row stands for shows only there, so Needs You lists its issue once. On an issue with an
+  // open review the run keeps its own row, which names the review, so the web page leaves the review's card in place.
+  const covered = new Set(stoppedIssues.flatMap(row => (row.rerun === undefined
+    || reviewOf.has(row.number ?? Number.NaN) ? [] : [-row.rerun])))
+  needs.push(...unitFailures(units, unitContext, covered), ...stoppedIssues)
   needs.push(...idle.flatMap((issue, index) => (stacks[index]?.merged
     ? [{ key: `stacked-${issue.number}`, text: `merged  ${issue.title}  (with PR #${stacks[index]?.pr})`,
       number: issue.number, url: issue.url, title: issue.title, state: 'merged', note: `with PR #${stacks[index]?.pr}`,
       since: issue.updatedAt, actions: ['open'] as RowAction[] }] : [])))
   const stackWaits: Row[] = idle.flatMap((issue, index) => (stacks[index] && !stacks[index].merged
-    ? [{ key: `blocked-${issue.number}`, text: `${issue.title}  (waiting on PR #${stacks[index].pr})`,
+    ? [{ key: `stack-wait-${issue.number}`, text: `${issue.title}  (waiting on PR #${stacks[index].pr})`,
       number: issue.number, url: issue.url, title: issue.title, note: `waiting on PR #${stacks[index].pr}`,
       actions: ['open'] as RowAction[] }] : []))
 
@@ -500,10 +528,36 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
       text: note ? `${issue.title}  (${note})` : issue.title, number: issue.number, url: issue.url, title: issue.title,
       ...(note ? { note } : {}), ...unpicked, actions: freshActions(issue.number, serial) }
   }
-  // The queued and waiting issues lead Queued in the project's start order, each with Move Up, Move Down, and Move to
-  // Top as its place allows. Start on one picks the issue, and any other request of it that waits for Start.
+  // Agents sent back to their reviews lead Queued, oldest request first, as the dispatcher starts them ahead of fresh
+  // issues: an in-flight issue's row, going back to its PR or fixing conflicts, and a ready review's. Cancel ends the
+  // newest request that waits on the issue, and leaves the run that works it alone. An issue whose PR's comment the
+  // dispatcher hasn't answered has no request yet, so no Cancel, and its row follows the others. One whose draft
+  // conflicts with main goes back to fix the conflicts.
+  const followUps = [
+    ...inFlight.filter(issue => agentQueued.has(issue.number)).map(issue => {
+      const asked = waitingRequests(units, issue.number, issueOfPr)
+      const request = asked.at(-1)?.id
+      const note = drafts.get(`agent/issue-${issue.number}`)?.mergeable === 'CONFLICTING' ? 'fixing conflicts'
+        : 'back to its PR'
+      return { asked, row: withStart({ key: `rerun-${issue.number}`, text: `${issue.title}  (${note})`, url: issue.url,
+        ...workRef(issue.number), title: issue.title, note, request,
+        actions: (request === undefined ? ['open'] : ['open', 'cancel']) as RowAction[] }, issue) }
+    }),
+    ...ready.filter(pr => agentQueued.has(agentWork(pr) ?? Number.NaN)).map(pr => {
+      const asked = waitingRequests(units, agentWork(pr) ?? Number.NaN, issueOfPr)
+      const request = asked.at(-1)?.id
+      const row = fixingRow(pr.title, pr.mergeable === 'CONFLICTING', { ...prRef(pr), url: pr.url })
+      return { asked, row: withStart({ ...row,
+        ...(request === undefined ? {} : { request, actions: ['open', 'cancel'] as RowAction[] }) },
+      byNumber.get(agentIssue(pr.headRefName) ?? Number.NaN), asked) }
+    }),
+  ].sort((a, b) => (a.asked[0]?.id ?? Infinity) - (b.asked[0]?.id ?? Infinity)).map(one => one.row)
+  // The queued and waiting issues follow in the project's start order, each with Move Up, Move Down, Move to Top, and
+  // Move to Bottom as its place among them allows. Start on one picks the issue, and any other request of it that
+  // waits for Start.
   const ordered = issues.filter(issue => issue.status === 'queued' || issue.status === 'waiting').sort(byStartOrder)
   const queued: Row[] = [
+    ...followUps,
     ...ordered.map((issue, index) => {
       const row = queuedRow(issue)
       const starts = waitingRequests(units, issue.number, issueOfPr)
@@ -511,24 +565,6 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
       const start = !row.actions.includes('start') ? {}
         : { pick: issue.number, ...(starts.length > 0 ? { starts } : {}) }
       return { ...row, ...start, actions: withOrderMoves(row.actions, index, ordered.length) }
-    }),
-    // Cancel ends the newest request that waits on the issue, and leaves the run that works it alone. An issue whose
-    // PR's comment the dispatcher hasn't answered has no request yet, so no Cancel. One whose draft conflicts with main
-    // goes back to fix the conflicts.
-    ...inFlight.filter(issue => agentQueued.has(issue.number)).map(issue => {
-      const request = waitingRequest(units, issue.number, issueOfPr)
-      const note = drafts.get(`agent/issue-${issue.number}`)?.mergeable === 'CONFLICTING' ? 'fixing conflicts'
-        : 'back to its PR'
-      return withStart({ key: `rerun-${issue.number}`, text: `${issue.title}  (${note})`, url: issue.url,
-        ...workRef(issue.number), title: issue.title, note, request,
-        actions: (request === undefined ? ['open'] : ['open', 'cancel']) as RowAction[] }, issue)
-    }),
-    ...ready.filter(pr => agentQueued.has(agentWork(pr) ?? Number.NaN)).map(pr => {
-      const asked = waitingRequests(units, agentWork(pr) ?? Number.NaN, issueOfPr)
-      const request = asked.at(-1)?.id
-      return withStart({ ...fixingRow(pr.title, pr.mergeable === 'CONFLICTING', { ...prRef(pr), url: pr.url }),
-        ...(request === undefined ? {} : { request, actions: ['open', 'cancel'] as RowAction[] }) },
-      byNumber.get(agentIssue(pr.headRefName) ?? Number.NaN), asked)
     }),
   ]
   // A request the dispatcher holds that no row above shows gets a row of its own: one on an issue, a fix or an agent's
@@ -541,10 +577,11 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
   // A card whose request waits for memory, the usage limit, or a free slot says so after its own note.
   const queuedRows = queued.map(row => queuedWait(row, units, issueOfPr))
 
-  // Open lists the issues free to start, newest first. Blocked lists the parked ones, newest first, with why each
-  // waits, then the ones waiting on a stacked PR's base.
+  // Open lists the issues free to start in the list order. Blocked lists the parked ones in the list order, with why
+  // each waits, then the ones waiting on a stacked PR's base. Each issue in the list order gets Move Up, Move Down,
+  // Move to Top, and Move to Bottom as its place in its section allows, and those waiting on a base get none.
   const free = issues.filter(issue => (issue.status === 'open' || issue.status === 'on-hold') && !parked(issue))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .sort(byListOrder)
     .map(issue => ({ issue, held: heldBy(issue.status, issue.blockedBy) }))
   const next: Row[] = free.filter(({ held }) => held === null).map(({ issue }) => ({ key: `next-${issue.number}`,
     text: issue.title, number: issue.number, url: issue.url, title: issue.title,
@@ -560,13 +597,11 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
   ...stackWaits]
 
   // Move to Open takes the idea label off.
-  const thoughts = issues.filter(issue => isIdea(names(issue), issue.status))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  const thoughts = issues.filter(issue => isIdea(names(issue), issue.status)).sort(byListOrder)
   const ideas: Row[] = thoughts.map(issue => ({ key: `idea-${issue.number}`,
     text: issue.title, number: issue.number, url: issue.url, title: issue.title,
     actions: ['open', 'to-open', 'close'] as RowAction[] }))
-  const later: Row[] = issues.filter(issue => isBacklog(names(issue), issue.status))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  const later: Row[] = issues.filter(issue => isBacklog(names(issue), issue.status)).sort(byListOrder)
     .map(issue => ({ key: `backlog-${issue.number}`, text: issue.title, number: issue.number, url: issue.url,
       title: issue.title, actions: ['open', 'to-open', 'close'] as RowAction[] }))
 
@@ -600,8 +635,9 @@ async function readBoard(host: Host, project: Project): Promise<Board> {
   return { at: clock, runners: tagged([...unitRows(units, unitContext), ...local]),
     slots: slotCounts(read.slots, units, checks), checks: tagged(checkRows(checks, unitContext)),
     needs: tagged(stopped ? [stopped, ...needs] : needs),
-    merging: tagged(mergingRows), design: tagged(design), designTotal: undecided.length, queued: tagged(queuedRows),
-    next: tagged(next), blocked: tagged(blocked), backlog: tagged(later), ideas: tagged(ideas),
+    merging: tagged(mergingRows), design: tagged(withListMoves(design)), designTotal: undecided.length,
+    queued: tagged(queuedRows), next: tagged(withListMoves(next)), blocked: tagged(withListMoves(blocked)),
+    backlog: tagged(withListMoves(later)), ideas: tagged(withListMoves(ideas)),
     merged: recent,
     ...choreLines(read.chores ?? []), github: githubRows(mergeQueue, backupOf(read.backup), zone), error: null }
 }

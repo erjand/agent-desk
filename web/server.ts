@@ -4,7 +4,7 @@
 //   node web/server.ts <owner/repo>...   serves only the projects named, such as a demo project for screenshots
 // It reads the same board as the Claude Code pane, from ../inbox/hooks/board.ts, and while a page is open it follows the
 // store's events: each change reads the boards of the projects it touched again and pushes them to every page.
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
@@ -14,31 +14,39 @@ import type { Board, Row, RowAction, SystemLoad } from '../inbox/types'
 import { fetchBoard } from '../inbox/hooks/board.ts'
 import { gaugesOf, loadOf } from '../inbox/hooks/load.ts'
 import type { CpuTimes } from '../inbox/hooks/load.ts'
-import { announce, inOrder } from '../inbox/hooks/moves.ts'
-import { act, close, closeReasonOf, place, REVIEW_ACTIONS, reviewAction } from './card-actions.ts'
+import { announce, inOrder, listSection, listSortable, sortable } from '../inbox/hooks/moves.ts'
+import { budgetAmount, changeBudget, clearKey, MAX_KEY, readAccount, refreshAccount, setKey, switchAccount }
+  from './account.ts'
+import { agentLogOf } from './agent-log.ts'
+import { act, close, closeReasonOf, LIST_GROUPS, listPlace, place, REVIEW_ACTIONS, reviewAction, sortList, sortOrder }
+  from './card-actions.ts'
 import type { ReviewAction } from './card-actions.ts'
 import { cardsOf } from './cards.ts'
-import { chatSnapshot, clearChat, contextOf, loadChat, MAX_MESSAGE, onChat, sendChat, stopChat, transcriptFolder }
+import { chatSnapshot, clearChat, contextOf, loadChat, MAX_MESSAGE, onChat, sendChat, stopChat }
   from './chat.ts'
+import { choreTextOf } from './chore-text.ts'
 import { codeDigest, codeNotice } from './code.ts'
+import { readCodexUsage, refreshCodexUsage } from './codex-usage.ts'
 import { commentSourceOf, editComment } from './comment-edit.ts'
 import { changeSchedule, choreInfoOf, pendingOf, readRepeats, runChore, SCHEDULE_BRANCH, scheduleRequest, stopChore,
   withStarting } from './chores.ts'
 import { mergedRows } from './history.ts'
 import type { HistoryRow } from './history.ts'
-import { changeHold, changeUsageLimit, holdStamp, PROJECT_MODES, readHold, readUsage } from './hold.ts'
+import { agentSlotsOf, changeHold, changeIssueRunner, changeSlots, changeUsageLimit, configAgentSlots, configGpuSlots,
+  DEFAULT_AGENT_SLOTS, gpuSlotsOf, holdStamp, isIssueRunner, issueRunnerOf, PROJECT_MODES, readHold, readIssueRunners,
+  readUsage, refreshClaudeUsage } from './hold.ts'
 import { createIssue, issueTemplate } from './issue-create.ts'
 import { deletable, deleteIssue } from './issue-delete.ts'
 import { editItem, sourceOf, tickTask } from './item-edit.ts'
 import { desks, HERE, host, loadStored } from './state.ts'
 import type { Desk, Loop } from './state.ts'
-import { ownPeer, refusal } from './peer.ts'
+import { loopback, ownPeer, refusal } from './peer.ts'
 import { readResources } from './resources.ts'
 import { assetFile, checkLogPath, hovercardOf, issuePreviewOf, markdownOf, MAX_COMMENT, personOf, pictureOf,
   pictureType, postComment, postLineComment, previewOf, relationsOf } from './review.ts'
 import type { Person } from './review.ts'
 import { choreReviews, heldRuns, labelColors, lastEvent, mergedReviews, movedSince, reviewCosts, storedCheck,
-  storeOpens, storePath, storeProblem } from './store.ts'
+  storeOpens, storeProblem } from './store.ts'
 
 const PORT = Number(process.env.AGENT_DESK_WEB_PORT ?? 7480)
 // How often the server reads the store's newest event id while a page is open, reads every project's board again
@@ -51,6 +59,8 @@ const LOAD_MS = 10_000
 const MAX_BODY = 131_072
 // The longest file path a line comment may name.
 const MAX_PATH = 4_096
+// The most agent slots the Runners sidebar's stepper may set for a project.
+const MAX_SLOTS = 20
 const CONFIG = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config')
 const PROJECTS = join(CONFIG, 'agent-desk', 'projects')
 // The page's own files, the only paths served besides the API: app.js and the modules it imports.
@@ -58,16 +68,20 @@ export const STATIC: Record<string, [string, string]> = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/app-chat.js': ['app-chat.js', 'text/javascript; charset=utf-8'],
+  '/app-chore.js': ['app-chore.js', 'text/javascript; charset=utf-8'],
   '/app-decisions.js': ['app-decisions.js', 'text/javascript; charset=utf-8'],
   '/app-delete.js': ['app-delete.js', 'text/javascript; charset=utf-8'],
   '/app-drag.js': ['app-drag.js', 'text/javascript; charset=utf-8'],
   '/app-detail.js': ['app-detail.js', 'text/javascript; charset=utf-8'],
   '/app-edit.js': ['app-edit.js', 'text/javascript; charset=utf-8'],
+  '/app-github.js': ['app-github.js', 'text/javascript; charset=utf-8'],
   '/app-header.js': ['app-header.js', 'text/javascript; charset=utf-8'],
   '/app-help.js': ['app-help.js', 'text/javascript; charset=utf-8'],
   '/app-history.js': ['app-history.js', 'text/javascript; charset=utf-8'],
   '/app-hovercard.js': ['app-hovercard.js', 'text/javascript; charset=utf-8'],
+  '/app-item.js': ['app-item.js', 'text/javascript; charset=utf-8'],
   '/app-new-issue.js': ['app-new-issue.js', 'text/javascript; charset=utf-8'],
+  '/app-order.js': ['app-order.js', 'text/javascript; charset=utf-8'],
   '/app-parts.js': ['app-parts.js', 'text/javascript; charset=utf-8'],
   '/app-resources.js': ['app-resources.js', 'text/javascript; charset=utf-8'],
   '/app-review.js': ['app-review.js', 'text/javascript; charset=utf-8'],
@@ -79,6 +93,8 @@ export const STATIC: Record<string, [string, string]> = {
   '/app-header.css': ['app-header.css', 'text/css; charset=utf-8'],
   '/app-detail.css': ['app-detail.css', 'text/css; charset=utf-8'],
   '/app-resources.css': ['app-resources.css', 'text/css; charset=utf-8'],
+  '/anthropic.svg': ['anthropic.svg', 'image/svg+xml'],
+  '/openai.svg': ['openai.svg', 'image/svg+xml'],
   '/vendor/preact-htm.js': ['vendor/preact-htm.js', 'text/javascript; charset=utf-8'],
 }
 
@@ -157,7 +173,7 @@ async function readDesks(): Promise<void> {
   const listed = servedProjects(parseProjects(await readFile(PROJECTS, 'utf8').catch(() => '')), only)
   const seen = new Set<string>()
   for (const { repo, path } of listed) {
-    let config: { title?: string; chores?: { every?: Record<string, number> } }
+    let config: { title?: string; chores?: { every?: Record<string, number> }; slots?: unknown; issueRunner?: unknown }
     try {
       config = JSON.parse(await readFile(join(path, '.agent-desk.json'), 'utf8'))
     } catch {
@@ -166,8 +182,11 @@ async function readDesks(): Promise<void> {
     const [owner = '', id = repo] = repo.split('/')
     seen.add(id)
     const desk = desks.get(id)
-    const fields = { repo, owner, title: config.title ?? id, main: path,
-      chores: Object.keys(config.chores?.every ?? {}) }
+    const issueRunner = config.issueRunner === undefined ? 'claude' : isIssueRunner(config.issueRunner)
+      ? config.issueRunner : null
+    const fields = { repo, owner, title: config.title ?? id, main: path, issueRunner,
+      chores: Object.keys(config.chores?.every ?? {}), agentSlots: configAgentSlots(config),
+      gpuSlots: configGpuSlots(config) }
     if (desk) {
       Object.assign(desk, fields)
     } else {
@@ -182,20 +201,30 @@ async function readDesks(): Promise<void> {
   }
 }
 
+function effectiveIssueRunner(desk: Desk, saved: Record<string, unknown>) {
+  return issueRunnerOf(desk.repo, desk.issueRunner === undefined ? 'claude' : desk.issueRunner, saved)
+}
+
 /**
  * What the page draws: each project's board, by title, the machine's load, and a notice when the checkout holds newer
  * code than the server runs.
  */
 function snapshot(): unknown {
   const all = [...desks.values()].sort((a, b) => a.title.localeCompare(b.title))
+  const savedRunners = readIssueRunners()
   return {
     desks: all.map(desk => ({ id: desk.id, repo: desk.repo, title: desk.title, owner: desk.owner, board: desk.board,
       cards: desk.board && desk.board.error === null ? cardsOf(desk.id, desk.board) : [], labels: desk.labels,
       repeats: readRepeats(desk.repo), choreInfo: choreInfoOf(desk), schedule: pendingOf(desk),
+      agentSlots: agentSlotsOf(desk.repo, desk.agentSlots ?? DEFAULT_AGENT_SLOTS),
+      gpuSlots: gpuSlotsOf(desk.repo, desk.gpuSlots ?? null),
+      issueRunner: effectiveIssueRunner(desk, savedRunners),
       refreshing: desk.refreshing })),
     gauges: [...load === null ? [] : gaugesOf(load), ...gpuGauges(gpu)],
     hold: readHold(),
     usage: readUsage(),
+    codexUsage: readCodexUsage(),
+    account: readAccount(),
     me,
     store: storeProblem(),
     code: codeNotice(codeStarted, codeNow),
@@ -329,6 +358,10 @@ async function follow(): Promise<void> {
   const held = holdStamp()
   const remoded = held !== heldAt
   heldAt = held
+  // hold.json keeps the account and the budget, which a command or a run may have changed.
+  if (remoded) {
+    await refreshAccount()
+  }
   const all = reread || replaced || remoded || moved.all
   const fresh = all || moved.last > readTo
   readTo = moved.last
@@ -351,62 +384,6 @@ function current(): boolean {
     && [...desks.values()].every(desk => desk.board !== null)
 }
 
-// The formatter that turns a session's transcript into the log an Actions run shows, merged with the session's beats
-// file, the character it leads each beat line with, and how many of the log's newest lines the page gets.
-const AGENT_LOG = join(HERE, '..', 'lib', 'agent_log.py')
-const BEAT_MARK = '\x1e'
-const LOG_LINES = 600
-
-export { transcriptFolder }
-
-/**
- * An issue's newest agent session, as its log reads: the session, its worktree, when it last wrote, its lines, and the
- * indexes of the lines that are beats, which lib/agent_run.py logs while the agent waits on a quiet tool call.
- */
-export type AgentLog = { session: string; worktree: string; at: string; sessions: number; lines: string[];
-  beats: number[] }
-
-/** The beats file lib/agent_run.py writes for a session, in agent-desk's state folder beside the store. */
-export function beatsFile(session: string): string {
-  return join(dirname(storePath()), 'beats', session)
-}
-
-/** A merged log's lines with each beat's leading mark taken off, and the indexes of the lines that carried it. */
-export function splitBeats(out: string): { lines: string[]; beats: number[] } {
-  const lines: string[] = []
-  const beats: number[] = []
-  for (const line of out.split('\n').filter(Boolean)) {
-    if (line.startsWith(BEAT_MARK)) {
-      beats.push(lines.length)
-    }
-    lines.push(line.startsWith(BEAT_MARK) ? line.slice(BEAT_MARK.length) : line)
-  }
-  return { lines, beats }
-}
-
-/**
- * The newest session's log for an issue, from the transcripts of sessions run in its worktree beside the main
- * checkout, as agent-desk work-issue and start make it, with the session's beats in time order among its lines; null
- * when no session ran there. A runner's agent and one a local session started both write there, so the log reads live
- * while either works. `just demo` sets AGENT_DESK_TRANSCRIPTS to its own folder in place of Claude Code's `projects`,
- * so its made-up session shows while the demo's chat keeps the person's Claude Code sign-in.
- */
-async function agentLogOf(desk: Desk, number: number): Promise<AgentLog | null> {
-  const worktree = `${desk.main}-issue-${number}`
-  const folder = transcriptFolder(worktree, process.env.AGENT_DESK_TRANSCRIPTS || undefined)
-  const names = (await readdir(folder).catch(() => [])).filter(name => /^[0-9a-f-]{36}\.jsonl$/.test(name))
-  const dated = await Promise.all(names.map(async name => ({ name, at: (await stat(join(folder, name))).mtimeMs })))
-  const newest = dated.sort((a, b) => b.at - a.at)[0]
-  if (newest === undefined) {
-    return null
-  }
-  const session = newest.name.replace(/\.jsonl$/, '')
-  const out = await host.run(['bash', '-c', 'python3 -B "$1" "$2" < "$3" | tail -n "$4"', '_', AGENT_LOG,
-    beatsFile(session), join(folder, newest.name), String(LOG_LINES)])
-  return { session, worktree, at: new Date(newest.at).toISOString(), sessions: dated.length, ...splitBeats(out ?? '') }
-}
-
-
 /** Reads the projects file and every project's board again, and publishes them under the store's newest event id. */
 async function refreshAll(): Promise<void> {
   const last = lastEvent()
@@ -418,13 +395,27 @@ async function refreshAll(): Promise<void> {
   publish()
 }
 
+function refreshQuotas(): void {
+  const saved = readIssueRunners()
+  const runners = new Set([...desks.values()].map(desk => effectiveIssueRunner(desk, saved).effective))
+  if (runners.has('codex')) {
+    void refreshCodexUsage()?.then(publish)
+  }
+  if (runners.has('claude') && readAccount()?.account === 'subscription') {
+    void refreshClaudeUsage()?.then(publish)
+  }
+}
+
 async function sampleLoad(): Promise<void> {
+  refreshQuotas()
   const [proc, card] = await Promise.all([
     Promise.all(['/proc/meminfo', '/proc/stat'].map(path => readFile(path, 'utf8').catch(() => ''))),
     host.run(['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits']),
   ])
   gpu = card ?? ''
   codeNow = await codeDigest(CHECKOUT)
+  // The month's spend grows as runs end and the Chat answers.
+  await refreshAccount()
   const sample = loadOf(proc.join('\n'), lastCpu)
   lastCpu = sample.cpu
   load = sample.load
@@ -555,6 +546,12 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
     const source = !desk ? null : comment ? /^\d+$/.test(comment) ? commentSourceOf(desk, Number(comment)) : null
       : /^\d+$/.test(asked('number')) ? sourceOf(desk, Number(asked('number'))) : null
     reply(res, source ? 200 : 404, source ?? { error: comment ? 'no such comment' : 'no such issue or review' })
+  } else if (req.method === 'GET' && path === '/api/chore-text') {
+    // A chore's skill and the project's profile for it, for the panel a Chores row opens: only a chore the project's
+    // chores.every lists.
+    const desk = desks.get(asked('desk'))
+    const text = desk ? await choreTextOf(desk, asked('name')) : null
+    reply(res, text ? 200 : 404, text ?? { error: 'no such chore' })
   } else if (req.method === 'GET' && path === '/api/history') {
     const since = Number(asked('since'))
     const until = Number(asked('until'))
@@ -617,6 +614,9 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       res.writeHead(200, { 'Content-Type': asset.type, 'Cache-Control': 'private, max-age=31536000, immutable' })
       res.end(bytes)
     }
+  } else if (req.method === 'POST' && path === '/api/account-key' && !loopback(req.socket.remoteAddress)) {
+    // The key may cross no network, so the server reads none from another address, not even its body.
+    reply(res, 403, { error: 'the server takes an API key only from this machine' })
   } else if (req.method === 'POST' && path.startsWith('/api/')) {
     const sent = await body(req)
     const desk = desks.get(String(sent?.desk ?? ''))
@@ -627,6 +627,41 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       // project.
       reply(res, 202)
       void changeHold(loop, String(sent.state), PROJECT_MODES.has(String(sent.state)) ? desk : undefined)
+    } else if (path === '/api/slots') {
+      // The Runners sidebar's steppers set a project's agent or gpu slots, as `{ agent: n }` or `{ gpu: n }`, and each
+      // Reset drops its kind's override, as `{ reset: 'agent' }` or `{ reset: 'gpu' }`, the way `agent-desk slots`
+      // does from a shell. A gpu count stays at or under the agent count.
+      if (desk === undefined) {
+        reply(res, 404, { error: 'no such project' })
+        return
+      }
+      const kind = sent.gpu !== undefined || sent.reset === 'gpu' ? 'gpu' : 'agent'
+      const agents = agentSlotsOf(desk.repo, desk.agentSlots ?? DEFAULT_AGENT_SLOTS)
+      const most = kind === 'gpu' ? agents.count : MAX_SLOTS
+      const reset = sent.reset === true || sent.reset === kind
+      if (!reset && !(Number.isInteger(sent[kind]) && Number(sent[kind]) >= 0 && Number(sent[kind]) <= most)) {
+        reply(res, 400, { error: `${kind} slots are a whole number from 0 to ${most}` })
+        return
+      }
+      const done = await changeSlots(loop, desk, kind, reset ? null : Number(sent[kind]))
+      reply(res, done ? 200 : 502, done ? { agent: agentSlotsOf(desk.repo, desk.agentSlots ?? DEFAULT_AGENT_SLOTS),
+        gpu: gpuSlotsOf(desk.repo, desk.gpuSlots ?? null) } : { error: 'the slots command failed' })
+    } else if (path === '/api/issue-runner') {
+      const targets = sent.all === true && sent.desk === undefined ? [...desks.values()] : desk ? [desk] : []
+      if (targets.length === 0) {
+        reply(res, 404, { error: 'no such project' })
+        return
+      }
+      const runner = sent.runner
+      if (runner !== 'default' && !isIssueRunner(runner)) {
+        reply(res, 400, { error: 'choose Claude Code, Codex, Local, or the project default' })
+        return
+      }
+      const done = await changeIssueRunner(loop, targets, runner)
+      if (done && clients.size > 0) {
+        refreshQuotas()
+      }
+      reply(res, done ? 200 : 502, done ? undefined : { error: 'could not save the issue runner' })
     } else if (path === '/api/usage-limit') {
       // One weekly usage limit covers every project, so the page names none: on at a whole percentage, or off.
       const percent = sent.percent
@@ -637,6 +672,32 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       }
       const done = await changeUsageLimit(loop, sent.on, sent.on ? Number(percent) : undefined)
       reply(res, done ? 200 : 502, done ? readUsage() : { error: 'the usage limit command failed' })
+    } else if (path === '/api/account') {
+      // One account covers every project, so the page names none: `subscription` or `api`.
+      if (sent.account !== 'subscription' && sent.account !== 'api') {
+        reply(res, 400, { error: 'the account is subscription or api' })
+        return
+      }
+      const refused = await switchAccount(loop, sent.account)
+      reply(res, refused === null ? 200 : 409, refused === null ? readAccount() : { error: refused })
+    } else if (path === '/api/account-key') {
+      // `{ key }` saves a key and `{ clear: true }` removes it. The key goes to lib/account.py's standard input alone,
+      // and neither the answer nor the log holds it: a refusal says why in words of the script's or the server's own.
+      const clear = sent.clear === true
+      if (!clear && (typeof sent.key !== 'string' || sent.key.trim() === '' || sent.key.length > MAX_KEY)) {
+        reply(res, 400, { error: `an API key is text of up to ${MAX_KEY} characters` })
+        return
+      }
+      const refused = clear ? await clearKey(loop) : await setKey(loop, String(sent.key))
+      reply(res, refused === null ? 200 : 400, refused === null ? readAccount() : { error: refused })
+    } else if (path === '/api/api-budget') {
+      // The monthly API budget: on at a positive number of dollars, or off, keeping its amount.
+      if (typeof sent.on !== 'boolean' || (sent.on && !budgetAmount(sent.dollars))) {
+        reply(res, 400, { error: 'the API budget is a positive number of dollars, with at most two decimals' })
+        return
+      }
+      const refused = await changeBudget(loop, sent.on, sent.on ? Number(sent.dollars) : undefined)
+      reply(res, refused === null ? 200 : 502, refused === null ? readAccount() : { error: refused })
     } else if (path === '/api/refresh') {
       reply(res, 202)
       void (desk ? refresh(desk) : refreshAll())
@@ -698,6 +759,51 @@ export async function handle(req: IncomingMessage, res: ServerResponse): Promise
       }
       reply(res, 202)
       void place(loop, desk, row, to)
+    } else if (path === '/api/sort-order') {
+      // The Queued heading's Sort button, for a project whose board shows two or more queued or waiting issues.
+      if (!desk.board || !sortable(desk.board.queued)) {
+        reply(res, 409, { error: 'that order has changed; refresh' })
+        return
+      }
+      reply(res, 202)
+      void sortOrder(loop, desk)
+    } else if (path === '/api/list-place') {
+      // A drop names an issue's row in Open, Blocked, Needs Design, Backlog, or Ideas, which offers Move Up or Move
+      // Down, and the issue of the same section it lands right above, as `before`, or right below, as `after`.
+      const section = listSection({ key: String(sent.key) })
+      const rows = desk.board && section ? desk.board[section].filter(one => listSection(one) !== null) : []
+      const row = rows.find(one => one.key === sent.key)
+      const side = sent.before !== undefined ? 'before' : 'after'
+      const beside = Number(sent[side])
+      const named = [sent.before, sent.after].filter(one => one !== undefined).length
+      if (row === undefined || !row.actions.some(one => one === 'up' || one === 'down')) {
+        reply(res, 409, { error: 'that row has moved; refresh' })
+        return
+      }
+      if (named !== 1 || !Number.isInteger(beside) || beside === row.number) {
+        reply(res, 400, { error: 'a drop names one other issue to land before or after' })
+        return
+      }
+      if (!rows.some(one => one.number === beside)) {
+        reply(res, 409, { error: `#${beside} has moved; refresh` })
+        return
+      }
+      reply(res, 202)
+      void listPlace(loop, desk, row, side === 'before' ? { before: beside } : { after: beside })
+    } else if (path === '/api/sort-list') {
+      // A Sort button on the Open, Blocked, Needs Design, Backlog, or Ideas heading, for a project whose board shows
+      // two or more of the section's issues in the list order.
+      const group = Object.hasOwn(LIST_GROUPS, String(sent.group)) ? LIST_GROUPS[String(sent.group)] : undefined
+      if (group === undefined) {
+        reply(res, 400, { error: 'no such group' })
+        return
+      }
+      if (!desk.board || !listSortable(desk.board[group[0]])) {
+        reply(res, 409, { error: 'that order has changed; refresh' })
+        return
+      }
+      reply(res, 202)
+      void sortList(loop, desk, ...group)
     } else if (path === '/api/chore' && typeof sent.name === 'string') {
       const times = sent.times === 'forever' ? 'forever'
         : Number.isInteger(sent.times) && Number(sent.times) >= 1 && Number(sent.times) <= 99 ? String(sent.times) : '1'
@@ -827,6 +933,7 @@ if (import.meta.main) {
   await loadStored()
   await readDesks()
   await loadChat()
+  await refreshAccount()
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
       console.error(error)

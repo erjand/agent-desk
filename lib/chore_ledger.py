@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import review_diff
 import store
 
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "agent-desk" / "chores"
@@ -189,37 +190,32 @@ def git_changed(main):
 
 def git_files(main):
     """
-    Which files a review changed, from the main checkout's git: a merged review's merge commit against its first
-    parent, and any other review's branch since it left its base, or the head the review recorded once the branch is
-    gone. A commit git doesn't know changed nothing.
+    Which files a review changed, from the main checkout's git, over the span `agent-desk review diff` reads from
+    review_diff. A review whose commits or branch git doesn't know changed nothing.
     """
-    def diff(*spans):
-        out = subprocess.run(["git", "-C", main, "diff", "--name-only", *spans, "--"], capture_output=True, text=True)
-        return out.stdout.split() if out.returncode == 0 else None
-
     def files(review):
-        merged = (review.get("mergeCommit") or {}).get("oid")
-        if merged:
-            return diff(f"{merged}^1", merged) or []
-        base = review["baseRefName"]
-        found = diff(f"{base}...refs/heads/{review['headRefName']}")
-        if found is None and review.get("headRefOid"):
-            found = diff(f"{base}...{review['headRefOid']}")
-        return found or []
+        try:
+            spans = review_diff.span(main, review)
+        except store.StoreError:
+            return []
+        out = subprocess.run(["git", "-C", main, "diff", "--name-only", *spans, "--"], capture_output=True, text=True)
+        return out.stdout.split() if out.returncode == 0 else []
     return files
 
 
 def reviews(desk, repo, prefix, files_of):
     """
     The project's newest MAX_REVIEWS reviews of a branch starting with `prefix`, open, merged, and closed, from the
-    local store, each with its state, when it merged or closed, and `files_of(review)` as its changed files.
+    local store, each with its state, when it merged or closed, and `files_of(row)` as its changed files, where `row`
+    is the review's row as `Store.review` returns it.
     """
     found = []
     for review in desk.items(repo, "review", state="all", head_prefix=prefix, limit=MAX_REVIEWS):
         merged = review["state"] == "MERGED"
+        files = files_of(desk.review(repo, review["number"]))
         found.append({"number": review["number"], "title": review["title"], "state": review["state"],
                       "headRefName": review["headRefName"], "mergedAt": review["closedAt"] if merged else None,
-                      "closedAt": review["closedAt"], "files": [{"path": path} for path in files_of(review)]})
+                      "closedAt": review["closedAt"], "files": [{"path": path} for path in files]})
     return found
 
 

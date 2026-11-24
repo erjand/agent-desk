@@ -80,14 +80,128 @@ export async function changeHold(loop: Loop, asked: string, desk?: Desk): Promis
   }
 }
 
+// A project's agent slots when its `.agent-desk.json` sets none, as lib/run_units.py's DEFAULT_SLOTS.
+export const DEFAULT_AGENT_SLOTS = 3
+
+/** A whole count of 0 or more, as run_units.slots_of takes one, or null for anything else. */
+function countOf(value: unknown): number | null {
+  return Number.isInteger(value) && Number(value) >= 0 ? Number(value) : null
+}
+
+/** The count a project's `.agent-desk.json` sets for slots of `kind`, or null when it sets none. */
+function configured(config: { slots?: unknown }, kind: string): number | null {
+  return typeof config.slots === 'object' && config.slots !== null
+    ? countOf((config.slots as Record<string, unknown>)[kind]) : null
+}
+
+/** The agent slots a project's `.agent-desk.json` sets, or DEFAULT_AGENT_SLOTS, as run_units.slots_of reads them. */
+export function configAgentSlots(config: { slots?: unknown }): number {
+  return configured(config, 'agent') ?? DEFAULT_AGENT_SLOTS
+}
+
+/**
+ * The gpu slots a project's `.agent-desk.json` sets, which cap its agent runs on issues labelled `gpu`, or null when
+ * it sets none and they cap nothing beyond the agent slots.
+ */
+export function configGpuSlots(config: { slots?: unknown }): number | null {
+  return configured(config, 'gpu')
+}
+
+/** The count of `kind` that `agent-desk slots` or the page set for `repo` in hold.json, or null for none. */
+function overrideOf(repo: string, kind: string): number | null {
+  try {
+    return countOf(JSON.parse(readFileSync(HOLD_STATE, 'utf8'))?.slots?.[repo]?.[kind])
+  } catch {
+    // No hold file means no override.
+    return null
+  }
+}
+
+/**
+ * A project's slots of one kind for the Runners sidebar's stepper: the count the dispatcher uses, the count its config
+ * sets, and whether an override from `agent-desk slots` or the page sets the first. A gpu count is null while neither
+ * sets one.
+ */
+export type KindSlots<Count> = { count: Count; config: Count; override: boolean }
+export type AgentSlots = KindSlots<number>
+export type GpuSlots = KindSlots<number | null>
+
+/** The project's agent slots, with the override hold.json keeps for `repo` over `config`, its config's count. */
+export function agentSlotsOf(repo: string, config: number): AgentSlots {
+  const agent = overrideOf(repo, 'agent')
+  return { count: agent ?? config, config, override: agent !== null }
+}
+
+/** The project's gpu slots, with the override hold.json keeps for `repo` over `config`, its config's count or null. */
+export function gpuSlotsOf(repo: string, config: number | null): GpuSlots {
+  const gpu = overrideOf(repo, 'gpu')
+  return { count: gpu ?? config, config, override: gpu !== null }
+}
+
+/**
+ * Sets a project's slots of `kind`, agent or gpu, to `count` through lib/hold.py, as `agent-desk slots <repo>
+ * <kind>=<n>` does, or with null drops the override so the project follows its config again, and publishes the
+ * page's new state. A count equal to the config's drops the override too. Says whether the command took it. The server
+ * rereads every board once it sees hold.json change, which brings the sidebar's rows to the new count.
+ */
+export async function changeSlots(loop: Loop, desk: Desk, kind: 'agent' | 'gpu', count: number | null):
+  Promise<boolean> {
+  const done = await runHold('slots', desk.repo, ...(count === null ? ['--reset', kind] : [`${kind}=${count}`]))
+  loop.publish()
+  return done
+}
+
+export type IssueRunner = 'claude' | 'codex' | 'local'
+export type IssueRunnerChoice = IssueRunner | 'default'
+
+export function isIssueRunner(value: unknown): value is IssueRunner {
+  return value === 'claude' || value === 'codex' || value === 'local'
+}
+
+/** The saved choices from a single read of the hold state. */
+export function readIssueRunners(): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync(HOLD_STATE, 'utf8'))?.issueRunners ?? {}
+  } catch {
+    return {}
+  }
+}
+
+/** The project's configured runner and the override that applies to new issue runs. */
+export function issueRunnerOf(repo: string, config: IssueRunner | null, saved = readIssueRunners()) {
+  const choice = saved[repo]
+  const override = isIssueRunner(choice) ? choice : null
+  return { config, override, effective: override ?? config }
+}
+
+export async function changeIssueRunner(loop: Loop, [first, ...rest]: Desk[], runner: IssueRunnerChoice): Promise<boolean> {
+  const done = await runHold('issue-runner', first.repo, runner, ...rest.map(desk => desk.repo))
+  if (done) {
+    loop.publish()
+  }
+  return done
+}
+
 /**
  * The weekly usage limit and the plan's last reading, for the header: whether the limit is on, its percentage, or null
  * before one was set, and the reading's percentage, when it was read, and when its window resets, each null without a
  * reading. `problem` says why the reading doesn't count, as lib/usage.py's check does, or is null while it counts: an
  * error, no reading, or a reading over an hour old or from a window that has reset. The page reads no usage itself.
  */
+type Quota = { percent: number; resetsAt: string | null }
 export type Usage = { on: boolean; limit: number | null; percent: number | null; readAt: number | null
-  resetsAt: string | null; problem: string | null }
+  resetsAt: string | null; problem: string | null; fiveHour: Quota | null }
+
+function quotaReading(data: Record<string, unknown>, now: number) {
+  const percent = typeof data.percent === 'number' && Number.isFinite(data.percent) && data.percent >= 0
+    ? data.percent : null
+  const readAt = typeof data.read_at === 'number' ? data.read_at : null
+  const resetsAt = typeof data.resets_at === 'string' ? data.resets_at : null
+  const resets = resetsAt === null ? NaN : Date.parse(resetsAt) / 1000
+  const fresh = percent !== null && readAt !== null && now - readAt >= 0 && now - readAt < STALE_S
+    && (Number.isNaN(resets) || now < resets)
+  return { percent, readAt, resetsAt, fresh }
+}
 
 /** The weekly usage limit lib/usage.py keeps and the reading it last took, at `now` in seconds since the epoch. */
 export function readUsage(now = Date.now() / 1000): Usage {
@@ -103,15 +217,29 @@ export function readUsage(now = Date.now() / 1000): Usage {
   const set = typeof limit?.on === 'boolean' && Number.isInteger(limit.percent) && Number(limit.percent) >= 0
     && Number(limit.percent) <= 100
   const data = json(USAGE_STATE)
-  const percent = typeof data.percent === 'number' ? data.percent : null
-  const readAt = typeof data.read_at === 'number' ? data.read_at : null
-  const resetsAt = typeof data.resets_at === 'string' ? data.resets_at : null
-  const resets = resetsAt === null ? NaN : Date.parse(resetsAt) / 1000
-  const fresh = percent !== null && readAt !== null && now - readAt >= 0 && now - readAt < STALE_S
-    && (Number.isNaN(resets) || now < resets)
+  const { percent, readAt, resetsAt, fresh } = quotaReading(data, now)
   const problem = fresh ? null : typeof data.error === 'string' && data.error ? data.error
     : readAt === null ? 'no reading yet' : 'the last reading is out of date'
-  return { on: set && limit.on === true, limit: set ? Number(limit.percent) : null, percent, readAt, resetsAt, problem }
+  const short = data.five_hour as Record<string, unknown> | null
+  const fiveHour = quotaReading(short ?? {}, now)
+  return { on: set && limit.on === true, limit: set ? Number(limit.percent) : null, percent, readAt, resetsAt, problem,
+    fiveHour: fiveHour.fresh && fiveHour.percent !== null
+      ? { percent: fiveHour.percent, resetsAt: fiveHour.resetsAt } : null }
+}
+
+let claudeTried = -Infinity
+let refreshingClaude = false
+
+/** Refreshes the Claude reading for the header, including when the weekly limit is off. */
+export function refreshClaudeUsage(now = Date.now()): Promise<void> | null {
+  if (refreshingClaude || now - claudeTried < 60_000) {
+    return null
+  }
+  claudeTried = now
+  refreshingClaude = true
+  // usage.reading shares the dispatcher's cache, lock and fetch interval.
+  return host.run(['python3', '-B', '-c', 'import usage; usage.reading()'], dirname(USAGE))
+    .then(() => {}).finally(() => { refreshingClaude = false })
 }
 
 /**

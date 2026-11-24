@@ -71,6 +71,19 @@ desk_worktree() {
     echo "$(dirname "$main")/$(basename "$main")-$1"
 }
 
+# Makes a run's worktree with worktree.sh from the main checkout: desk_make_worktree <slug> <base>. When that fails, it
+# sets desk_worktree_failed to the clause naming the step that failed, such as "the worktree setup, `just build`,
+# failed", for the run's comment, and returns worktree.sh's status.
+desk_make_worktree() {
+    local failure status=0
+    failure=$(mktemp)
+    (cd "$main" && AGENT_DESK_SETUP_FAILURE=$failure "$desk_lib/worktree.sh" "$@") 8>&- || status=$?
+    desk_worktree_failed=$(cat "$failure")
+    rm -f "$failure"
+    desk_worktree_failed=${desk_worktree_failed:-agent-desk failed to make the worktree}
+    return "$status"
+}
+
 # How a note points at the log of the run posting it: the command that prints the journal of the unit the dispatcher
 # started. It names one run only, which lib/release.py relies on to tell this run's notes from an earlier run's.
 desk_run_link() {
@@ -120,14 +133,45 @@ desk_retry() {
     return 1
 }
 
-# Whether any process works in the directory or below it, such as an agent still running or a resumed session.
+# Each process's PID and working directory, one `<pid> <dir>` line each, from a single find over /proc: desk_cwds. A
+# process that ended meanwhile, or whose directory this user can't read, prints nothing. A readlink for each of the
+# machine's processes would start as many processes as it has, near half a second on a desktop. Callers read it with
+# `< <(cd / && desk_cwds)`, so the subshell and the scan's own processes never list the caller's folder.
+desk_cwds() {
+    find /proc/[0-9]*/cwd -maxdepth 0 -printf '%h %l\n' 2>/dev/null | sed -n 's|^/proc/\([0-9]*\) \(/.*\)|\1 \2|p'
+}
+
+# Whether any process works in the directory or below it, such as an agent still running or a resumed session. Sets
+# desk_in_use_by to the first one it finds, as desk_process_report prints it, or to nothing.
 desk_in_use() {
-    local cwd dir
-    for cwd in /proc/[0-9]*/cwd; do
-        dir=$(readlink "$cwd" 2>/dev/null) || continue
-        [[ $dir == "$1" || $dir == "$1"/* ]] && return 0
-    done
+    local pid dir
+    desk_in_use_by=
+    while read -r pid dir; do
+        if [[ $dir == "$1" || $dir == "$1"/* ]]; then
+            desk_in_use_by=$(desk_process_report "$pid")
+            return 0
+        fi
+    done < <(cd / && desk_cwds)
     return 1
+}
+
+# A process on one line, so a message can say what held a worktree: its PID, its command line cut to 120 characters,
+# and the last part of its cgroup path, such as `123 git status (app-dev.zed.Zed@1.service)`: desk_process_report
+# <pid>. Leaves out what it can't read, as of a process that just ended.
+desk_process_report() {
+    local pid=$1 command cgroup
+    local -a args=()
+    mapfile -d '' -t args 2>/dev/null <"/proc/$pid/cmdline" || true
+    command="${args[*]}"
+    [[ -n $command ]] || command=$(cat "/proc/$pid/comm" 2>/dev/null) || command=
+    command=${command//[$'\n\t\r']/ }
+    if ((${#command} > 120)); then
+        command="${command:0:119}…"
+    fi
+    cgroup=$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null) || cgroup=
+    cgroup=${cgroup%/}
+    cgroup=${cgroup##*/}
+    echo "$pid${command:+ $command}${cgroup:+ ($cgroup)}"
 }
 
 # Where a run that reads the code and changes none works on an issue: a detached worktree of main at a path fixed for
@@ -145,11 +189,15 @@ desk_scratch_add() {
     git -C "$main" worktree add -q --detach "$1" refs/heads/main
 }
 
-# Removes a scratch worktree with anything an agent left in it, unless someone works in it: desk_scratch_remove
-# <dest>.
+# Removes a scratch worktree with anything an agent left in it, unless someone works in it, and then says which process
+# kept it: desk_scratch_remove <dest>.
 desk_scratch_remove() {
-    if [[ -d $1 ]] && ! desk_in_use "$1"; then
-        git -C "$main" worktree remove --force "$1" 2>/dev/null || true
+    if [[ -d $1 ]]; then
+        if desk_in_use "$1"; then
+            echo "Kept $1: a process is working in it: $desk_in_use_by."
+        else
+            git -C "$main" worktree remove --force "$1" 2>/dev/null || true
+        fi
     fi
     git -C "$main" worktree prune
 }
@@ -176,15 +224,146 @@ desk_bash_default_timeout_ms=900000
 # agent left running in the background can't hold the runner and the memory claim, and then returns desk_stopped and
 # writes the task it stopped to <stream>.left. A scheduled wakeup, cron job, or Monitor would keep claude -p alive the
 # same way, so the run forbids them. The agent may wait on one command for up to desk_bash_max_timeout_ms, and waits
-# desk_bash_default_timeout_ms on a command it gives no timeout.
+# desk_bash_default_timeout_ms on a command it gives no timeout. The run bills the account desk_account_flags reads,
+# and drops ANTHROPIC_API_KEY, which Claude Code would bill ahead of either account. Returns 1 without starting claude
+# on `api` without a key. The run's row in the store records the session its --resume or --session-id names before
+# claude starts, so a run cut off at its time limit names it too.
 desk_claude_run() {
-    local dest=$1 stream=$2
+    local dest=$1 stream=$2 arg previous='' session=''
     shift 2
-    (cd "$dest" && BASH_MAX_TIMEOUT_MS=${BASH_MAX_TIMEOUT_MS:-$desk_bash_max_timeout_ms} \
+    desk_account_flags || return 1
+    for arg in "$@"; do
+        if [[ $previous == --resume || ($previous == --session-id && -z $session) ]]; then
+            session=$arg
+        fi
+        previous=$arg
+    done
+    if [[ -n $session ]]; then
+        python3 -B "$desk_lib/run_log.py" session "$session" || true
+    fi
+    (cd "$dest" && unset ANTHROPIC_API_KEY && BASH_MAX_TIMEOUT_MS=${BASH_MAX_TIMEOUT_MS:-$desk_bash_max_timeout_ms} \
         BASH_DEFAULT_TIMEOUT_MS=${BASH_DEFAULT_TIMEOUT_MS:-$desk_bash_default_timeout_ms} \
         python3 -B "$desk_lib/agent_run.py" "$stream" claude -p "$@" --permission-mode auto \
-        "${desk_model_args[@]}" --disallowedTools ScheduleWakeup,CronCreate,Monitor \
+        "${desk_model_args[@]}" "${desk_account_args[@]}" --disallowedTools ScheduleWakeup,CronCreate,Monitor \
         --output-format stream-json --verbose)
+}
+
+desk_project_runner() {
+    local runner
+    runner=$(python3 -B "$desk_lib/hold.py" issue-runner "$GH_REPO" 2>/dev/null) || runner=
+    if [[ -n $runner ]]; then
+        printf '%s\n' "$runner"
+    else
+        desk_config issueRunner claude
+    fi
+}
+
+# Selects the project runner for this run and prepares its model settings.
+desk_runner_flags() {
+    local -a local_settings
+    desk_runner=${AGENT_DESK_ISSUE_RUNNER:-$(desk_project_runner)}
+    desk_runner_error=
+    desk_model=
+    desk_effort=
+    desk_local_provider=
+    case "$desk_runner" in
+        claude) desk_model_flags "$@" ;;
+        codex|local)
+            if ! command -v codex >/dev/null; then
+                desk_runner_error="install the Codex CLI on the dispatcher's PATH"
+            elif [[ $desk_runner == local ]]; then
+                mapfile -t local_settings < <(jq -r '
+                    def setting: if type == "string" and test("\\S") and (test("[[:cntrl:]]") | not)
+                                 then . else "" end;
+                    (.localRunner.provider | setting), (.localRunner.model | setting)
+                ' "$main/.agent-desk.json" 2>/dev/null)
+                desk_local_provider=${local_settings[0]:-}
+                desk_model=${local_settings[1]:-}
+                if [[ $desk_local_provider != ollama && $desk_local_provider != lmstudio ]]; then
+                    desk_runner_error="set localRunner.provider to ollama or lmstudio in .agent-desk.json"
+                elif [[ -z $desk_model ]]; then
+                    desk_runner_error="set localRunner.model to an installed model name in .agent-desk.json"
+                fi
+            fi
+            ;;
+        *) desk_runner_error="issueRunner must be claude, codex, or local" ;;
+    esac
+    if [[ -n $desk_runner_error ]]; then
+        echo "agent-desk: $desk_runner_error." >&2
+        return 1
+    fi
+}
+
+desk_takeover_note() {
+    if [[ $desk_runner != claude ]]; then
+        echo "The ${desk_local_provider:+Local }Codex session ID is in the run log."
+    else
+        echo "To take over, run \`claude --resume $2\` in \`$1\`${3:-}."
+    fi
+}
+
+desk_codex_thread() {
+    local thread
+    [[ -f $1 ]] && read -r thread <"$1" &&
+        [[ $thread =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || return 1
+    printf '%s\n' "$thread"
+}
+
+desk_has_claude_session() {
+    [[ $1 =~ ^[0-9a-f-]+$ ]] &&
+        [[ -n $(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" -maxdepth 2 -name "$1.jsonl" -print -quit 2>/dev/null) ]]
+}
+
+# Runs the selected CLI. Codex reads the skill file named in its prompt and supplies its own thread ID.
+desk_run() {
+    local dest=$1 stream=$2 prompt=$3 session=$4 resumed=${5:-} marker=${6:-}
+    if [[ $desk_runner == claude ]]; then
+        if [[ -n $resumed ]]; then
+            desk_claude_run "$dest" "$stream" "$prompt" --resume "$resumed"
+        else
+            desk_claude_run "$dest" "$stream" "$prompt" --session-id "$session"
+        fi
+        return $?
+    fi
+    local -a args
+    if [[ $desk_runner == local ]]; then
+        args=(exec --oss --local-provider "$desk_local_provider" "--model=$desk_model"
+            --sandbox workspace-write -c 'approval_policy="never"' --json)
+    else
+        args=(exec --approve-for-me --json)
+    fi
+    if [[ -n $resumed ]]; then
+        args+=(resume -- "$resumed")
+    else
+        args+=(--)
+    fi
+    (cd "$dest" && AGENT_DESK_CODEX=1 AGENT_DESK_CODEX_SESSION_FILE="$marker" \
+        AGENT_DESK_LOCAL_PROVIDER="$desk_local_provider" AGENT_DESK_LOCAL_MODEL="$desk_model" \
+        python3 -B "$desk_lib/agent_run.py" "$stream" codex "${args[@]}" "$prompt" </dev/null)
+}
+
+desk_skill_prompt() {
+    local skill=$1 issue=$2
+    if [[ $desk_runner != claude ]]; then
+        printf 'Read and follow %s/inbox/skills/%s/SKILL.md for issue #%s.\n' "$desk_root" "$skill" "$issue"
+        printf "Use the installed agent-desk command for the project's store and keep the main checkout untouched.\n"
+    else
+        printf '/agent-desk:%s %s\n' "$skill" "$issue"
+    fi
+}
+
+# The Claude account a run bills, read once a run: AGENT_DESK_ACCOUNT, as the dispatcher read the setting when it
+# started the run's unit, or else lib/account.py's setting as it stands, for a run started by hand. Leaves the account
+# in desk_account and the flags that bill it in desk_account_args, says which in the run's log, and returns 1, saying
+# why, on `api` without a key.
+desk_account_flags() {
+    local out settings
+    [[ -n ${desk_account:-} ]] && return 0
+    out=$(python3 -B "$desk_lib/account.py" claude ${AGENT_DESK_ACCOUNT:+"$AGENT_DESK_ACCOUNT"}) || return 1
+    { read -r desk_account; read -r settings; } <<<"$out"
+    desk_account_args=()
+    [[ -n $settings ]] && desk_account_args=(--settings "$settings")
+    echo "Account: $desk_account."
 }
 
 # The task a run that stopped early left running, from the <stream>.left desk_claude_run wrote, or "a task it started"
@@ -200,14 +379,14 @@ desk_left_task() {
     printf '%s' "$left"
 }
 
-# Runs a headless agent with desk_claude_run, and adds the run's length and turns to the run log: desk_agent_run <dest>
-# <labels> <new|feedback> <claude -p arguments>... Returns the agent's status, desk_stopped for a run that stopped
+# Runs the selected CLI and records the run: desk_agent_run <dest> <labels> <start> <desk_run arguments after stream>.
+# Returns the agent's status, desk_stopped for a run that stopped
 # early, and leaves the task that run stopped in desk_left, empty for any other run.
 desk_agent_run() {
     local dest=$1 labels=$2 start=$3 stream status=0
     shift 3
     stream=$(mktemp)
-    desk_claude_run "$dest" "$stream" "$@" || status=$?
+    desk_run "$dest" "$stream" "$@" || status=$?
     # shellcheck disable=SC2034 # The scripts that source this file read it.
     desk_left=$(desk_left_task "$stream" "$status")
     python3 -B "$desk_lib/run_log.py" record "$desk_model" "$desk_effort" "$stream" \
@@ -267,22 +446,20 @@ desk_in_unit() {
 # Ends the processes this run left in a worktree, such as a compiler server a build started, which would otherwise
 # keep the worktree in use when a later step of the run reuses it. It finds them by the cgroup of the run's unit, which
 # holds every process the run started, so a session someone resumed there keeps running. Outside a unit it ends
-# nothing.
+# nothing. It sends TERM, then KILL to any left 3 seconds later, or AGENT_DESK_LEFTOVER_GRACE seconds when that is
+# set, for tests.
 desk_end_leftovers() {
-    local dest=$1 cwd dir pid pids=()
+    local dest=$1 dir pid pids=()
     [[ -n ${AGENT_DESK_UNIT:-} ]] || return 0
-    for cwd in /proc/[0-9]*/cwd; do
-        dir=$(readlink "$cwd" 2>/dev/null) || continue
+    while read -r pid dir; do
         [[ $dir == "$dest" || $dir == "$dest"/* ]] || continue
-        pid=${cwd#/proc/}
-        pid=${pid%/cwd}
         ((pid == $$ || pid == BASHPID)) && continue
         desk_in_unit "$pid" "$AGENT_DESK_UNIT" && pids+=("$pid")
-    done
+    done < <(cd / && desk_cwds)
     ((${#pids[@]})) || return 0
     echo "Ending ${#pids[@]} leftover processes in $dest."
     kill "${pids[@]}" 2>/dev/null || true
-    sleep 3
+    sleep "${AGENT_DESK_LEFTOVER_GRACE:-3}" || true
     kill -9 "${pids[@]}" 2>/dev/null || true
 }
 
@@ -310,26 +487,44 @@ desk_unsaved() {
     [[ -n $found ]]
 }
 
+# How long the config's worktree.teardown may run before it is stopped. lib/checks.py keeps the same limit.
+desk_teardown_seconds=60
+
+# Runs the config's worktree.teardown in a worktree about to be removed, so resources its setup or tools made outside it,
+# such as a database named after the checkout, go with it: desk_teardown <dest>. A teardown that fails or runs past
+# desk_teardown_seconds prints why and still returns 0, so it never blocks a removal.
+desk_teardown() {
+    local dest=$1 teardown status=0
+    teardown=$(desk_config worktree.teardown "") || teardown=
+    [[ -n ${teardown//[[:space:]]/} && -d $dest ]] || return 0
+    echo "Tearing down $dest: $teardown"
+    (cd "$dest" && timeout -k 10 "$desk_teardown_seconds" bash -c "$teardown" </dev/null) || status=$?
+    if ((status == 124 || status == 137)); then
+        echo "The worktree teardown ran past ${desk_teardown_seconds}s and was stopped: $teardown"
+    elif ((status)); then
+        echo "The worktree teardown failed with status $status: $teardown"
+    fi
+    return 0
+}
+
 # Removes an agent worktree and its local branch: desk_remove_worktree <dest> <branch> [<base>]. Keeps both when a
-# process works in the worktree or it holds uncommitted changes. Keeps whichever of them holds commits that neither
-# origin nor the local <base> branch holds, so a branch never pushed keeps its only copy, even after its worktree was
-# removed by hand. Returns 0 when the worktree is gone.
+# process works in the worktree or it holds uncommitted changes. Keeps the local branch when it holds commits that
+# neither origin nor the local <base> branch holds, so a branch never pushed keeps its only copy while its worktree
+# goes, and worktree.sh checks the branch out again for a later run. Returns 0 when the worktree is gone.
 desk_remove_worktree() {
-    local dest=$1 branch=$2 base=${3:-} head
+    local dest=$1 branch=$2 base=${3:-}
     local where="origin${3:+ or $3}"
     if [[ -d $dest ]]; then
-        head=$(git -C "$dest" rev-parse --verify -q HEAD) || head=
         if desk_in_use "$dest"; then
-            echo "Kept $dest: a process is working in it."
+            echo "Kept $dest: a process is working in it: $desk_in_use_by."
             return 1
         elif [[ -n $(git -C "$dest" status --porcelain) ]]; then
             echo "Kept $dest: it has uncommitted changes."
             return 1
-        elif desk_unsaved "$head" "$base"; then
-            echo "Kept $dest: it has commits that aren't on $where."
-            return 1
         fi
-        git -C "$main" worktree remove "$dest" || return 1
+        desk_teardown "$dest"
+        # The checks above found the worktree clean, so --force removes only files the teardown left.
+        git -C "$main" worktree remove --force "$dest" || return 1
         echo "Removed $dest."
     fi
     if git -C "$main" show-ref --verify --quiet "refs/heads/$branch"; then
@@ -340,6 +535,37 @@ desk_remove_worktree() {
             echo "Deleted local $branch."
         fi
     fi
+}
+
+# Deletes a branch on origin if origin still has it: desk_delete_on_origin <branch> [<holder>]. With <holder>, a ref
+# such as refs/remotes/origin/main, it deletes the branch only when <holder> holds origin's head of it. ls-remote exits
+# 2 when origin lacks the branch, so any other failure means origin couldn't be reached, and it returns 1.
+desk_delete_on_origin() {
+    local branch=$1 holder=${2:-} found=0 head
+    head=$(git -C "$main" ls-remote --exit-code origin "refs/heads/$branch") || found=$?
+    case $found in
+        0) ;;
+        2) return 0 ;;
+        *) return 1 ;;
+    esac
+    if [[ -n $holder ]] && ! git -C "$main" merge-base --is-ancestor "${head%%[[:space:]]*}" "$holder" 2>/dev/null; then
+        echo "Kept $branch on origin: it has commits that aren't on $holder."
+        return 0
+    fi
+    git -C "$main" push -q origin --delete "$branch" && echo "Deleted $branch on origin."
+}
+
+# Deletes origin's copy of an agent branch whose run ended without a review, once the run removed the local branch:
+# desk_drop_origin_branch <branch>. The copy stays while the local branch does, while the branch has a review in any
+# state, whose comments may point at the copy, and while it holds commits origin's main lacks. A project without
+# origin, or whose host is none, has no copy, and origin out of reach keeps it.
+desk_drop_origin_branch() {
+    local branch=$1 reviews
+    git -C "$main" show-ref --verify --quiet "refs/heads/$branch" && return 0
+    [[ $(desk_config host "") != none ]] && git -C "$main" remote get-url origin >/dev/null 2>&1 || return 0
+    reviews=$(desk_store review list --head "$branch" --state all --limit 1 --json number | jq length) || reviews=
+    [[ $reviews == 0 ]] || return 0
+    desk_delete_on_origin "$branch" refs/remotes/origin/main || echo "Couldn't reach origin to delete $branch there."
 }
 
 # The id of the user's desktop session, a wayland or x11 one, or nothing and status 1 on a machine without one.

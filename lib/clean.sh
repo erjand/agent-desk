@@ -4,18 +4,19 @@
 # The second argument says whether the review merged. A merged branch loses its worktree and its branch, locally and,
 # when origin can be reached, on origin. The merge queue (lib/merges.py) moved main and ran the sync when it merged the
 # review, and the push queue (lib/pushes.py) publishes a release once origin holds it, so the cleanup leaves main
-# alone. An unmerged branch keeps its branch on origin and loses only its worktree and local branch. A branch never
-# pushed, whose commits neither origin nor the review's base holds, keeps its local branch, and its worktree when it
-# still has one, since they hold the only copy of its work; the user deletes them. Either way, the issue's agent runs
-# still running or queued are stopped, since the closed review leaves them nothing to do, and the issue moves from
-# in-progress back to open, unless the review merged into another agent branch, as a stacked review does. A merge into
-# main closes the issue with a note, and closes the issues of the reviews stacked on it. An issue whose review merged
-# into another base, as a base:<branch> label asks, stays open for that base's own merge into main to close.
+# alone. The issue's agent runs still running or queued are stopped first, since the closed review leaves them nothing
+# to do. An unmerged branch then goes to origin, as the push queue would send it, keeps its branch there, and loses its
+# worktree and local branch. A branch whose commits neither origin nor the review's base holds, as when origin is out
+# of reach, loses its worktree and keeps its local branch, which holds the only copy of its work, for the user to
+# delete. Either way, the issue moves from in-progress back to open, unless the review merged into another agent
+# branch, as a stacked review does. A merge into main closes the issue with a note, and closes the issues of the
+# reviews stacked on it. An issue whose review merged into another base, as a base:<branch> label asks, stays open for
+# that base's own merge into main to close.
 # It reads and writes the issue and its reviews in the local store. The dispatcher runs it when a review's merged or
 # closed event reaches the store. It skips any step that could touch someone's work: a worktree with uncommitted
-# changes, commits that neither origin, as the last push or fetch saw it, nor the review's local base holds, or a
-# process inside it. It fetches nothing, so only the deletion on origin
-# needs origin in reach.
+# changes or a process inside it, or a branch whose commits neither origin, as the last push or fetch saw it, nor the
+# review's local base holds. It fetches nothing, so only the push of an unmerged branch and the deletion on origin
+# need origin in reach.
 set -euo pipefail
 
 # Bash reads a running script as it goes, so the work sits in a function bash reads whole before it runs: a
@@ -52,19 +53,6 @@ clean_main() {
             sleep 5
             waited=$((waited + 5))
         done
-    }
-
-    # Deletes the branch on origin if origin still has it. ls-remote exits 2 when origin lacks the branch, so any other
-    # failure means origin couldn't be reached, and the caller tries again.
-    # shellcheck disable=SC2329 # desk_retry calls it by name.
-    delete_on_origin() {
-        local found=0
-        git -C "$main" ls-remote --exit-code --heads origin "$branch" >/dev/null || found=$?
-        case $found in
-            0) git -C "$main" push -q origin --delete "$branch" && echo "Deleted $branch on origin." ;;
-            2) ;;
-            *) return 1 ;;
-        esac
     }
 
     # Whether an issue in the store is closed, or missing from it: issue_closed <n>.
@@ -109,6 +97,12 @@ clean_main() {
     if [[ $slug =~ ^issue-([0-9]+)$ ]]; then
         stop_agent_runs "${BASH_REMATCH[1]}"
     fi
+    # An unmerged branch goes to origin first, as the push queue's next tick would send it, so commits the agent made
+    # since the last tick count as saved. A merged branch skips it: its deletion on origin would take commits made
+    # after the merge with it. A push that fails, as with origin out of reach, leaves the check below to keep them.
+    if [[ $merged != true ]] && git -C "$main" show-ref --verify --quiet "refs/heads/$branch"; then
+        python3 -B "$desk_lib/pushes.py" push "$main" "$branch" || true
+    fi
     # A merged branch is safe to delete, and an unmerged one stays on origin, so its local copy can go too. One whose
     # commits neither origin nor the review's base holds stays.
     desk_remove_worktree "$dest" "$branch" "$target" || true
@@ -143,7 +137,7 @@ clean_main() {
 
     if [[ $merged == true ]]; then
         # Origin out of reach keeps its copy of the branch, and the cleanup goes on.
-        desk_retry delete_on_origin || echo "Couldn't delete $branch on origin."
+        desk_retry desk_delete_on_origin "$branch" || echo "Couldn't delete $branch on origin."
     fi
 }
 

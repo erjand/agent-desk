@@ -3,8 +3,10 @@
 // reply's events stream into the chat as they arrive. The session's id stays in chat.json beside that folder, so a page
 // that reloads, or a server that restarts, reads the conversation back from the session's transcript, and the next
 // message continues the session with --resume. Clear Chat forgets the id, and the next message starts a new session.
-// The turn runs straight from the server, outside the dispatcher, so the memory gate never holds it.
-import { spawn } from 'node:child_process'
+// The turn runs straight from the server, outside the dispatcher, so the memory gate never holds it. Each turn bills
+// the account lib/account.py sets as it starts, as a run does, records what it cost in lib/budget.py's ledger of Chat
+// turns, and never starts while the API budget holds new runs.
+import { execFile, spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { accessSync, constants } from 'node:fs'
@@ -46,6 +48,12 @@ const DISALLOWED = 'ScheduleWakeup,CronCreate,Monitor'
 // summary it keeps.
 const SUMMARY_FIELDS = ['command', 'file_path', 'pattern', 'skill', 'url', 'query', 'description', 'prompt']
 const MAX_SUMMARY = 160
+// A heredoc's start, `<<WORD`, `<<-'WORD'`, or `<<"WORD"`, which a here-string's `<<<` is not, as lib/agent_log.py has
+// it.
+const HEREDOC = /(?<!<)<<(?!<)(-?)\s*(?:'([^']+)'|"([^"]+)"|\\?([\w.-]+))/g
+// What a line after a heredoc may start with before its program: the `)"` that closes a `$(cat <<EOF` and the `&&`,
+// `||`, `;`, or `|` that chains the next command.
+const CLOSER = /^\s*[)}][)}"'`\s]*(?:&&|\|\||[;|&])?\s*/
 // The tag each message ends with, naming what the person had selected, which the transcript keeps.
 const CONTEXT_TAG = /\s*<desk-context>([\s\S]*?)<\/desk-context>\s*$/
 
@@ -91,14 +99,98 @@ export function claudeCommand(env: NodeJS.ProcessEnv = process.env): string {
   return join(homedir(), '.local', 'bin', 'claude')
 }
 
-/** The first line of a tool call's most telling input field, cut to MAX_SUMMARY characters, as the Agent Log has it. */
+/**
+ * The account a turn bills, as lib/account.py's `chat` verb reads the setting, with the flags that bill it: none on
+ * `subscription`, and on `api` the --settings whose apiKeyHelper reads the key's file. Says why instead, without the
+ * key, when the account is `api` and no key is set, when the API budget holds new runs, or when the script fails.
+ */
+export function accountFlags(env: NodeJS.ProcessEnv): Promise<{ account: string; args: string[] } | { error: string }> {
+  return new Promise(resolve => {
+    execFile('python3', ['-B', join(DESK_HOME, 'lib', 'account.py'), 'chat'], { env, timeout: 30_000 },
+      (error, stdout, stderr) => {
+        const [account = '', settings = ''] = stdout.split('\n')
+        if (error || !account) {
+          resolve({ error: stderr.trim().replace(/^agent-desk: /, '') || `lib/account.py failed: ${error?.message}` })
+        } else {
+          resolve({ account, args: settings ? ['--settings', settings] : [] })
+        }
+      })
+  })
+}
+
+/**
+ * Records a turn in lib/budget.py's ledger of Chat turns: its session, the account it billed, and `cost`, the
+ * total_cost_usd its `result` event reported, which counts the session so far when the turn resumed it. Every turn
+ * goes in, on either account, so the ledger knows each session's total before the turn. A failure leaves the turn out
+ * of the month's API spend and says so in the server's log.
+ */
+export function recordCost(session: string, account: string, cost: number, env: NodeJS.ProcessEnv): Promise<void> {
+  return new Promise(resolve => {
+    execFile('python3', ['-B', join(DESK_HOME, 'lib', 'budget.py'), 'record', session, account, String(cost)],
+      { env, timeout: 30_000 }, error => {
+        if (error) {
+          console.error(`agent-desk: a Chat turn's cost of ${cost} dollars went unrecorded: ${error.message}`)
+        }
+        resolve()
+      })
+  })
+}
+
+function clip(line: string): string {
+  return line.length <= MAX_SUMMARY ? line : `${line.slice(0, MAX_SUMMARY - 1)}…`
+}
+
+function firstLine(text: string): string {
+  return text.trim().split(/\r\n|\r|\n/)[0] ?? ''
+}
+
+/**
+ * The line of a command that best names what it runs, as lib/agent_log.py's command_line picks it: its first, unless
+ * that line opens a heredoc, as `python3 - <<'EOF'` does. Then it is the first line after the heredoc's end that runs a
+ * program, past a `)"` that closes the heredoc's `$(...)` and a `&&` that chains it, or the first line when no such
+ * line follows.
+ */
+export function commandLine(command: string): string {
+  const [first = '', ...rest] = command.trim().split(/\r\n|\r|\n/)
+  const ends = [...first.matchAll(HEREDOC)]
+    .map(found => ({ dash: found[1] !== '', word: found[2] || found[3] || found[4] }))
+  if (ends.length === 0) {
+    return first
+  }
+  for (const line of rest) {
+    const end = ends[0]
+    if (end) {
+      if ((end.dash ? line.replace(/^\t+/, '') : line).trim() === end.word) {
+        ends.shift()
+      }
+      continue
+    }
+    const program = line.replace(CLOSER, '').trim()
+    if (program && !program.startsWith('#')) {
+      return program
+    }
+  }
+  return first
+}
+
+/**
+ * What a tool call does, on one line cut to MAX_SUMMARY characters, as the Agent Log has it. A command shows its
+ * description, when it has one, and its first line, or else the line commandLine picks. Any other call shows the first
+ * line of its most telling input field.
+ */
 export function summarize(input: unknown): string {
   const fields = typeof input === 'object' && input !== null ? input as Record<string, unknown> : {}
+  const { command, description } = fields
+  if (typeof command === 'string' && command.trim()) {
+    if (typeof description === 'string' && description.trim()) {
+      return clip(`${firstLine(description)} · ${firstLine(command)}`)
+    }
+    return clip(commandLine(command))
+  }
   for (const field of SUMMARY_FIELDS) {
     const value = fields[field]
     if (typeof value === 'string' && value.trim()) {
-      const line = value.trim().split('\n')[0] ?? ''
-      return line.length <= MAX_SUMMARY ? line : `${line.slice(0, MAX_SUMMARY - 1)}…`
+      return clip(firstLine(value))
     }
   }
   return ''
@@ -400,9 +492,21 @@ export async function sendChat(text: string, context: ChatContext | null): Promi
   // The turn's tools find agent-desk and claude even where the server's PATH lacks them, as in its systemd service.
   env.PATH = [join(DESK_HOME, 'bin'), dirname(claude), env.PATH].filter(Boolean).join(delimiter)
   delete env.AGENT_DESK_UNIT
+  // Claude Code bills ANTHROPIC_API_KEY ahead of either account, so the turn never has it.
+  delete env.ANTHROPIC_API_KEY
+  const billed = await accountFlags(env)
+  if ('error' in billed) {
+    if (resume === null) {
+      await saveSession(null)
+    }
+    chat.items.push({ role: 'you', text, context },
+      { role: 'note', text: `Claude Code didn't start: ${billed.error}`, error: true })
+    changed(chat.items.length - 2)
+    return null
+  }
   const argv = ['-p', resume === null ? '--session-id' : '--resume', session, '--output-format', 'stream-json',
     '--verbose', '--include-partial-messages', '--permission-mode', 'auto', '--append-system-prompt', systemPrompt(),
-    '--disallowedTools', DISALLOWED, '--', promptOf(text, context)]
+    '--disallowedTools', DISALLOWED, ...billed.args, '--', promptOf(text, context)]
   const child = spawn(claude, argv, { cwd: chatFolder(), env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
   chat.child = child
   chat.stopped = false
@@ -424,6 +528,10 @@ export async function sendChat(text: string, context: ChatContext | null): Promi
         continue
       }
       if (typeof event === 'object' && event !== null) {
+        const { type, total_cost_usd: cost } = event as { type?: unknown; total_cost_usd?: unknown }
+        if (type === 'result' && typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) {
+          void recordCost(turn.session ?? session, billed.account, cost, env)
+        }
         const from = applyEvent(chat.items, turn, event as Record<string, unknown>)
         if (from !== null) {
           changed(from, true)

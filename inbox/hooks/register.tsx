@@ -2,17 +2,19 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Board, Row, RowAction, SectionView } from '../types'
-import { askToFix, cancelRequest, dismissRun, labelBacklog, labelReady, markDesigned, markReady, moveBacklogToOpen,
-  moveIdeaToOpen, moveInStartOrder, orderFailure, pauseIssue, queueMerge, queuedName, queuedNote, restartIssue,
-  retryRun, startChore, startRow, unblockIssue, unpauseIssue, unpickFailure, unpickIssue, unqueueFailure,
+import { askToFix, cancelRequest, dismissRun, labelBacklog, labelReady, listOrderFailure, listSortFailure, markDesigned,
+  markReady, moveBacklogToOpen, moveIdeaToOpen, moveInListOrder, moveInStartOrder, orderFailure, pauseIssue,
+  queueMerge, queuedName, queuedNote, restartIssue, retryRun, SORT_FAILURE, sortListOrder, sortStartOrder,
+  startChore, startRow, stopCommand, unblockIssue, unpauseIssue, unpickFailure, unpickIssue, unqueueFailure,
   unqueueIssue } from './actions.ts'
 import { choreColumns, cite, fetchBoard } from './board.ts'
 import type { Host, Project } from './board.ts'
 import { gaugesOf, loadOf } from './load.ts'
 import { deskFound, deskMissing } from './run.ts'
 import type { CpuTimes } from './load.ts'
-import { announce, moveInOrder, moveToBacklog, moveToFixing, moveToMerging, moveToOpen, moveToQueued, moveToRestarted,
-  moveToRetried, moveToReview, moveToUnpicked, prName } from './moves.ts'
+import { announce, listMoveOf, listNumbers, listSection, listSortable, moveInList, moveInOrder, moveToBacklog,
+  moveToFixing, moveToMerging, moveToOpen, moveToQueued, moveToRestarted, moveToRetried, moveToReview, moveToUnpicked,
+  prName, sortable } from './moves.ts'
 
 const PANE = 'agent-desk'
 // How often the pane reads the store's newest event id, from the file the store saves it in beside its database: one
@@ -41,9 +43,10 @@ const MAX_SHOWING = 100
 // Change the tag when Board's fields change: it declines what an earlier version stored.
 const board = atom({ plugin: 'agent-desk', key: 'board' } as const, null, { shape: 'board-12' })
 const known = atom({ plugin: 'agent-desk', key: 'known' } as const, null)
-// The row key and action of the Merge, Fix, Dismiss, Continue, or Unblock that waits for its confirm, as
-// `<key> <action>`.
+// The row key and action of the row's button in CONFIRMS that waits for its confirm, as `<key> <action>`, or a
+// section's title and ` sort` while its heading's Sort waits for its confirm.
 const confirm = atom({ plugin: 'agent-desk', key: 'confirm' } as const, null)
+const sortConfirm = (title: string) => `${title} sort`
 const note = atom({ plugin: 'agent-desk', key: 'note' } as const, null)
 const view = atom({ plugin: 'agent-desk', key: 'view' } as const, null)
 // Whether a read of the board is under way; the Refresh button reads Refreshing… until it lands.
@@ -282,6 +285,13 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
   const here = project()
   // Narrowed by each branch's test, which a command's closure keeps.
   const { number, run: runId } = row
+  if (CONFIRMS.has(action) && !(await confirmed($, row, action))) {
+    // Stop Command's question, the command and how long it has run, shows in the header's note while it waits.
+    if (action === 'stop-command') {
+      await say(row.stopAsk ?? null)
+    }
+    return
+  }
   if (action === 'open' && row.url) {
     const shown = await serves($, row.url)
     if (shown) {
@@ -319,9 +329,6 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
     await say(done ? `Moved #${row.number} to Open.` : `Couldn't take needs-design off #${row.number}.`)
     await refresh($)
   } else if (action === 'to-open' && number) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     // Moves the idea, the backlog issue, or the queued issue, to Open at once. The store takes the label off, or the
     // dispatcher cancels the issue's waiting runs and sets it open, before the command returns, so the read after shows
     // the issue in Open, or where its state puts it; an edit the store refused, or a run that started, puts it back.
@@ -347,7 +354,25 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
     }
     await say(done ? `Moved #${row.number} to Backlog.` : `Couldn't label #${row.number} backlog.`)
     await refresh($)
-  } else if ((action === 'up' || action === 'down' || action === 'top') && number) {
+  } else if ((action === 'up' || action === 'down' || action === 'top' || action === 'bottom') && number
+    && listSection(row) !== null) {
+    // Moves the issue in its section at once, beside the issue the move passes or to the section's end. The store
+    // writes the list order before the command returns, so the read after shows it; a move the store refused, as for
+    // an issue that closed since, puts the section back. The section's page stays where it was, so a move across its
+    // edge carries the row to the next or previous page.
+    const before = await read($, board)
+    const to = before && listMoveOf(before, row, action)
+    if (!to) {
+      return
+    }
+    await update($, board, shown => (shown ? moveInList(shown, row, action) : shown))
+    const done = await command(() => moveInListOrder(hostOf($), here, number, to))
+    if (!done) {
+      await update($, board, () => before)
+    }
+    await say(done ? null : listOrderFailure(number))
+    await refresh($)
+  } else if ((action === 'up' || action === 'down' || action === 'top' || action === 'bottom') && number) {
     // Moves the issue in Queued at once. The store writes the new start order before the command returns, so the read
     // after shows it; a move the store refused, as for an issue that started since, puts the order back.
     const before = await read($, board)
@@ -359,9 +384,6 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
     await say(done ? null : orderFailure(number))
     await refresh($)
   } else if (action === 'unblock' && number) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     // Moves the issue to Open at once. The store frees it before the command returns, so the read after shows it in
     // Open; an edit the store refused puts it back in Blocked.
     await update($, board, shown => (shown ? moveToOpen(shown, row) : shown))
@@ -374,15 +396,18 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
     await say(done ? `Moved #${row.number} to Open.` : `Couldn't unblock #${row.number}.`)
     await refresh($)
   } else if (action === 'pause' && (row.issue ?? number)) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     // The dispatcher puts the issue on hold before the command returns and stops its run, so the read after shows it
     // in Blocked once the run's unit is gone.
     const issue = row.issue ?? number ?? 0
     const done = await command(() => pauseIssue(hostOf($), here, issue))
     await say(done ? `Paused #${issue}: it waits on hold until Resume.`
       : `Couldn't pause #${issue}: no agent run works it.`)
+    await refresh($)
+  } else if (action === 'stop-command' && (row.issue ?? number)) {
+    const issue = row.issue ?? number ?? 0
+    const done = await command(() => stopCommand(hostOf($), here, issue))
+    await say(done ? `Stopped the command #${issue}'s agent waited on; the agent goes on with its failure.`
+      : `Couldn't stop #${issue}'s command: its run waits on none.`)
     await refresh($)
   } else if (action === 'unpause' && number) {
     const done = await command(() => unpauseIssue(hostOf($), here, number))
@@ -405,9 +430,6 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
     await say(done ? `Unpicked #${number}.` : unpickFailure(number))
     await refresh($)
   } else if (action === 'merge' && number) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     // Moves the PR to Merging at once. The queue saves it before the command returns, so the read after shows it
     // there until it merges; a PR the queue couldn't take goes back.
     await update($, board, shown => (shown ? moveToMerging(shown, row) : shown))
@@ -420,9 +442,6 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
     await say(queuedNote(row, done))
     await refresh($)
   } else if (action === 'fix' && number) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     // Moves the PR to Queued at once, where the read after the command shows it from the comment the store holds for
     // the dispatcher; a comment the store refused puts it back.
     await update($, board, shown => (shown ? moveToFixing(shown, row) : shown))
@@ -436,9 +455,6 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
       : `Couldn't comment on ${prName(row)}.`)
     await refresh($)
   } else if (action === 'undraft' && number) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     // Shows the draft as a ready PR at once. The store clears the draft flag before the command returns, so the read
     // after shows the PR to review; a review the store couldn't mark ready goes back to its draft card.
     await update($, board, shown => (shown ? moveToReview(shown, row) : shown))
@@ -462,9 +478,6 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
     await say(done ? `${verb[0]} ${row.note}: ${row.title}.` : `Couldn't ${verb[1]} ${row.note}: ${row.title}.`)
     await refresh($)
   } else if (action === 'restart' && number) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     // Moves the issue to Queued at once. The dispatcher's request is in the store before the command returns, so the
     // read after shows the agent waiting or working; a start the dispatcher or lib/hold.py refused puts it back.
     await update($, board, shown => (shown ? moveToRestarted(shown, row) : shown))
@@ -484,9 +497,6 @@ async function act($: Engine, row: Row, action: RowAction, surface: string): Pro
       : `Couldn't cancel the run that waited for ${queuedName(row)}; it may have started.`)
     await refresh($)
   } else if (action === 'dismiss' && runId !== undefined) {
-    if (!(await confirmed($, row, action))) {
-      return
-    }
     await dismissRun(hostOf($), runId)
     await update($, board, shown => (shown ? { ...shown, needs: shown.needs.filter(one => one.key !== row.key) } : shown))
   }
@@ -498,6 +508,30 @@ async function confirmed($: Engine, row: Row, action: RowAction): Promise<boolea
   const asked = (await read($, confirm)) === asking
   await update($, confirm, () => (asked ? null : asking))
   return asked
+}
+
+/**
+ * Sorts the project's start order into its default, as the Queued heading's Sort asks once confirmed: the issues that
+ * can start now first, blockers ahead of what they block, then by number. The store writes the order before the
+ * command returns, so the read after shows it, and after a refused sort the read shows the store's order.
+ */
+async function sortOrder($: Engine): Promise<void> {
+  await update($, confirm, () => null)
+  const done = await command(() => sortStartOrder(hostOf($), project()))
+  await update($, note, () => (done ? 'Sorted the start order.' : SORT_FAILURE))
+  await refresh($)
+}
+
+/**
+ * Puts a list section's issues back in number order, highest first, as its heading's Sort asks once confirmed. The
+ * store writes the list order before the command returns, so the read after shows it, and after a refused sort the
+ * read shows the store's order.
+ */
+async function sortList($: Engine, title: string, rows: Row[]): Promise<void> {
+  await update($, confirm, () => null)
+  const done = await command(() => sortListOrder(hostOf($), project(), listNumbers(rows)))
+  await update($, note, () => (done ? `Sorted ${title} by number.` : listSortFailure(title)))
+  await refresh($)
 }
 
 async function runChore($: Engine, name: string): Promise<void> {
@@ -538,17 +572,22 @@ async function pageSection($: Engine, title: string, by: number, total: number):
   })
 }
 
-const LABELS: Record<RowAction, string> = { open: 'Open', log: 'Log', merge: 'Merge', ready: 'Agent-ready',
+export const LABELS: Record<RowAction, string> = { open: 'Open', log: 'Log', merge: 'Merge', ready: 'Agent-ready',
   resume: 'Take Over', retry: 'Retry', dismiss: 'Dismiss', fix: 'Fix', close: 'Close', start: 'Start',
   restart: 'Continue',
   designed: 'Designed', 'to-open': 'Move to Open', 'to-backlog': 'Move to Backlog', unblock: 'Unblock',
-  undraft: 'Ready', cancel: 'Cancel run', up: 'Move Up', down: 'Move Down', top: 'Move to Top', unpick: 'Unpick',
-  pause: 'Pause', unpause: 'Resume' }
+  undraft: 'Ready', cancel: 'Cancel run', up: 'Move Up', down: 'Move Down', top: 'Move to Top',
+  bottom: 'Move to Bottom', unpick: 'Unpick', pause: 'Pause', unpause: 'Resume', 'stop-command': 'Stop Command' }
 // The actions that move an issue or PR forward, drawn as each row's main button. Take Over, which copies a command,
 // leaves Continue the stopped row's main button.
 const FORWARD = new Set<RowAction>(['merge', 'ready', 'restart', 'retry', 'fix', 'start', 'undraft', 'unpause'])
-// The actions that swap their button for Confirm and Cancel before they act.
-const CONFIRMS = new Set<RowAction>(['merge', 'fix', 'dismiss', 'restart', 'unblock', 'undraft', 'to-open', 'pause'])
+// The actions that swap their button for Confirm and Cancel before they act: every one that changes an issue, a run,
+// or a review, as on the web page. Close has no button in the pane and confirms on the web page.
+export const CONFIRMS = new Set<RowAction>(['merge', 'fix', 'dismiss', 'ready', 'start', 'unpick', 'retry', 'restart',
+  'close', 'designed', 'to-open', 'to-backlog', 'unblock', 'undraft', 'cancel', 'pause', 'unpause', 'stop-command'])
+// The actions that act at once: Open and Log, which show or copy, Take Over, which copies a command, and the moves in
+// the start order and the list order. Every action in LABELS sits in this list or in CONFIRMS, which a test checks.
+export const INSTANT = new Set<RowAction>(['open', 'log', 'resume', 'up', 'down', 'top', 'bottom'])
 
 /** Whether an action draws as its row's main button. */
 export function isMain(action: RowAction): boolean {
@@ -644,11 +683,18 @@ export const register: Register = on => {
       if ((row.url && action === 'open') || (action === 'log' && !row.log) || action === 'close') {
         return []
       }
+      // The confirm's Cancel takes a key of its own, apart from the row's Cancel run, whose key is `cancel-<row>`.
       if (CONFIRMS.has(action) && pending === `${row.key} ${action}`) {
         return [
           { key: `confirm-${row.key}`, label: `Confirm ${labelOf(row, action).toLowerCase()}`,
             onPress: () => act($, row, action, e.surface), primary: isMain(action) },
-          { key: `cancel-${row.key}`, label: 'Cancel', onPress: () => update($, confirm, () => null) },
+          { key: `cancel-confirm-${row.key}`, label: 'Cancel', onPress: async () => {
+            await update($, confirm, () => null)
+            // Stop Command's question goes with its confirm.
+            if (action === 'stop-command') {
+              await update($, note, () => null)
+            }
+          } },
         ]
       }
       return [{ key: `${action}-${row.key}`, label: labelOf(row, action), onPress: () => act($, row, action, e.surface),
@@ -741,13 +787,26 @@ export const register: Register = on => {
       </Box>
     )
 
-    const section = (title: string, rows: Row[]) => {
+    // Queued's heading has a Sort button beside it while two or more queued or waiting issues hold the start order,
+    // and each list section's heading while two or more of its issues hold the list order. A sort replaces any order
+    // set by hand, so it asks to confirm first; the heading itself still collapses the section. Queued's buttons keep
+    // the keys `sort-order`, `confirm-sort-order`, and `cancel-sort-order`, and a list section's end in its title.
+    const sortButton = (title: string, id: string, sort: () => unknown) => (pending === sortConfirm(title) ? [
+      <Button key={`confirm-sort-${id}`} label="Confirm sort" variant="primary" onPress={sort} />,
+      <Button key={`cancel-sort-${id}`} label="Cancel" onPress={() => update($, confirm, () => null)} />,
+    ] : <Button key={`sort-${id}`} label="Sort" onPress={() => update($, confirm, () => sortConfirm(title))} />)
+    const orderSort = () => sortButton('Queued', 'order', () => sortOrder($))
+    const listSort = (title: string, rows: Row[]) => (listSortable(rows)
+      ? sortButton(title, title, () => sortList($, title, rows)) : undefined)
+
+    const section = (title: string, rows: Row[], beside?: unknown) => {
       const paged = PAGED.has(title) && rows.length > BACKLOG_ROWS
       const top = paged ? pageTop(layout.offsets[title] ?? 0, 0, rows.length) : 0
       const visible = paged ? rows.slice(top, top + BACKLOG_ROWS) : rows
+      const head = heading(title, PAGED.has(title) ? rows.length : undefined)
       return (
         <Box flexDirection="column" marginTop={1}>
-          {heading(title, PAGED.has(title) ? rows.length : undefined)}
+          {beside ? <Box flexDirection="row">{head}<Text> </Text>{beside}</Box> : head}
           {!isCollapsed(title) && (rows.length === 0 ? <Text dimColor>  nothing</Text>
             : visible.map(row => <Box marginLeft={2}>{line(row)}</Box>))}
           {!isCollapsed(title) && paged && pager(title, top, visible.length, rows.length)}
@@ -829,13 +888,13 @@ export const register: Register = on => {
               : [{ key: 'runners-none', text: 'nothing running', actions: [] }])}
             {section('Needs You', shown.needs)}
             {section('Merging', shown.merging)}
-            {section('Queued', shown.queued)}
-            {section('Open', shown.next)}
+            {section('Queued', shown.queued, sortable(shown.queued) ? orderSort() : undefined)}
+            {section('Open', shown.next, listSort('Open', shown.next))}
             {/* A board stored before Blocked existed has none until the next refresh. */}
-            {section('Blocked', shown.blocked ?? [])}
-            {section('Needs Design', shown.design)}
-            {section('Backlog', shown.backlog)}
-            {section('Ideas', shown.ideas)}
+            {section('Blocked', shown.blocked ?? [], listSort('Blocked', shown.blocked ?? []))}
+            {section('Needs Design', shown.design, listSort('Needs Design', shown.design))}
+            {section('Backlog', shown.backlog, listSort('Backlog', shown.backlog))}
+            {section('Ideas', shown.ideas, listSort('Ideas', shown.ideas))}
             {section('Recently Merged', shown.merged)}
             {choreTable(shown.chores)}
             {/* Where the desk touches GitHub, last, so it never pushes the work down. A board stored before the

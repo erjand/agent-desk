@@ -1,18 +1,19 @@
 // Run with: node --test web/
 // Tests of the routes that write the store through the server: the New Issue form and its template, a comment's Edit,
 // a review's buttons and line comments, Move to Open, Unpick, and Close on a queued card, Move to Backlog and back, a
-// close as a duplicate, Delete Issue, and the header's weekly usage limit.
+// close as a duplicate, Delete Issue, the header's weekly usage limit, and the Runners sidebar's agent slots.
 // First, so the server's modules read the temporary folders it sets.
 import './test-env.ts'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 
+import { issueRunnerOf } from './hold.ts'
 import { rebuild } from './server.ts'
 import { getFrom, JSON_POST, postTo } from './server-fixture.ts'
 import { desks, host } from './state.ts'
@@ -378,8 +379,8 @@ test('Move to Open on a queued card cancels the runs that wait for the issue and
   try {
     await rebuild(desk)
     // #3's run started before the run moved it to in-progress, so its card still offers the button.
-    assert.deepEqual(rows('queued'), [['queued-1', ['open', 'to-open', 'close', 'down']],
-      ['waiting-2', ['open', 'to-open', 'close', 'up', 'down', 'top']],
+    assert.deepEqual(rows('queued'), [['queued-1', ['open', 'to-open', 'close', 'down', 'bottom']],
+      ['waiting-2', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
       ['queued-3', ['open', 'to-open', 'close', 'up', 'top']]])
     for (const key of ['queued-1', 'waiting-2', 'queued-3']) {
       assert.equal((await postTo('/api/act', { desk: 'barn', key, action: 'to-open' })).status, 202, key)
@@ -438,14 +439,14 @@ test('Unpick on a picked queued card drops its pick through lib/hold.py and show
   const rows = () => (desk.board?.queued ?? []).map(row => [row.key, row.note, row.actions])
   try {
     await rebuild(desk)
-    assert.deepEqual(rows(), [['queued-1', 'picked', ['open', 'unpick', 'to-open', 'close', 'down']],
+    assert.deepEqual(rows(), [['queued-1', 'picked', ['open', 'unpick', 'to-open', 'close', 'down', 'bottom']],
       ['queued-2', 'picked', ['open', 'unpick', 'to-open', 'close', 'up', 'top']]])
     assert.equal((await postTo('/api/act', { desk: 'crib', key: 'queued-1', action: 'unpick' })).status, 202)
     // The card shows Start before lib/hold.py answers.
-    assert.deepEqual(rows()[0], ['queued-1', 'waits for Start', ['open', 'start', 'to-open', 'close', 'down']])
+    assert.deepEqual(rows()[0], ['queued-1', 'waits for Start', ['open', 'start', 'to-open', 'close', 'down', 'bottom']])
     await settled()
     assert.deepEqual(pickedOf(), ['me/crib#2', 'me/barn#9'])
-    assert.deepEqual(rows()[0], ['queued-1', 'waits for Start', ['open', 'start', 'to-open', 'close', 'down']])
+    assert.deepEqual(rows()[0], ['queued-1', 'waits for Start', ['open', 'start', 'to-open', 'close', 'down', 'bottom']])
     // Unpick is gone from the card, so the server refuses it.
     assert.equal((await postTo('/api/act', { desk: 'crib', key: 'queued-1', action: 'unpick' })).status, 409)
 
@@ -652,12 +653,12 @@ test('Close on a queued or waiting card takes it out of Queued at once, closes t
   const rows = () => (desk.board?.queued ?? []).map(row => [row.key, row.actions])
   try {
     await rebuild(desk)
-    assert.deepEqual(rows(), [['queued-1', ['open', 'unpick', 'to-open', 'close', 'down']],
-      ['waiting-2', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top']],
+    assert.deepEqual(rows(), [['queued-1', ['open', 'unpick', 'to-open', 'close', 'down', 'bottom']],
+      ['waiting-2', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
       ['queued-3', ['open', 'unpick', 'to-open', 'close', 'up', 'top']]])
     // The card's Close leaves Queued before the store answers, and the rows left get the moves of their new places.
     assert.equal((await postTo('/api/act', { desk: 'grain', key: 'queued-1', action: 'close' })).status, 202)
-    assert.deepEqual(rows(), [['waiting-2', ['open', 'unpick', 'to-open', 'close', 'down']],
+    assert.deepEqual(rows(), [['waiting-2', ['open', 'unpick', 'to-open', 'close', 'down', 'bottom']],
       ['queued-3', ['open', 'unpick', 'to-open', 'close', 'up', 'top']]])
     await settled()
     // The waiting card's comment box closes it as a duplicate of #3.
@@ -672,113 +673,6 @@ test('Close on a queued or waiting card takes it out of Queued at once, closes t
     host.run = real
     desks.delete('grain')
     rmSync(held, { force: true })
-    rmSync(main, { recursive: true, force: true })
-  }
-})
-
-test('Move Up, Move Down, Move to Top, and a drop on a queued card move its issue in the store\'s start order, and a '
-  + 'move the store refuses changes nothing', async () => {
-  const main = mkdtempSync(join(tmpdir(), 'agent-desk-loft-'))
-  storeFixture(['p = "me/loft"', 'store.create(p, "issue", "Paint the barn", labels=["agent-ready"])',
-    'w = store.create(p, "issue", "Fix the door")', 'store.set_state(p, w, "waiting")',
-    'store.create(p, "issue", "Oil the hinge", labels=["agent-ready"])',
-    'store.create(p, "issue", "Sweep the loft", labels=["agent-ready"])'].join('\n'), storePath())
-  const desk = { id: 'loft', repo: 'me/loft', owner: 'me', title: 'Loft', main, chores: [], board: null, at: 0,
-    refreshing: false, starting: new Map(), labels: {}, models: {}, chorePrs: {},
-    schedulePr: null, modelsFor: '', known: null, refreshes: 0, commands: 0 } as Desk
-  desks.set('loft', desk)
-  const real = host.run
-  const asked: string[][] = []
-  let pending = 0
-  host.run = async (argv, _cwd, stdin) => {
-    if (argv[0] !== 'bash') {
-      return null
-    }
-    asked.push(argv)
-    pending += 1
-    try {
-      return execFileSync(argv[0], argv.slice(1), { cwd: main, encoding: 'utf8', input: stdin, stdio: 'pipe',
-        env: { ...process.env, AGENT_DESK_HOME: join(import.meta.dirname, '..'), GH_REPO: 'me/loft' } })
-    } catch {
-      return null
-    } finally {
-      pending -= 1
-    }
-  }
-  const settled = async () => {
-    do {
-      await new Promise(resolve => setTimeout(resolve, 20))
-    } while (pending > 0 || desk.commands > 0 || desk.refreshing)
-  }
-  const order = () => {
-    const db = new DatabaseSync(storePath(), { readOnly: true })
-    try {
-      return db.prepare('SELECT number FROM items WHERE project = ? AND rank IS NOT NULL ORDER BY rank').all('me/loft')
-        .map(row => row.number)
-    } finally {
-      db.close()
-    }
-  }
-  const keys = () => (desk.board?.queued ?? []).map(row => row.key)
-  const press = async (key: string, action: string) => {
-    assert.equal((await postTo('/api/act', { desk: 'loft', key, action })).status, 202, `${action} ${key}`)
-    await settled()
-  }
-  try {
-    await rebuild(desk)
-    assert.deepEqual(keys(), ['queued-1', 'waiting-2', 'queued-3', 'queued-4'])
-    // The first card offers no Move Up or Move to Top, and the last no Move Down.
-    assert.equal((await postTo('/api/act', { desk: 'loft', key: 'queued-1', action: 'up' })).status, 409)
-    assert.equal((await postTo('/api/act', { desk: 'loft', key: 'queued-4', action: 'down' })).status, 409)
-    await press('queued-4', 'top')
-    assert.deepEqual(order(), [4, 1, 2, 3])
-    await press('queued-1', 'down')
-    await press('queued-3', 'up')
-    assert.deepEqual(order(), [4, 2, 3, 1])
-    assert.deepEqual(keys(), ['queued-4', 'waiting-2', 'queued-3', 'queued-1'])
-    assert.deepEqual(desk.board?.queued.map(row => row.actions.slice(3)), [['down'], ['up', 'down', 'top'],
-      ['up', 'down', 'top'], ['up', 'top']])
-    assert.ok(asked.some(argv => argv.slice(-4).join(' ') === 'queue order 4 --top'))
-    // A drop places the card at a number from 1, and one past the end puts it last.
-    const drop = async (key: string, to: unknown) => (await postTo('/api/place', { desk: 'loft', key, to })).status
-    assert.equal(await drop('queued-1', 1), 202)
-    await settled()
-    assert.deepEqual(order(), [1, 4, 2, 3])
-    assert.deepEqual(keys(), ['queued-1', 'queued-4', 'waiting-2', 'queued-3'])
-    assert.ok(asked.some(argv => argv.slice(-5).join(' ') === 'queue order 1 --to 1'))
-    assert.equal(await drop('queued-1', 9), 202)
-    await settled()
-    assert.deepEqual(order(), [4, 2, 3, 1])
-    // A drop with no place, or of a row outside Queued's start order, sends nothing.
-    const sent = asked.length
-    assert.deepEqual([await drop('queued-1', 0), await drop('queued-1', 'two'), await drop('next-1', 1),
-      await drop('queued-9', 1)], [400, 400, 409, 409])
-    assert.equal(asked.length, sent)
-    // #3 started after the board's read, so the store refuses its move and the order stays.
-    const db = new DatabaseSync(storePath())
-    try {
-      db.prepare("UPDATE items SET state = 'in-progress', rank = NULL WHERE project = ? AND number = 3").run('me/loft')
-    } finally {
-      db.close()
-    }
-    await press('queued-3', 'top')
-    assert.deepEqual(order(), [4, 2, 1])
-    assert.deepEqual(keys(), ['queued-4', 'waiting-2', 'queued-1'])
-    // A drop the store refuses changes nothing in it either.
-    const later = new DatabaseSync(storePath())
-    try {
-      later.prepare("UPDATE items SET state = 'in-progress', rank = NULL WHERE project = ? AND number = 1")
-        .run('me/loft')
-    } finally {
-      later.close()
-    }
-    assert.equal(await drop('queued-1', 1), 202)
-    await settled()
-    assert.deepEqual(order(), [4, 2])
-    assert.deepEqual(keys(), ['queued-4', 'waiting-2'])
-  } finally {
-    host.run = real
-    desks.delete('loft')
     rmSync(main, { recursive: true, force: true })
   }
 })
@@ -822,6 +716,132 @@ test('the header\'s usage limit saves through lib/usage.py, as agent-desk usage-
     } else {
       process.env.CLAUDE_CONFIG_DIR = signIn
     }
+  }
+})
+
+test('the Runners sidebar\'s steppers set a project\'s agent and gpu slots through lib/hold.py, as agent-desk slots '
+  + 'does, and Reset drops the override', async () => {
+  const main = mkdtempSync(join(tmpdir(), 'agent-desk-shed-'))
+  writeFileSync(join(main, '.agent-desk.json'), JSON.stringify({ title: 'Shed', slots: { agent: 2 } }))
+  mkdirSync(join(TEST_HOME, 'config', 'agent-desk'), { recursive: true })
+  writeFileSync(join(TEST_HOME, 'config', 'agent-desk', 'projects'), `me/shed ${main}\n`)
+  const desk = { id: 'shed', repo: 'me/shed', owner: 'me', title: 'Shed', main, chores: [], agentSlots: 2, board: null,
+    at: 0, refreshing: false, starting: new Map(), labels: {}, models: {}, chorePrs: {}, schedulePr: null,
+    modelsFor: '', known: null, refreshes: 0, commands: 0 } as Desk
+  desks.set('shed', desk)
+  const hold = join(TEST_HOME, 'state', 'agent-desk', 'hold.json')
+  const overrides = () => JSON.parse(readFileSync(hold, 'utf8')).slots
+  try {
+    const lowered = await postTo('/api/slots', { desk: 'shed', agent: 0 })
+    const unset = { count: null, config: null, override: false }
+    assert.deepEqual([lowered.status, lowered.data],
+      [200, { agent: { count: 0, config: 2, override: true }, gpu: unset }])
+    assert.deepEqual(overrides(), { 'me/shed': { agent: 0 } })
+    // Back at the config's count, the project follows its config again.
+    const same = await postTo('/api/slots', { desk: 'shed', agent: 2 })
+    assert.deepEqual(same.data.agent, { count: 2, config: 2, override: false })
+    assert.equal(overrides(), undefined)
+    await postTo('/api/slots', { desk: 'shed', agent: 5 })
+    const reset = await postTo('/api/slots', { desk: 'shed', reset: true })
+    assert.deepEqual([reset.status, reset.data.agent], [200, { count: 2, config: 2, override: false }])
+    assert.equal(overrides(), undefined)
+    // A gpu count stays at or under the agent count, and its Reset leaves the agent override alone.
+    await postTo('/api/slots', { desk: 'shed', agent: 1 })
+    const gpu = await postTo('/api/slots', { desk: 'shed', gpu: 0 })
+    assert.deepEqual([gpu.status, gpu.data.gpu], [200, { count: 0, config: null, override: true }])
+    assert.deepEqual(overrides(), { 'me/shed': { agent: 1, gpu: 0 } })
+    const over = await postTo('/api/slots', { desk: 'shed', gpu: 2 })
+    assert.deepEqual([over.status, over.data.error], [400, 'gpu slots are a whole number from 0 to 1'])
+    const dropped = await postTo('/api/slots', { desk: 'shed', reset: 'gpu' })
+    assert.deepEqual([dropped.status, dropped.data.gpu], [200, unset])
+    assert.deepEqual(overrides(), { 'me/shed': { agent: 1 } })
+    await postTo('/api/slots', { desk: 'shed', reset: 'agent' })
+    assert.equal(overrides(), undefined)
+    for (const bad of [{ agent: -1 }, { agent: 1.5 }, { agent: '3' }, { agent: 21 }, { reset: 'yes' }, {}]) {
+      const refused = await postTo('/api/slots', { desk: 'shed', ...bad })
+      assert.deepEqual([refused.status, refused.data.error], [400, 'agent slots are a whole number from 0 to 20'],
+        JSON.stringify(bad))
+    }
+    assert.equal((await postTo('/api/slots', { desk: 'attic', agent: 1 })).status, 404)
+    const crossed = await postTo('/api/slots', { desk: 'shed', agent: 1 }, { ...JSON_POST,
+      origin: 'http://evil.example' })
+    assert.notEqual(crossed.status, 200)
+    assert.equal(overrides(), undefined, 'a refused change sets nothing')
+  } finally {
+    desks.delete('shed')
+    rmSync(join(TEST_HOME, 'config', 'agent-desk', 'projects'), { force: true })
+    rmSync(main, { recursive: true, force: true })
+  }
+})
+
+test('the issue runner route persists a valid choice for just one project and clears it back to config', async () => {
+  const desk: Desk = { id: 'shed', repo: 'me/shed', owner: 'me', title: 'Shed', main: '', chores: [],
+    issueRunner: 'codex', board: null, at: 0, refreshing: false, starting: new Map(), labels: {}, models: {},
+    chorePrs: {}, schedulePr: null, modelsFor: '', known: null, refreshes: 0, commands: 0 }
+  desks.set('shed', desk)
+  const path = join(TEST_HOME, 'state', 'agent-desk', 'hold.json')
+  const overrides = () => JSON.parse(readFileSync(path, 'utf8')).issueRunners
+  try {
+    assert.equal((await postTo('/api/issue-runner', { desk: 'attic', runner: 'claude' })).status, 404)
+    assert.equal((await postTo('/api/issue-runner', { desk: 'shed', runner: null })).status, 400)
+    assert.equal((await postTo('/api/issue-runner', { desk: 'shed', runner: 'claude' },
+      { ...JSON_POST, origin: 'http://evil.example' })).status, 403)
+    assert.equal((await postTo('/api/issue-runner', { desk: 'shed', runner: 'local' })).status, 200)
+    assert.deepEqual(overrides(), { 'me/shed': 'local' })
+    assert.deepEqual(issueRunnerOf('me/shed', 'codex'), { config: 'codex', override: 'local', effective: 'local' })
+    assert.deepEqual(issueRunnerOf('me/attic', 'codex'), { config: 'codex', override: null, effective: 'codex' })
+
+    assert.equal((await postTo('/api/issue-runner', { desk: 'shed', runner: 'default' })).status, 200)
+    assert.equal(overrides(), undefined)
+    assert.equal(issueRunnerOf('me/shed', 'codex').effective, 'codex')
+  } finally {
+    desks.delete('shed')
+  }
+})
+
+test('All applies and clears runner overrides for served projects', async () => {
+  const main = mkdtempSync(join(tmpdir(), 'agent-desk-runners-'))
+  const desksForTest = ['shed', 'attic'].map((id, index): Desk => ({
+    id, repo: `me/${id}`, owner: 'me', title: id, main, chores: [], issueRunner: index === 0 ? 'codex' : 'claude',
+    board: null, at: 0, refreshing: false, starting: new Map(), labels: {}, models: {}, chorePrs: {},
+    schedulePr: null, modelsFor: '', known: null, refreshes: 0, commands: 0,
+  }))
+  for (const desk of desksForTest) {
+    desks.set(desk.id, desk)
+  }
+  const folder = join(TEST_HOME, 'state', 'agent-desk')
+  const path = join(folder, 'hold.json')
+  const before = existsSync(path) ? readFileSync(path, 'utf8') : null
+  const saved = { ...JSON.parse(before ?? '{}'), state: 'running', picked: [], picked_runs: [],
+    account: 'api', apiBudget: { on: true, dollars: 200 },
+    issueRunners: { 'me/other': 'claude', 'me/shed': 'claude' } }
+  mkdirSync(folder, { recursive: true })
+  writeFileSync(path, JSON.stringify(saved))
+  const state = () => JSON.parse(readFileSync(path, 'utf8'))
+  try {
+    assert.equal((await postTo('/api/issue-runner', { runner: 'codex' })).status, 404)
+    assert.equal((await postTo('/api/issue-runner', { all: true, runner: 'mixed' })).status, 400)
+    assert.deepEqual(state(), saved)
+    assert.equal((await postTo('/api/issue-runner', { all: true, runner: 'codex' })).status, 200)
+    assert.deepEqual(state(), { ...saved, issueRunners: { 'me/other': 'claude', 'me/shed': 'codex',
+      'me/attic': 'codex' } })
+    assert.equal((await postTo('/api/issue-runner', { all: true, runner: 'local' })).status, 200)
+    assert.deepEqual(state(), { ...saved, issueRunners: { 'me/other': 'claude', 'me/shed': 'local',
+      'me/attic': 'local' } })
+    assert.equal((await postTo('/api/issue-runner', { all: true, runner: 'default' })).status, 200)
+    assert.deepEqual(state(), { ...saved, issueRunners: { 'me/other': 'claude' } })
+    assert.equal(issueRunnerOf('me/shed', 'codex').effective, 'codex')
+    assert.equal(issueRunnerOf('me/attic', 'claude').effective, 'claude')
+  } finally {
+    if (before === null) {
+      rmSync(path, { force: true })
+    } else {
+      writeFileSync(path, before)
+    }
+    for (const desk of desksForTest) {
+      desks.delete(desk.id)
+    }
+    rmSync(main, { recursive: true, force: true })
   }
 })
 

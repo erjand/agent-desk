@@ -7,12 +7,13 @@
 
 A check makes a detached scratch worktree of the head under ~/.cache/agent-desk/checks/, merges its base into it, copies
 the config's `worktree.seeds` from the main checkout and runs its `worktree.setup` there, then runs the config's `test`
-command, such as `just test`. The base is the one base_of names: the base of the branch's open review, the base of the
-merge-queue batch that made a merge-queue/ branch, or else main. Every step's output goes to the check's log under
-~/.local/state/agent-desk/checks/. A merge conflict ends the check as failed and renamed `merge`, without running the
-tests, and a setup that fails ends it as failed and renamed `setup`. A first attempt that fails queues a second of the
-same head, so a flaky test counts as failed only when it fails twice; a conflict gets no second attempt, since it would
-conflict again.
+command, such as `just test`, and runs its `worktree.teardown` before it removes the worktree. The base is the one
+base_of names: the base of the branch's open review, the base of the merge-queue batch that made a merge-queue/ branch,
+or else main. It merges the base's newest commit and records it on the check, except that a re-check, which the
+dispatcher queues when a ready review's base moves, merges the commit of the base it names. Every step's output goes to the check's log under ~/.local/state/agent-desk/checks/. A merge conflict ends
+the check as failed and renamed `merge`, without running the tests, and a setup that fails ends it as failed and renamed
+`setup`. A first attempt that fails queues a second of the same head, so a flaky test counts as failed only when it
+fails twice; a conflict gets no second attempt, since it would conflict again.
 
 The helpers the dispatcher uses to watch the branches sit here too: read_refs lists a checkout's agent/* heads and the
 heads of the reviews' bases with one `git for-each-ref`, contains says whether a head's base holds it already, which
@@ -22,6 +23,7 @@ leaves nothing to check, and merges_with tries a head against its base with `git
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +42,10 @@ BASE = "main"
 BRANCHES = "refs/heads/agent/"
 # A check's time limit in minutes when the config sets no `testMinutes`, the limit the PR test workflow had.
 TEST_MINUTES = 15
+# Copies a seed, and copies again when a build in the main checkout deletes files from it during the copy.
+SEED = Path(__file__).resolve().parent / "seed.sh"
+# How long the config's worktree.teardown may run before it is stopped, as desk_teardown_seconds in lib/common.sh.
+TEARDOWN_SECONDS = 60
 # The identity of the scratch merge commit, which never leaves the scratch worktree.
 MERGER = ("-c", "user.name=agent-desk", "-c", "user.email=agent-desk@localhost", "-c", "commit.gpgsign=false")
 
@@ -60,6 +66,11 @@ def test_command(config):
     """The project's `test` command, or "" when it has none, which turns its checks off."""
     value = config.get("test")
     return value.strip() if isinstance(value, str) else ""
+
+
+def rechecks_on(config):
+    """Whether the project's `testOnBaseMove` asks for a re-check of each ready review whose base moved."""
+    return config.get("testOnBaseMove") is True
 
 
 def test_minutes(config):
@@ -130,8 +141,40 @@ def contains(checkout, head, base=BASE):
     return git(checkout, "merge-base", "--is-ancestor", head, base_ref(checkout, base)).returncode == 0
 
 
-def remove_worktree(checkout, work):
-    """Removes a scratch worktree and git's record of it, whatever state the check left it in."""
+def teardown(checkout, work, out):
+    """
+    Runs the main checkout's `worktree.teardown` in a check's worktree before its removal, with its output in `out`, so
+    resources the setup made outside the worktree go with it. One that fails or runs past TEARDOWN_SECONDS says so in
+    `out` and blocks nothing; the timeout ends every process the teardown started.
+    """
+    command = lookup(read_config(checkout), "worktree.teardown")
+    if not isinstance(command, str) or not command.strip() or not Path(work).is_dir():
+        return
+    out.write(f"\n== Tear down: {command}\n")
+    out.flush()
+    try:
+        run = subprocess.Popen(["bash", "-c", command], cwd=work, stdout=out, stderr=subprocess.STDOUT,
+                               stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError as error:
+        out.write(f"The worktree teardown didn't start: {error}\n")
+        return
+    try:
+        status = run.wait(timeout=TEARDOWN_SECONDS)
+    except subprocess.TimeoutExpired:
+        os.killpg(run.pid, signal.SIGKILL)
+        run.wait()
+        out.write(f"The worktree teardown ran past {TEARDOWN_SECONDS}s and was stopped.\n")
+        return
+    if status:
+        out.write(f"The worktree teardown failed with status {status}.\n")
+
+
+def remove_worktree(checkout, work, out=None):
+    """
+    Removes a scratch worktree and git's record of it, whatever state the check left it in, after the config's
+    `worktree.teardown`, whose output goes to `out`, or else to standard output.
+    """
+    teardown(checkout, work, out or sys.stdout)
     git(checkout, "worktree", "remove", "--force", str(work))
     if Path(work).exists():
         shutil.rmtree(work, ignore_errors=True)
@@ -145,35 +188,43 @@ def step(log, title, args, cwd):
     return subprocess.run(args, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL).returncode == 0
 
 
-def run_check(row, checkout, config, log, base=BASE):
+def base_commit(checkout, base):
+    """The commit `base` names in a checkout, from its local branch or else origin's; None when it has neither."""
+    done = git(checkout, "rev-parse", "--quiet", "--verify", f"{base_ref(checkout, base)}^{{commit}}")
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def run_check(row, checkout, config, log, base=BASE, base_sha=None):
     """
     Tests a check's head merged with `base` in a scratch worktree, writing each step to `log`, and returns the check's
-    status and name: passed or failed `test`, or failed `merge` or `setup`.
+    status and name: passed or failed `test`, or failed `merge` or `setup`. It merges commit `base_sha` of the base
+    when given, and else the base's newest commit.
     """
     checkout, work = Path(checkout), work_path(row["project"], row["id"])
     head, test = row["head_sha"], test_command(config)
-    log.write(f"Check {row['id']} of {row['branch']} at {head} merged with {base}, attempt {row['attempt']}.\n")
+    at = f" at {base_sha}" if base_sha else ""
+    log.write(f"Check {row['id']} of {row['branch']} at {head} merged with {base}{at}, attempt {row['attempt']}"
+              f"{', a re-check after the base moved' if row.get('recheck') else ''}.\n")
     work.parent.mkdir(parents=True, exist_ok=True)
-    remove_worktree(checkout, work)
+    remove_worktree(checkout, work, log)
     try:
         if not step(log, f"Make a scratch worktree at {head[:12]}",
                     ["git", "-C", str(checkout), "worktree", "add", "--detach", str(work), head], checkout):
             return "failed", "setup"
-        merge = ["git", *MERGER, "merge", "--no-edit", "--no-verify", base_ref(checkout, base)]
+        merge = ["git", *MERGER, "merge", "--no-edit", "--no-verify", base_sha or base_ref(checkout, base)]
         if not step(log, f"Merge {base}", merge, work):
             return "failed", "merge"
         for seed in lookup(config, "worktree.seeds") or []:
-            if (checkout / seed).exists():
-                (work / seed).parent.mkdir(parents=True, exist_ok=True)
-                if not step(log, f"Copy {seed}", ["cp", "-a", str(checkout / seed), str(work / seed)], work):
-                    return "failed", "setup"
+            copy = [str(SEED), str(checkout / seed), str(work / seed)]
+            if (checkout / seed).exists() and not step(log, f"Copy {seed}", copy, work):
+                return "failed", "setup"
         setup = lookup(config, "worktree.setup")
         if isinstance(setup, str) and setup.strip() and not step(log, f"Set up: {setup}", ["bash", "-c", setup], work):
             return "failed", "setup"
         passed = step(log, f"Test: {test}", ["bash", "-c", test], work)
         return ("passed" if passed else "failed"), "test"
     finally:
-        remove_worktree(checkout, work)
+        remove_worktree(checkout, work, log)
 
 
 def run_main(desk, check, checkout):
@@ -181,8 +232,14 @@ def run_main(desk, check, checkout):
     path = log_path(row["project"], check)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as log:
-        base = base_of(desk, row["project"], row["branch"])
-        status, name = run_check(row, checkout, read_config(checkout), log, base)
+        if row.get("recheck") and row.get("base_sha"):
+            base, base_sha = row["base"] or BASE, row["base_sha"]
+        else:
+            base = base_of(desk, row["project"], row["branch"])
+            base_sha = base_commit(checkout, base)
+            if base_sha:
+                desk.check_merges(check, base, base_sha)
+        status, name = run_check(row, checkout, read_config(checkout), log, base, base_sha)
         log.write(f"\nThe check {status}.\n")
     # A merge conflict would conflict again, so only a failed setup or test gets a second attempt.
     desk.check_ended(check, status, name, rerun=status == "failed" and name != "merge")
@@ -206,7 +263,11 @@ def stopped(desk, check, checkout, environ):
             else:
                 desk.check_ended(check, "failed", rerun=True)
     finally:
-        remove_worktree(checkout, work_path(desk.check(check)["project"], check))
+        project = desk.check(check)["project"]
+        path = log_path(project, check)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as log:
+            remove_worktree(checkout, work_path(project, check), log)
 
 
 def main(argv):

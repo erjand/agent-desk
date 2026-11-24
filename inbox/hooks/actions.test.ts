@@ -1,9 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 
 import { START_AGENT, askToFix, cancelRequest, checksPassed, closeIssue, closeReview, fixBody, labelBacklog,
-  labelReady, markDesigned, markReady, moveBacklogToOpen, moveIdeaToOpen, pauseIssue, restartIssue, retryRun,
-  startChore, unblockIssue, unpauseIssue, unpickFailure, unpickIssue, unqueueFailure, unqueueIssue }
-  from './actions.ts'
+  labelReady, listOrderFailure, listSortFailure, markDesigned, markReady, moveBacklogToOpen, moveIdeaToOpen,
+  moveInListOrder, pauseIssue, restartIssue, retryRun, sortListOrder, startChore, unblockIssue, unpauseIssue,
+  unpickFailure, unpickIssue, unqueueFailure, unqueueIssue } from './actions.ts'
 import type { Host } from './board.ts'
 import { DESK, DISPATCH, FAILURES, HOLD } from './run.ts'
 
@@ -189,6 +189,21 @@ test('Move to Open on a queued issue asks the dispatcher to unqueue it, and says
   const refusing = { run: async () => null } as unknown as Host
   expect(await unqueueIssue(refusing, {}, 12)).toBe(false)
   expect(unqueueFailure(12)).toBe("Couldn't move #12 to Open: its run started.")
+})
+
+test('a move in the list order runs list order beside the issue it passes, and a sort resets the section\'s issues, '
+  + 'each saying when the store refuses', async () => {
+  const { host, desk } = recording()
+  expect(await moveInListOrder(host, {}, 12, { before: 9 })).toBe(true)
+  expect(await moveInListOrder(host, {}, 12, { after: 30 })).toBe(true)
+  expect(await sortListOrder(host, {}, [12, 40, 9])).toBe(true)
+  expect(desk()).toEqual([['list', 'order', '12', '--before', '9'], ['list', 'order', '12', '--after', '30'],
+    ['list', 'order', '--reset', '12', '40', '9']])
+  const refusing = recording(() => null)
+  expect(await moveInListOrder(refusing.host, {}, 12, { before: 9 })).toBe(false)
+  expect(await sortListOrder(refusing.host, {}, [12, 9])).toBe(false)
+  expect(listOrderFailure(12)).toBe("Couldn't move #12 in the list order: it may have closed or been queued.")
+  expect(listSortFailure('Backlog')).toBe("Couldn't sort Backlog; the list shows the store's order.")
 })
 
 test('Unpick drops a queued issue\'s Manual pick through lib/hold.py, which refuses an issue its run claimed',

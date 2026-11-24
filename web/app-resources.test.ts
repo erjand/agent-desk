@@ -88,7 +88,7 @@ const reading = {
       repo: null, label: '', number: null, pr: false, memory: 40 * 1024 ** 2, swap: null, cpu: 11_520, claim: null },
   ],
   waiting: [{ desk: 'fence', repo: 'me/fence', kind: 'fix', label: 'PR #30', number: 30, pr: true,
-    reason: 'memory: 5.3 GB free of 11 GB needed' }],
+    reason: 'memory: 5.3 GB free of 3 GB + 8 GB reserve' }],
   apps: [{ name: 'firefox', processes: 3, memory: 3.5 * GB, swap: 0.6 * GB, cpu: 330 },
     { name: 'zed-editor', processes: 1, memory: 0.25 * GB, swap: 2 * GB, cpu: 4000 }],
   tmp: 5.1 * GB,
@@ -155,7 +155,7 @@ test('the view draws each group, with a run linked to its card when the board li
     'fix me/gone PR #40 900 MB 3.0 GB 0 MB 45s',
     'dispatch 40 MB – – 3h 12m',
     'Kind Works on Waits for',
-    'fix Fence PR #30 memory: 5.3 GB free of 11 GB needed',
+    'fix Fence PR #30 memory: 5.3 GB free of 3 GB + 8 GB reserve',
     'App Memory Swap CPU',
     'firefox × 3 3.5 GB 614 MB 5m 30s',
     'zed-editor 256 MB 2.0 GB 1h 06m',
@@ -226,7 +226,8 @@ test('the audit message runs the report skill on the memory free, the reserve, t
   assert.match(first ?? '', /^\/agent-desk:resource-report The Resources view read at .+: 12\.5 GB of 64\.0 GB memory /)
   assert.ok(first?.endsWith('memory free, 8.0 GB kept for me by the dispatcher, 4.5 GB free for runs above it, '
     + '9.6 GB claimed by running runs, 2.9 GB free after claims, 4.0 GB of 32.0 GB swap free.'), first)
-  assert.deepEqual(rest, ['Waiting for memory:', '- fix PR #30 in me/fence: memory: 5.3 GB free of 11 GB needed'])
+  assert.deepEqual(rest,
+    ['Waiting for memory:', '- fix PR #30 in me/fence: memory: 5.3 GB free of 3 GB + 8 GB reserve'])
   const quiet = auditMessage({ ...reading, waiting: [],
     memory: { ...reading.memory, reserve: null, claimed: null, swapTotal: 0 } })
   assert.ok(quiet.includes("memory free, the dispatcher's reserve unread, no swap.\n"), quiet)

@@ -9,19 +9,17 @@ export const STAGES = [
   ['backlog', 'Backlog', 'backlog'], ['idea', 'Ideas', 'ideas'],
 ]
 export const STAGE_NAMES = Object.fromEntries(STAGES.map(([stage, title]) => [stage, title]))
-// The groups that sort by issue number, highest first until the person flips one; the others keep their own order.
-export const SORTABLE = new Set(['open', 'blocked', 'design', 'backlog', 'idea'])
 export const LABELS = { merge: 'Merge', ready: 'Agent-Ready', start: 'Start', resume: 'Take Over',
   restart: 'Continue', retry: 'Retry', dismiss: 'Dismiss', fix: 'Fix', close: 'Close', designed: 'Designed',
   'to-open': 'Move to Open', 'to-backlog': 'Move to Backlog', unblock: 'Unblock', undraft: 'Ready',
-  cancel: 'Cancel Run', up: 'Move Up', down: 'Move Down', top: 'Move to Top', unpick: 'Unpick', pause: 'Pause',
-  unpause: 'Resume' }
-// The key that presses each action on the selected card. The start order's moves take brackets, `{` being Shift+`[`,
-// Unpick, which takes back a Start, takes `z`, as undo does, Pause takes `w` for wait, and Resume after it takes `q`
-// for queue.
+  cancel: 'Cancel Run', up: 'Move Up', down: 'Move Down', top: 'Move to Top', bottom: 'Move to Bottom',
+  unpick: 'Unpick', pause: 'Pause', unpause: 'Resume', 'stop-command': 'Stop Command' }
+// The key that presses each action on the selected card. The start order's moves take brackets, `{` being Shift+`[`
+// and `}` Shift+`]`. Unpick, which takes back a Start, takes `z`, as undo does, Pause takes `w` for wait, Resume
+// after it takes `q` for queue, and Stop Command, with every letter taken, takes `!`.
 export const KEYS = { merge: 'm', fix: 'f', ready: 'a', start: 's', resume: 'r', restart: 'e', retry: 't', dismiss: 'd',
-  close: 'c', designed: 'g', 'to-open': 'n', 'to-backlog': 'b', unblock: 'u', undraft: 'p', cancel: 'x', up: '[',
-  down: ']', top: '{', unpick: 'z', pause: 'w', unpause: 'q' }
+  close: 'c', designed: 'v', 'to-open': 'n', 'to-backlog': 'b', unblock: 'u', undraft: 'p', cancel: 'x', up: '[',
+  down: ']', top: '{', bottom: '}', unpick: 'z', pause: 'w', unpause: 'q', 'stop-command': '!' }
 // The actions that move an issue or PR forward, drawn in the accent color. Take Over, which copies a command, leaves
 // Continue the stopped card's main button.
 export const FORWARD = new Set(['merge', 'ready', 'start', 'restart', 'retry', 'fix', 'undraft', 'unpause'])
@@ -30,9 +28,12 @@ export const FORWARD = new Set(['merge', 'ready', 'start', 'restart', 'retry', '
 export function actionLabel(card, action) {
   return action === 'retry' && card.continues ? LABELS.restart : LABELS[action]
 }
-// The actions that ask to confirm before they act.
-export const CONFIRMS = new Set(['merge', 'fix', 'dismiss', 'ready', 'retry', 'restart', 'close', 'unblock',
-  'undraft', 'to-open', 'pause'])
+// The actions that ask to confirm before they act: every one that changes an issue, a run, or a review.
+export const CONFIRMS = new Set(['merge', 'fix', 'dismiss', 'ready', 'start', 'unpick', 'retry', 'restart', 'close',
+  'designed', 'to-open', 'to-backlog', 'unblock', 'undraft', 'cancel', 'pause', 'unpause', 'stop-command'])
+// The actions that act at once: the start order's moves, and Take Over, which only copies a command. Every action in
+// LABELS sits in this list or in CONFIRMS, which a test checks.
+export const INSTANT = new Set(['resume', 'up', 'down', 'top', 'bottom'])
 // How many project hues app.css defines, as --project-0 and on.
 export const PROJECT_HUES = 6
 // How long a preview stays fresh before showing its card again reads it anew, as the server keeps it.
@@ -80,6 +81,48 @@ export function startCollapsed(stored, known) {
   return new Set([...(stored ?? FOLDED), ...(stored ? FOLDED.filter(stage => !known.includes(stage)) : [])])
 }
 
+/**
+ * Each tab's folded groups, by the tab's id, `all` or a project's, from `stored`, the object the page kept them in,
+ * with every group in FOLDED new since the page last ran, as startCollapsed adds it.
+ */
+export function startFolds(stored, known) {
+  const tabs = stored !== null && typeof stored === 'object' && !Array.isArray(stored) ? Object.entries(stored) : []
+  return new Map(tabs.filter(([, stages]) => Array.isArray(stages))
+    .map(([tab, stages]) => [tab, startCollapsed(stages, known)]))
+}
+
+// The groups the page knew when it last ran.
+const KNOWN = remembered('inbox-groups', EARLIER_STAGES)
+// The groups a tab starts with folded until the person folds or opens one on it: those every tab shared before each
+// kept its own, or FOLDED in a browser that kept none.
+const FIRST_FOLDS = startCollapsed(remembered('inbox-collapsed', null), KNOWN)
+
+// Every group the list folds, as ui.collapsed names them: the stages and the Chores box.
+export const GROUPS = [...STAGES.map(([stage]) => stage), 'chores']
+
+/** Keeps each tab's folded groups for the next visit. */
+export function rememberFolds() {
+  remember('inbox-folds', Object.fromEntries([...ui.folds].map(([tab, stages]) => [tab, [...stages]])))
+}
+
+/**
+ * Folds every group in the shown tab's list when `fold`, or opens every one, and remembers the result as a fold from
+ * a heading does. Folding names every group, those with no cards on the tab too, so a group that fills later shows
+ * folded. The other tabs keep their own folds.
+ */
+export function foldAll(fold) {
+  ui.collapsed.clear()
+  for (const stage of fold ? GROUPS : []) {
+    ui.collapsed.add(stage)
+  }
+  rememberFolds()
+}
+
+/** Whether the list starts in Detailed: only when this browser remembers choosing it, and in Compact otherwise. */
+export function startsDetailed() {
+  return remembered('inbox-detailed', false) === true
+}
+
 /** What the page shows: the server's last state, and what the person picked. */
 export const ui = {
   server: null,
@@ -87,9 +130,17 @@ export const ui = {
   storeEvent: 0,
   connected: false,
   tab: remembered('inbox-tab', 'all'),
-  collapsed: startCollapsed(remembered('inbox-collapsed', null), remembered('inbox-groups', EARLIER_STAGES)),
-  // The sortable groups the person flipped to lowest issue number first.
-  ascending: new Set(remembered('inbox-ascending', [])),
+  // Each tab's folded groups, by its id, `all` or a project's.
+  folds: startFolds(remembered('inbox-folds', null), KNOWN),
+  /** The shown tab's folded groups, which start as FIRST_FOLDS on a tab the person never folded a group on. */
+  get collapsed() {
+    if (!this.folds.has(this.tab)) {
+      this.folds.set(this.tab, new Set(FIRST_FOLDS))
+    }
+    return this.folds.get(this.tab)
+  },
+  // Whether the list draws each card's labels, run kind, and note on a second line, which app-item.js switches.
+  detailed: startsDetailed(),
   selected: remembered('inbox-selected', null),
   // An item a link showed that the list has no card for, as a card of its own with no actions, or null.
   visiting: null,
@@ -97,6 +148,8 @@ export const ui = {
   closed: remembered('inbox-closed', false),
   // The selected card's action that waits for its confirm, as { id, action }.
   confirming: null,
+  // The group whose heading's Sort waits for its confirm, by its stage, or null.
+  sortConfirm: null,
   // The issue whose Delete Issue dialog is open, as { desk, number, typed, status, error }, which app-delete.js reads.
   deleting: null,
   help: false,
@@ -172,8 +225,8 @@ export const ui = {
   // The Dependencies tab's open rows, by `<desk>:<numbers from the top row down>`, and whether it hides closed issues.
   depsOpen: new Set(),
   depsHideClosed: remembered('deps-hide-closed', false),
-  // The sidebar at the right: null for none, 'runners', 'history', or 'chat'. An older page's choice to show History
-  // carries over.
+  // The sidebar at the right: null for none, 'runners', 'history', 'chat', or 'github'. An older page's choice to show
+  // History carries over.
   side: remembered('side-shown', remembered('history-shown', false) === true ? 'history' : null),
   // The History column: its span, its sort, its search, its page, and its last read of the server, by the projects and
   // span it asked for.
@@ -191,12 +244,18 @@ export const ui = {
   // log stays at its newest line; and whether the box takes the cursor at the next draw.
   chat: { items: [], session: null, running: false, draft: '', sending: false, confirmClear: false, stick: true,
     focus: false },
-  // The header's weekly usage limit: whether its popover shows, the percentage typed and not yet saved, or null, and
-  // why the popover refused it, or null.
-  usage: { open: false, draft: null, error: null },
+  // The header's account control, as app-usage.js keeps it: whether its popover shows, the percentage and the budget
+  // typed and not yet saved, or null, why the popover refused each, or null, the switch or the key's clear waiting for
+  // its confirm, and the key field's state.
+  usage: { open: false, draft: null, error: null, budgetDraft: null, budgetError: null, confirm: null, keyOpen: false,
+    keyError: null },
+  // The projects whose agent slot change from the Runners sidebar's stepper waits for the server, by id.
+  slotsSaving: new Set(),
+  issueRunnerSaving: false,
 }
 // The page remembers the groups it knows, so a group added later starts collapsed once, as FOLDED says.
-remember('inbox-collapsed', [...ui.collapsed])
+remember('inbox-collapsed', [...FIRST_FOLDS])
+rememberFolds()
 remember('inbox-groups', STAGES.map(([stage]) => stage))
 
 // What draw() runs: app.js's own draw, once it hands it over.
@@ -256,19 +315,8 @@ export function ready(desk) {
 }
 
 /**
- * A group's cards by issue number, highest first or, when ascending, lowest first. Each project's cards stay together
- * in the order the projects first appear, as All lists them, and sort within it.
- */
-export function byNumber(cards, ascending) {
-  const desks = [...new Set(cards.map(card => card.desk))]
-  const sign = ascending ? 1 : -1
-  return [...cards].sort((a, b) => desks.indexOf(a.desk) - desks.indexOf(b.desk)
-    || sign * ((a.number ?? 0) - (b.number ?? 0)))
-}
-
-/**
- * The GitHub group's rows for the projects shown, each as `{ desk, row }`: every project's main and agent branch rows,
- * then the backup's row once, with no project, since the backup covers every project and each board repeats it.
+ * The GitHub sidebar's rows for the projects shown, each as `{ desk, row }`: every project's main and agent branch
+ * rows, then the backup's row once, with no project, since the backup covers every project and each board repeats it.
  */
 export function githubRows(desks) {
   const rows = desks.flatMap(desk => (desk.board?.github ?? []).filter(row => row.key !== 'github-backup')
@@ -294,8 +342,8 @@ export function pickTab(id) {
 }
 
 /**
- * Shows sidebar `side`, `'runners'`, `'history'`, or `'chat'`, in place of the others, or hides it, and remembers the
- * choice. The Chat's box takes the cursor as it opens.
+ * Shows sidebar `side`, `'runners'`, `'history'`, `'chat'`, or `'github'`, in place of the others, or hides it, and
+ * remembers the choice. The Chat's box takes the cursor as it opens.
  */
 export function toggleSide(side) {
   ui.side = ui.side === side ? null : side
@@ -303,9 +351,12 @@ export function toggleSide(side) {
   remember('side-shown', ui.side)
 }
 
-/** Whether a board row works in a slot of `kind`: a benchmark slot's rows are the agents' on issues labelled so. */
-function worksIn(kind, row) {
-  return kind === 'benchmark' ? row.runner === 'agent' && (row.labels ?? []).includes('benchmark') : row.runner === kind
+/**
+ * Whether a board row works in a slot of `kind`: a benchmark or gpu slot's rows are the agents' on issues labelled so.
+ */
+export function worksIn(kind, row) {
+  return kind === 'benchmark' || kind === 'gpu' ? row.runner === 'agent' && (row.labels ?? []).includes(kind)
+    : row.runner === kind
 }
 
 /**
@@ -324,14 +375,23 @@ export function slotRows(slots, rows) {
 /**
  * The Runners sidebar's projects for the tab shown, in the page's project order, each whose board read: its slot
  * counts, each with its tone, `full` when every slot of the kind works, `busy` when some do, and `free` when none do;
- * a row per slot; and its local sessions, which take no slot.
+ * a row per slot; its local sessions, which take no slot; its agent slots for the stepper, as the server reads them,
+ * or null from a server that sends none; and its gpu slots the same way, with `busy`, how many of its agent runs work
+ * issues labelled `gpu`. The board leaves out a kind with no slots, so a project set to 0 agent slots gets its agent
+ * count back here, with the agents still working, and keeps its stepper.
  */
 export function runnerProjects() {
   return shownDesks().filter(desk => desk.board && desk.board.error === null).map(desk => {
     const rows = [...desk.board.runners, ...(desk.board.checks ?? [])]
     const tone = one => (one.busy >= one.total ? 'full' : one.busy > 0 ? 'busy' : 'free')
-    const slots = (desk.board.slots ?? []).map(one => ({ ...one, tone: tone(one) }))
-    return { desk: desk.id, slots, rows: slotRows(slots, rows), locals: rows.filter(row => row.runner === 'local') }
+    const counted = desk.board.slots ?? []
+    const agents = desk.agentSlots ?? null
+    const none = agents && !counted.some(one => one.kind === 'agent')
+      ? [{ kind: 'agent', busy: rows.filter(row => worksIn('agent', row)).length, total: 0 }] : []
+    const slots = [...none, ...counted].map(one => ({ ...one, tone: tone(one) }))
+    const gpu = desk.gpuSlots ? { ...desk.gpuSlots, busy: rows.filter(row => worksIn('gpu', row)).length } : null
+    return { desk: desk.id, slots, rows: slotRows(slots, rows), locals: rows.filter(row => row.runner === 'local'),
+      agents, gpu }
   })
 }
 

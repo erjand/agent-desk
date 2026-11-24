@@ -5,6 +5,7 @@ whose methods use the store's `db`, `write`, `_event`, `_now`, and `_project`.
 """
 
 import json
+import os
 import time
 
 from store_schema import RUN_ENDINGS, WAIT_GATES, StoreError
@@ -23,6 +24,16 @@ def labelled(kind, target, env):
 
 class RunsMixin:
     """The methods of `Store` that read and write `runs`."""
+
+    def author_run(self, project):
+        """The current run when it belongs to the project and can write posts."""
+        run = os.environ.get("AGENT_DESK_RUN", "")
+        if not run.isascii() or not run.isdecimal() or len(run) > 18:
+            return None
+        row = self.db.execute("SELECT id FROM runs WHERE id = ? AND project = ? AND status = 'running'"
+                              " AND kind IN ('agent', 'chore', 'fix')",
+                              (int(run), project)).fetchone()
+        return row["id"] if row else None
 
     # Reads.
 
@@ -53,9 +64,9 @@ class RunsMixin:
         The project's runs as the board reads them, oldest first: those that wait for a slot or work in a unit, then
         those that failed, timed out, or were lost within FAILED_SECONDS and that no later run of their target answered.
         Each says whether it is a fresh start, as `labelled` reads it, which Manual holds until Start, one that waits
-        names the gate that holds it and why, as `run_waits` recorded them, one that works has the `limit` in minutes its
-        unit runs under, as `run_started` recorded it, and one whose GPU calls ended has their totals, as
-        `gpu_released` sums them.
+        names the gate that holds it and why, as `run_waits` recorded them, one that started names the `account` it
+        billed, one that works has the `limit` in minutes its unit runs under, as `run_started` recorded it, and one
+        whose GPU calls ended has their totals, as `gpu_released` sums them.
         """
         since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((now or time.time()) - FAILED_SECONDS))
         rows = [row for row in self.runs(("requested", "running")) if row["project"] == project]
@@ -70,6 +81,10 @@ class RunsMixin:
             # A read-only store on a database older than the wait columns has none.
             if row["status"] == "requested" and row.get("wait_gate"):
                 one.update(gate=row["wait_gate"], reason=row["wait_reason"])
+            # The Claude account a run that started billed; a row from before the column, or on an older database,
+            # billed the plan.
+            if row["status"] != "requested":
+                one["account"] = row.get("account") or "subscription"
             # Minutes its GPU calls queued and held their slots, once one ended; none on an older database.
             if row.get("gpu_held") is not None:
                 one.update(gpu_queued=row["gpu_queued"], gpu_held=row["gpu_held"])
@@ -143,14 +158,15 @@ class RunsMixin:
                                    (gate, reason, run)).rowcount
         return bool(done)
 
-    def run_started(self, run, unit, minutes=None):
-        """Marks a requested run as running in `unit`, clearing why it waited, and returns False when it no longer
-        waits. Its `run-started` event records `minutes`, the time limit the dispatcher gave its unit, when given."""
+    def run_started(self, run, unit, minutes=None, account="subscription"):
+        """Marks a requested run as running in `unit`, billing `account`, clearing why it waited, and returns False when
+        it no longer waits. Its `run-started` event records `minutes`, the time limit the dispatcher gave its unit,
+        when given."""
         with self.write():
             row = self.run(run)
-            done = self.db.execute("UPDATE runs SET status = 'running', unit = ?, started_at = ?, wait_gate = NULL,"
-                                   " wait_reason = NULL WHERE id = ? AND status = 'requested'",
-                                   (unit, self._now(), run)).rowcount
+            done = self.db.execute("UPDATE runs SET status = 'running', unit = ?, started_at = ?, account = ?,"
+                                   " wait_gate = NULL, wait_reason = NULL WHERE id = ? AND status = 'requested'",
+                                   (unit, self._now(), account, run)).rowcount
             if done:
                 limit = {} if minutes is None else {"minutes": minutes}
                 self._event(row["project"], None, "run-started", run=run, unit=unit, **limit)
@@ -171,13 +187,43 @@ class RunsMixin:
                 self._event(row["project"], None, "run-ended", run=run, status=status, exit=exit_code)
         return bool(done)
 
+    def run_session(self, run, session):
+        """Records the Claude Code session a run runs, as it starts, so a run cut off before it reports a result still
+        names it."""
+        with self.write():
+            self.run(run)
+            self.db.execute("UPDATE runs SET session = ? WHERE id = ?", (session, run))
+
     def run_result(self, run, model=None, effort=None, minutes=None, turns=None, cost=None, review=None, labels=None,
-                   start=None):
-        """Records what a run's agent reported when it finished, with a `run-result` event that names the review."""
+                   start=None, session=None, reported=None):
+        """
+        Records what a run's agent reported when it finished, with a `run-result` event that names the review. With
+        `reported`, the total cost its Claude Code session reported, it keeps that total and counts the run's `cost` as
+        what the total grew by since the last earlier run of the same session that reported one, as lib/budget.py
+        counts a Chat turn: a run resumed after one that stopped early counts only its own spend, and one resumed after
+        a run cut off before it reported keeps that run's spend too. A run whose session has no earlier report, or
+        whose total shrank, counts the whole total. `session` replaces the one `run_session` recorded.
+        """
         with self.write():
             row = self.run(run)
+            session = session or row["session"]
+            if reported is not None:
+                before = session and self.db.execute(
+                    "SELECT reported FROM runs WHERE session = ? AND id < ? AND reported IS NOT NULL"
+                    " ORDER BY id DESC LIMIT 1", (session, run)).fetchone()
+                grew = bool(before) and reported >= before[0]
+                cost = round(reported - before[0] if grew else reported, 2)
             self.db.execute("UPDATE runs SET model = ?, effort = ?, minutes = ?, turns = ?, cost = ?, review = ?,"
-                            " labels = ?, start = ? WHERE id = ?",
+                            " labels = ?, start = ?, session = ?, reported = ? WHERE id = ?",
                             (model, effort, minutes, turns, cost, review,
-                             None if labels is None else json.dumps(labels), start, run))
+                             None if labels is None else json.dumps(labels), start, session, reported, run))
             self._event(row["project"], review, "run-result", run=run)
+
+    def run_posting_identity(self, run, model, provider, version):
+        """Records the launcher and model once for the posts from this run."""
+        with self.write():
+            row = self.run(run)
+            kept = self.db.execute("UPDATE runs SET posting_model = ?, posting_provider = ?, posting_version = ?"
+                                   " WHERE id = ? AND posting_model IS NULL", (model, provider, version, run))
+            if kept.rowcount:
+                self._event(row["project"], None, "run-posting-identity", run=run)

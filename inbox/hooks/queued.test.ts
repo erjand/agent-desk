@@ -21,13 +21,14 @@ test('a waiting serial issue waits on the holder of its own serial group', async
 test('an issue blocked by open issues can be queued, and waits in Queued on its blockers', async () => {
   const blockers = (...numbers: number[]) => [...numbers.map(number => ({ number, state: 'OPEN' })),
     { number: 9, state: 'CLOSED' }]
-  const issues = [issue(70), issue(80, 'open', { blockedBy: blockers(70) }),
-    issue(81, 'on-hold', { blockedBy: blockers(70) }), issue(82, 'waiting', { blockedBy: blockers(70) }),
+  const issues = [issue(70), issue(80, 'open', { blockedBy: blockers(70), listPosition: 1 }),
+    issue(81, 'on-hold', { blockedBy: blockers(70), listPosition: 2 }),
+    issue(82, 'waiting', { blockedBy: blockers(70) }),
     issue(83, 'waiting', { labels: ['serial'], blockedBy: blockers() })]
   const board = await fetchBoard(storeHost(storeOf({ issues })), { root: '/x', main: '/x' })
   expect(board.blocked.map(row => [row.key, row.note, row.actions])).toEqual([
-    ['blocked-80', 'blocked by #70', ['open', 'ready', 'unblock', 'close']],
-    ['blocked-81', 'blocked by #70', ['open', 'unpause', 'unblock', 'close']],
+    ['blocked-80', 'blocked by #70', ['open', 'ready', 'unblock', 'close', 'down', 'bottom']],
+    ['blocked-81', 'blocked by #70', ['open', 'unpause', 'unblock', 'close', 'up', 'top']],
   ])
   expect(board.queued.map(row => [row.key, row.note])).toEqual([['waiting-82', 'waiting on #70'],
     ['waiting-83', 'waiting on the serial slot']])
@@ -63,16 +64,17 @@ test('in Manual, a queued issue nobody picked waits in Queued for Start', async 
     issue(91, 'queued')], hold })), { root: '/x', main: '/x' })
   const manual = await board({ state: 'manual', picked: ['org/game#91', 'org/other#90'] })
   expect(manual.queued.map(row => [row.key, row.note, row.actions])).toEqual([
-    ['queued-90', 'waits for Start', ['open', 'start', 'to-open', 'close', 'down']],
+    ['queued-90', 'waits for Start', ['open', 'start', 'to-open', 'close', 'down', 'bottom']],
     ['queued-91', 'picked', ['open', 'unpick', 'to-open', 'close', 'up', 'top']],
   ])
   // A picked row keeps the note it reads once Unpick drops its pick; an unpicked one has none to keep.
   expect(manual.queued.map(row => [row.text, row.unpicked])).toEqual([['Issue 90  (waits for Start)', undefined],
     ['Issue 91  (picked)', 'waits for Start']])
   const auto = await board({ state: 'running', picked: [] })
-  expect(auto.queued.map(row => row.actions)).toEqual([['open', 'to-open', 'close', 'down'], ['open', 'to-open', 'close', 'up', 'top']])
+  expect(auto.queued.map(row => row.actions)).toEqual([['open', 'to-open', 'close', 'down', 'bottom'],
+    ['open', 'to-open', 'close', 'up', 'top']])
   const autoHere = await board({ state: 'manual', picked: [], projects: { 'org/game': 'running' } })
-  expect(autoHere.queued.map(row => row.actions)).toEqual([['open', 'to-open', 'close', 'down'],
+  expect(autoHere.queued.map(row => row.actions)).toEqual([['open', 'to-open', 'close', 'down', 'bottom'],
     ['open', 'to-open', 'close', 'up', 'top']])
   expect(startPicks({ state: 'running', picked: [], projects: { 'org/game': 'manual' } }, 'org/game'))
     .toEqual({ picked: new Set(), runs: new Set(), held: false })
@@ -85,16 +87,16 @@ test('on Hold, every queued issue nobody picked shows Start, and a picked one st
     issue(91, 'queued'), issue(92, 'waiting', { labels: ['serial:atlas'] })], hold })), { root: '/x', main: '/x' })
   const held = await board({ state: 'held', before: 'manual', picked: ['org/game#91', 'org/game#92'] })
   expect(held.queued.map(row => [row.key, row.note, row.actions])).toEqual([
-    ['queued-90', undefined, ['open', 'start', 'to-open', 'close', 'down']],
-    ['queued-91', 'picked; starts on Resume', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top']],
+    ['queued-90', undefined, ['open', 'start', 'to-open', 'close', 'down', 'bottom']],
+    ['queued-91', 'picked; starts on Resume', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
     ['waiting-92', 'picked; starts on Resume', ['open', 'unpick', 'to-open', 'close', 'up', 'top']],
   ])
   expect(held.queued[1]?.text).toBe('Issue 91  (picked; starts on Resume)')
   // On Hold, an issue nobody picked waits for nothing but Resume, so a queued one unpicked reads no note.
   expect(held.queued.map(row => row.unpicked)).toEqual([undefined, '', 'waiting on the serial slot'])
   const projectHeld = await board({ state: 'running', picked: [], projects: { 'org/game': 'held' } })
-  expect(projectHeld.queued.map(row => row.actions)).toEqual([['open', 'start', 'to-open', 'close', 'down'],
-    ['open', 'start', 'to-open', 'close', 'up', 'down', 'top'], ['open', 'start', 'to-open', 'close', 'up', 'top']])
+  expect(projectHeld.queued.map(row => row.actions)).toEqual([['open', 'start', 'to-open', 'close', 'down', 'bottom'],
+    ['open', 'start', 'to-open', 'close', 'up', 'down', 'top', 'bottom'], ['open', 'start', 'to-open', 'close', 'up', 'top']])
   expect(startPicks({ state: 'held', picked: ['org/game#91'] }, 'org/game'))
     .toEqual({ picked: new Set(['org/game#91']), runs: new Set(), held: true })
   expect(startPicks({ state: 'manual', picked: [], pickedRuns: [4, 'x', 9] })?.runs).toEqual(new Set([4, 9]))
@@ -109,8 +111,8 @@ test('in Manual and on Hold, a picked queued or waiting issue says so first and 
   const board = async (hold: unknown) => fetchBoard(storeHost(storeOf({ issues, hold })), { root: '/x', main: '/x' })
   const manual = await board({ state: 'manual', picked })
   expect(manual.queued.map(row => [row.key, row.note, row.unpicked, row.actions])).toEqual([
-    ['queued-90', 'picked', 'waits for Start', ['open', 'unpick', 'to-open', 'close', 'down']],
-    ['waiting-91', 'picked; waiting on #70', 'waiting on #70', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top']],
+    ['queued-90', 'picked', 'waits for Start', ['open', 'unpick', 'to-open', 'close', 'down', 'bottom']],
+    ['waiting-91', 'picked; waiting on #70', 'waiting on #70', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
     ['waiting-92', 'picked; waiting on the serial slot', 'waits for Start',
       ['open', 'unpick', 'to-open', 'close', 'up', 'top']],
   ])
@@ -139,7 +141,7 @@ test('every queued or waiting issue in Queued shows Move to Open and Close, and 
     const actions = Object.fromEntries(board.queued.map(row => [row.key, row.actions]))
     expect(actions['rerun-8']).toEqual(hold.state === 'manual' ? ['open', 'start', 'cancel'] : ['open', 'cancel'])
     expect(actions['rerun-pr-31']).toEqual(hold.state === 'manual' ? ['open', 'start', 'cancel'] : ['open', 'cancel'])
-    expect(actions['queued-20']?.slice(-3)).toEqual(['to-open', 'close', 'down'])
+    expect(actions['queued-20']?.slice(-4)).toEqual(['to-open', 'close', 'down', 'bottom'])
     expect(actions['waiting-21']).toEqual(['open', 'to-open', 'close', 'up', 'top'])
   }
 })
@@ -199,21 +201,21 @@ test('in Manual, every request back to a PR, Fix, and chore waits in Queued for 
 
   const manual = await board({ state: 'manual', picked: [], pickedRuns: [] })
   expect(rows(manual)).toEqual([
-    ['queued-90', 'waits for Start', 90, undefined, ['open', 'start', 'to-open', 'close']],
     ['rerun-682', 'back to its PR; waits for Start', undefined, [603, 604], ['open', 'start', 'cancel']],
     ['rerun-pr-701', 'fixing conflicts; waits for Start', undefined, [610], ['open', 'start', 'cancel']],
+    ['queued-90', 'waits for Start', 90, undefined, ['open', 'start', 'to-open', 'close']],
     ['request-620', 'waits for Start', undefined, [620], ['start', 'cancel']],
   ])
-  expect(manual.queued[1]?.text).toBe('Issue 682  (back to its PR; waits for Start)')
-  expect(manual.queued.map(row => [row.number, row.pr])).toEqual([[90, undefined], [780, true], [701, true],
+  expect(manual.queued[0]?.text).toBe('Issue 682  (back to its PR; waits for Start)')
+  expect(manual.queued.map(row => [row.number, row.pr])).toEqual([[780, true], [701, true], [90, undefined],
     [undefined, undefined]])
 
   // Start picked #682's requests and the chore's: their rows lose Start, and the rest keep it.
   const picked = await board({ state: 'manual', picked: [], pickedRuns: [603, 604, 620] })
   expect(rows(picked)).toEqual([
-    ['queued-90', 'waits for Start', 90, undefined, ['open', 'start', 'to-open', 'close']],
     ['rerun-682', 'back to its PR', undefined, undefined, ['open', 'cancel']],
     ['rerun-pr-701', 'fixing conflicts; waits for Start', undefined, [610], ['open', 'start', 'cancel']],
+    ['queued-90', 'waits for Start', 90, undefined, ['open', 'start', 'to-open', 'close']],
     ['request-620', 'waits to start', undefined, undefined, ['cancel']],
   ])
   // A request that came after Start waits for it again, on its own.
@@ -223,7 +225,7 @@ test('in Manual, every request back to a PR, Fix, and chore waits in Queued for 
 
   // On Hold, Start picks for Resume, and a picked row says it starts then.
   const held = await board({ state: 'held', before: 'manual', picked: [], pickedRuns: [610] })
-  expect(rows(held).slice(1)).toEqual([
+  expect(rows(held).filter(row => row[0] !== 'queued-90')).toEqual([
     ['rerun-682', 'back to its PR', undefined, [603, 604], ['open', 'start', 'cancel']],
     ['rerun-pr-701', 'fixing conflicts; starts on Resume', undefined, undefined, ['open', 'cancel']],
     ['request-620', 'waits to start', undefined, [620], ['start', 'cancel']],
@@ -232,9 +234,9 @@ test('in Manual, every request back to a PR, Fix, and chore waits in Queued for 
   // In Auto, nothing waits for Start.
   const auto = await board({ state: 'running', picked: [], pickedRuns: [] })
   expect(rows(auto)).toEqual([
-    ['queued-90', undefined, undefined, undefined, ['open', 'to-open', 'close']],
     ['rerun-682', 'back to its PR', undefined, undefined, ['open', 'cancel']],
     ['rerun-pr-701', 'fixing conflicts', undefined, undefined, ['open', 'cancel']],
+    ['queued-90', undefined, undefined, undefined, ['open', 'to-open', 'close']],
     ['request-620', 'waits to start', undefined, undefined, ['cancel']],
   ])
 })
@@ -250,9 +252,9 @@ test('a waiting serial issue names the queued issue ahead of it, and in Manual o
   const manual = await board({ state: 'manual', picked: ['org/game#619'] })
   expect(manual.queued.filter(row => row.key.startsWith('waiting')).map(row => [row.key, row.note, row.actions]))
     .toEqual([
-      ['waiting-518', 'waiting on #506, which waits for Start', ['open', 'start', 'to-open', 'close', 'up', 'down', 'top']],
-      ['waiting-619', 'picked; waiting on the serial slot', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top']],
-      ['waiting-700', 'waits for Start', ['open', 'start', 'to-open', 'close', 'up', 'down', 'top']],
+      ['waiting-518', 'waiting on #506, which waits for Start', ['open', 'start', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+      ['waiting-619', 'picked; waiting on the serial slot', ['open', 'unpick', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+      ['waiting-700', 'waits for Start', ['open', 'start', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
       ['waiting-701', undefined, ['open', 'to-open', 'close', 'up', 'top']],
     ])
   // Once picked, #506 holds the slot for every issue behind it.
@@ -261,28 +263,31 @@ test('a waiting serial issue names the queued issue ahead of it, and in Manual o
     .toEqual(['waiting on #506', 'picked; waiting on #506'])
   const auto = await board({ state: 'running', picked: [] })
   expect(auto.queued.filter(row => row.key.startsWith('waiting')).map(row => [row.note, row.actions])).toEqual([
-    ['waiting on #506', ['open', 'to-open', 'close', 'up', 'down', 'top']],
-    ['waiting on #506', ['open', 'to-open', 'close', 'up', 'down', 'top']],
-    ['waiting on the serial slot', ['open', 'to-open', 'close', 'up', 'down', 'top']],
+    ['waiting on #506', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+    ['waiting on #506', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+    ['waiting on the serial slot', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
     [undefined, ['open', 'to-open', 'close', 'up', 'top']]])
 })
 
-test('Queued lists the queued and waiting issues in the start order, ahead of the other rows, with the moves each '
-  + 'allows', async () => {
-  // The store put #12 first, then waiting #5, then #30; #40 holds no place yet, so it follows by number.
+test('Queued lists the agents sent back to their reviews, oldest request first, then the queued and waiting issues in '
+  + 'the start order, with the moves each allows among them', async () => {
+  // The store put #12 first, then waiting #5, then #30; #40 holds no place yet, so it follows by number. #9's ready
+  // review went back to its agent before #8's draft did, so its row leads.
   const issues = [issue(5, 'waiting', { position: 2, blockedBy: [{ number: 70, state: 'OPEN' }] }),
-    issue(8, 'in-progress'), issue(12, 'queued', { position: 1 }), issue(30, 'queued', { position: 3 }),
-    issue(40, 'queued'), issue(70)]
-  const runs = [{ id: 4, kind: 'agent', target: '8', status: 'requested', unit: null, started_at: null,
-    labelled: false }]
-  const reviews = [review(31, { branch: 'agent/issue-8', draft: true })]
+    issue(8, 'in-progress'), issue(9, 'in-progress'), issue(12, 'queued', { position: 1 }),
+    issue(30, 'queued', { position: 3 }), issue(40, 'queued'), issue(70)]
+  const request = (id: number, target: string) => ({ id, kind: 'agent', target, status: 'requested', unit: null,
+    started_at: null, labelled: false })
+  const runs = [request(4, '8'), request(3, '9')]
+  const reviews = [review(31, { branch: 'agent/issue-8', draft: true }), review(32, { branch: 'agent/issue-9' })]
   const board = await fetchBoard(storeHost(storeOf({ issues, runs, reviews })), { root: '/x', main: '/x' })
   expect(board.queued.map(row => [row.key, row.actions])).toEqual([
-    ['queued-12', ['open', 'to-open', 'close', 'down']],
-    ['waiting-5', ['open', 'to-open', 'close', 'up', 'down', 'top']],
-    ['queued-30', ['open', 'to-open', 'close', 'up', 'down', 'top']],
-    ['queued-40', ['open', 'to-open', 'close', 'up', 'top']],
+    ['rerun-pr-32', ['open', 'cancel']],
     ['rerun-8', ['open', 'cancel']],
+    ['queued-12', ['open', 'to-open', 'close', 'down', 'bottom']],
+    ['waiting-5', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+    ['queued-30', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+    ['queued-40', ['open', 'to-open', 'close', 'up', 'top']],
   ])
   // A lone issue in the order has nowhere to move.
   const alone = await fetchBoard(storeHost(storeOf({ issues: [issue(12, 'queued', { position: 1 })] })),
@@ -305,26 +310,28 @@ test('a waiting serial issue names the first queued issue of its group in the st
   expect(held.queued.find(row => row.key === 'waiting-518')?.note).toBe('waiting on #600')
 })
 
-test('a Queued card whose request waits for memory, the usage limit, or a free slot says so after its own note',
-  async () => {
+test('a Queued card whose request waits for memory, the usage limit, the API budget, or a free slot says so after '
+  + 'its own note', async () => {
   const issues = [issue(90, 'queued', { position: 1 }), issue(91, 'waiting', { position: 2,
-    blockedBy: [{ number: 506, state: 'OPEN' }] }), issue(92, 'queued', { position: 3 }), issue(10)]
+    blockedBy: [{ number: 506, state: 'OPEN' }] }), issue(92, 'queued', { position: 3 }), issue(10), issue(11)]
   const request = (id: number, target: string, extra: object) => ({ id, kind: 'agent', target, status: 'requested',
     unit: null, started_at: null, labelled: true, ...extra })
   const runs = [request(1, '90', { gate: 'slot', reason: 'a free agent slot' }),
-    request(2, '91', { gate: 'memory', reason: 'memory: 5.3 GB free of 9 GB needed' }),
+    request(2, '91', { gate: 'memory', reason: 'memory: 5.3 GB free of 1 GB + 8 GB reserve' }),
     request(3, '92', { gate: 'mode', reason: 'Start' }),
-    request(4, '10', { labelled: false, gate: 'usage', reason: 'weekly usage to fall under its limit' })]
+    request(4, '10', { labelled: false, gate: 'usage', reason: 'weekly usage to fall under its limit' }),
+    request(5, '11', { labelled: false, gate: 'usage', reason: 'the API budget: $201.40 of $200.00 this month' })]
   const board = await fetchBoard(storeHost(storeOf({ issues, runs, hold: { state: 'manual', picked: ['org/game#90',
-    'org/game#91'], pickedRuns: [4] } })), { root: '/x', main: '/x' })
+    'org/game#91'], pickedRuns: [4, 5] } })), { root: '/x', main: '/x' })
   expect(board.queued.map(row => [row.key, row.note])).toEqual([
     ['queued-90', 'picked; waits for a free agent slot'],
-    ['waiting-91', 'picked; waiting on #506; waits for memory: 5.3 GB free of 9 GB needed'],
+    ['waiting-91', 'picked; waiting on #506; waits for memory: 5.3 GB free of 1 GB + 8 GB reserve'],
     // The desk's mode shows in the card's own note already.
     ['queued-92', 'waits for Start'],
-    ['request-4', 'waits to start; waits for weekly usage to fall under its limit']])
+    ['request-4', 'waits to start; waits for weekly usage to fall under its limit'],
+    ['request-5', 'waits to start; waits for the API budget: $201.40 of $200.00 this month']])
   expect(board.queued[1]?.text)
-    .toBe('Issue 91  (picked; waiting on #506; waits for memory: 5.3 GB free of 9 GB needed)')
+    .toBe('Issue 91  (picked; waiting on #506; waits for memory: 5.3 GB free of 1 GB + 8 GB reserve)')
 })
 
 test('a request sent to an on-hold issue\'s agent waits in Queued for the issue to resume, with Resume', async () => {

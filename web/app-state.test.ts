@@ -2,23 +2,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { actionLabel, byNumber, clickedItem, firstTab, FORWARD, githubRows, hotkeyOf, itemHref, LABELS, listedCard,
-  runnerProjects, select, showRun, slotRows, startCollapsed, toggleSide, ui } from './app-state.js'
-
-const card = (desk: string, number: number) => ({ id: `${desk}:${number}`, desk, number })
-
-test('a group sorts by issue number, highest first, or lowest first when flipped', () => {
-  const cards = [card('game', 12), card('game', 40), card('game', 3)]
-  assert.deepEqual(byNumber(cards, false).map(one => one.number), [40, 12, 3])
-  assert.deepEqual(byNumber(cards, true).map(one => one.number), [3, 12, 40])
-  assert.deepEqual(cards.map(one => one.number), [12, 40, 3])
-})
-
-test('on All, each project keeps its cards together in project order and sorts them within', () => {
-  const cards = [card('app', 5), card('app', 9), card('game', 40), card('game', 2), card('tools', 7)]
-  assert.deepEqual(byNumber(cards, false).map(one => one.id), ['app:9', 'app:5', 'game:40', 'game:2', 'tools:7'])
-  assert.deepEqual(byNumber(cards, true).map(one => one.id), ['app:5', 'app:9', 'game:2', 'game:40', 'tools:7'])
-})
+import { actionLabel, clickedItem, CONFIRMS, firstTab, foldAll, FORWARD, githubRows, hotkeyOf, INSTANT, itemHref,
+  LABELS, listedCard, runnerProjects, select, showRun, slotRows, STAGES, startCollapsed, startFolds, toggleSide, ui }
+  from './app-state.js'
 
 test('a plain left click on a link to an item on the page names it, and a modified click or other link none', () => {
   Object.assign(globalThis, { location: new URL('http://localhost:7480/') })
@@ -125,6 +111,28 @@ test('the sidebar shows the tab\'s project, or every project on All in page orde
   ui.tab = 'all'
 })
 
+test('a project set to 0 agent slots keeps its agent kind, with the agents still working and none free', () => {
+  const row = (key: string, runner: string) => ({ key, text: key, runner, title: key, actions: [] })
+  const agents = { count: 0, config: 3, override: true }
+  const board = (runners: object[]) => ({ error: null, runners, checks: [], slots: [{ kind: 'chore', busy: 0,
+    total: 1 }] })
+  ui.server = { desks: [
+    { id: 'game', agentSlots: agents, board: board([row('unit-1', 'agent'), row('local-7', 'local')]) },
+    { id: 'tools', agentSlots: agents, board: board([]) }, { id: 'old', board: board([]) }] }
+  ui.tab = 'all'
+  const [game, tools, old] = runnerProjects()
+  assert.deepEqual(game?.agents, agents)
+  assert.deepEqual(game?.slots.map(one => `${one.kind} ${one.busy}/${one.total} ${one.tone}`),
+    ['agent 1/0 full', 'chore 0/1 free'])
+  assert.deepEqual(game?.rows.map(one => `${one.kind} ${one.row?.key ?? (one.busy ? 'busy' : 'free')}`),
+    ['agent unit-1', 'chore free'])
+  assert.deepEqual(tools?.rows.map(one => `${one.kind} ${one.busy ? 'busy' : 'free'}`), ['chore free'])
+  assert.equal(tools?.slots[0]?.tone, 'full')
+  // A server that sends no agent slots leaves the board's kinds as they are.
+  assert.equal(old?.agents, null)
+  assert.deepEqual(old?.slots.map(one => one.kind), ['chore'])
+})
+
 test('a kind\'s busy slots lead in board order, then its free ones, and a kind at 0 has none', () => {
   const row = (key: string, runner: string, labels?: string[]) => ({ key, runner, ...(labels ? { labels } : {}) })
   const shape = (rows: { kind: string, busy: boolean, row?: { key: string } }[]) => rows
@@ -201,6 +209,68 @@ test('Needs Design, Backlog, and Ideas start collapsed, and a page that remember
   assert.deepEqual([...startCollapsed([], [...before, 'backlog'])], [])
 })
 
+test('- folds every group on the shown tab, Chores and the empty ones too, + opens them all, and the page '
+  + 'remembers each', () => {
+  const stored = new Map<string, string>()
+  Object.assign(globalThis, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => stored.set(key, value) } })
+  ui.tab = 'all'
+  ui.folds = new Map([['all', new Set(['design'])]])
+  foldAll(true)
+  const every = [...STAGES.map(([stage]) => stage), 'chores']
+  assert.deepEqual([...ui.collapsed].sort(), [...every].sort())
+  assert.deepEqual(JSON.parse(stored.get('inbox-folds') ?? 'null').all.sort(), [...every].sort())
+  foldAll(false)
+  assert.deepEqual([...ui.collapsed], [])
+  assert.equal(stored.get('inbox-folds'), '{"all":[]}')
+})
+
+test('each tab keeps its own folded groups, and a tab never folded on starts as the page started', () => {
+  const stored = new Map<string, string>()
+  Object.assign(globalThis, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => stored.set(key, value) } })
+  ui.folds = new Map()
+  ui.tab = 'me/one'
+  const first = [...ui.collapsed]
+  foldAll(true)
+  ui.tab = 'me/two'
+  assert.deepEqual([...ui.collapsed], first)
+  foldAll(false)
+  ui.tab = 'me/one'
+  assert.equal(ui.collapsed.size, STAGES.length + 1)
+  ui.tab = 'all'
+  assert.deepEqual([...ui.collapsed], first)
+  const kept = JSON.parse(stored.get('inbox-folds') ?? 'null')
+  assert.equal(kept['me/one'].length, STAGES.length + 1)
+  assert.deepEqual(kept['me/two'], [])
+})
+
+test('the page reads the folds each tab kept, adds a folded group new since it last ran, and skips what it cannot '
+  + 'read', () => {
+  const before = ['merging', 'needs', 'working', 'queued', 'open', 'blocked', 'design', 'idea']
+  const folds = startFolds({ all: ['queued'], 'me/one': [], 'me/two': 'queued' }, before)
+  assert.deepEqual([...folds.keys()], ['all', 'me/one'])
+  assert.deepEqual([...folds.get('all') ?? []], ['queued', 'backlog'])
+  assert.deepEqual([...folds.get('me/one') ?? []], ['backlog'])
+  assert.equal(startFolds(['queued'], before).size, 0)
+  assert.equal(startFolds(null, before).size, 0)
+})
+
+test('-, +, and = reach the page, Shift held or not, and leave a field or a chord alone', () => {
+  const field = { closest: (wanted: string) => (wanted.includes('input') ? {} : null) }
+  const press = (key: string, extra: object = {}) => hotkeyOf({ key, ctrlKey: false, metaKey: false, altKey: false,
+    shiftKey: false, target: { closest: () => null }, ...extra })
+  assert.equal(press('-'), '-')
+  assert.equal(press('='), '=')
+  assert.equal(press('+', { shiftKey: true }), '+')
+  for (const key of ['-', '+', '=']) {
+    assert.equal(press(key, { target: field }), null)
+    for (const extra of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
+      assert.equal(press(key, extra), null)
+    }
+  }
+})
+
 test('a stopped card names Take Over and Continue, with Continue its main button, and Resume only unpauses', () => {
   assert.equal(LABELS.resume, 'Take Over')
   assert.equal(LABELS.restart, 'Continue')
@@ -215,4 +285,11 @@ test('Retry reads Continue on a timed-out agent run whose session it carries on,
   assert.equal(actionLabel(failed, 'retry'), 'Retry')
   assert.equal(actionLabel({ ...failed, continues: true }, 'retry'), 'Continue')
   assert.equal(actionLabel({ ...failed, continues: true }, 'dismiss'), 'Dismiss')
+})
+
+test('every action asks to confirm or sits on the short list of those that act at once, and never both', () => {
+  const actions = Object.keys(LABELS)
+  assert.deepEqual(actions.filter(action => CONFIRMS.has(action) === INSTANT.has(action)), [])
+  assert.deepEqual([...CONFIRMS, ...INSTANT].filter(action => !actions.includes(action)), [])
+  assert.deepEqual([...INSTANT].sort(), ['bottom', 'down', 'resume', 'top', 'up'])
 })

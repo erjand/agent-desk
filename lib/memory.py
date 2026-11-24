@@ -12,6 +12,7 @@
 A kind is `agent`, `fix`, `chore/<skill>`, or `discuss` for a discussion of an idea or a parent issue's check, which
 read code and build nothing; labels are the issue's, comma-separated. The project's .agent-desk.json, which DESK_CONFIG names, sets a need
 for each kind and label under `resources`, and the history of finished runs takes over once it holds enough of them. A
+label in `resources.labelCapGB` caps the need, however the rest set it. A
 run waits while the user's apps are under memory pressure, or while the memory available, less what running runs claimed
 and haven't taken up yet, falls short of its need and the reserve kept for the person at the machine. A run's claim
 shrinks once it has run past its settle time, when nearly every past run of its kind had reached its peak. A fix, which
@@ -37,7 +38,8 @@ CLAIMS = STATE / "claims"
 # need the machine can never meet doesn't hold its slot forever. The GB kept free for the person, reserveGB, scales
 # with the machine as SHARES sets.
 DEFAULTS = {"maxWaitMinutes": 120, "maxMemoryPressure": 5, "fixMemoryPressure": 15,
-            "needGB": {"agent": 6, "chore": 3, "fix": 3, "discuss": 2}, "labelGB": {}, "shrinkClaims": True}
+            "needGB": {"agent": 6, "chore": 3, "fix": 3, "discuss": 2}, "labelGB": {}, "labelCapGB": {},
+            "shrinkClaims": True}
 # The kinds of run the merge queue waits on, which go first.
 PRIORITY_KINDS = ("fix",)
 # The defaults that scale with the machine, as shares of its total memory: resources.reserveGB, chores.minFreeGB, the
@@ -54,9 +56,11 @@ PRESSURE = os.environ.get("AGENT_DESK_PRESSURE", "/proc/pressure/memory")
 USER_CGROUP = os.environ.get("AGENT_DESK_USER_CGROUP",
                              f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service")
 APP_SLICES = ("app.slice", "session.slice")
-# How many finished runs of a kind, and of a kind with a label, the history needs before it sets the need.
+# How many finished runs of a kind, and of a kind with a label, the history needs before it sets the need, and how
+# many of the newest it learns from, so a spike the project has since fixed stops setting the need.
 MIN_RUNS = 5
 MIN_LABEL_RUNS = 3
+RECENT_RUNS = 30
 # The learned need is this share above the 90th percentile of past peaks, for runs larger than any seen yet.
 HEADROOM = 1.2
 # A run's settle time is SETTLE_FACTOR times the SETTLE_PERCENTILE of the minutes its kind's past runs took to reach their
@@ -94,8 +98,8 @@ def resources(config_path=None):
 
 def history(path=None):
     """
-    Every finished run the history holds, as (repo, kind, labels, peak GB, minutes to peak). Rows written before the
-    history kept the minutes to peak have None there.
+    Every finished run the history holds, as (repo, kind, labels, peak GB, minutes to peak), oldest first as the file
+    holds them. Rows written before the history kept the minutes to peak have None there.
     """
     runs = []
     try:
@@ -118,25 +122,48 @@ def percentile(values, share=0.9):
 
 def need(repo, kind, labels, settings, runs):
     """
-    The GB a run needs. With enough past runs of its kind in the project, the 90th percentile of their peaks with
-    HEADROOM, raised by any of its labels with enough runs of their own. Without them, the config's need for the kind,
-    raised by any of its labels' needs.
+    The GB a run needs. With enough past runs of its kind in the project, the 90th percentile of the peaks of the
+    newest RECENT_RUNS with HEADROOM, raised by any of its labels with enough runs of their own, of which it takes the
+    newest RECENT_RUNS too. Without them, the config's need for the kind, raised by any of its labels' needs. Last, the
+    smallest cap among its labels in resources.labelCapGB lowers it, as `capped` decides. `runs` holds the history
+    oldest first, as `history` reads it.
     """
     labels = set(labels)
+    mine = [(run_labels, peak) for run_repo, run_kind, run_labels, peak, _ in runs
+            if run_repo == repo and run_kind == kind]
+    return capped(uncapped(kind, labels, settings, mine), labels, settings, mine)
+
+
+def uncapped(kind, labels, settings, mine):
+    """The GB a run needs before any label caps it, from `mine`, the (labels, peak) of past runs of its kind."""
     configured = max([settings["needGB"].get(kind.split("/")[0], DEFAULTS["needGB"]["agent"])]
                      + [settings["labelGB"][label] for label in labels if label in settings["labelGB"]])
-    peaks = [peak for run_repo, run_kind, _, peak, _ in runs if run_repo == repo and run_kind == kind]
-    if len(peaks) < MIN_RUNS:
+    if len(mine) < MIN_RUNS:
         return configured
-    learned = percentile(peaks)
+    learned = percentile([peak for _, peak in mine[-RECENT_RUNS:]])
     for label in labels:
-        tagged = [peak for run_repo, run_kind, run_labels, peak, _ in runs
-                  if run_repo == repo and run_kind == kind and label in run_labels]
+        tagged = [peak for run_labels, peak in mine if label in run_labels][-RECENT_RUNS:]
         if len(tagged) >= MIN_LABEL_RUNS:
             learned = max(learned, percentile(tagged))
         elif label in settings["labelGB"]:
             learned = max(learned, settings["labelGB"][label] / HEADROOM)
     return round(max(1.0, learned * HEADROOM), 1)
+
+
+def capped(gb, labels, settings, mine):
+    """
+    `gb` lowered to the smallest cap among `labels` in resources.labelCapGB. A label with MIN_LABEL_RUNS runs of the
+    kind in `mine` learns its cap, the 90th percentile of the peaks of its newest RECENT_RUNS with HEADROOM, which
+    never exceeds `gb`; one with fewer takes the configured cap.
+    """
+    caps = [gb]
+    for label in labels & settings["labelCapGB"].keys():
+        tagged = [peak for run_labels, peak in mine if label in run_labels][-RECENT_RUNS:]
+        if len(tagged) >= MIN_LABEL_RUNS:
+            caps.append(round(max(1.0, percentile(tagged) * HEADROOM), 1))
+        else:
+            caps.append(settings["labelCapGB"][label])
+    return min(caps)
 
 
 def settle(repo, kind, labels, runs):
@@ -381,7 +408,8 @@ def held_by(gb, settings, priority=False):
     reserve = settings["reserveGB"]
     if free < gb + reserve:
         return Shortfall(f"the run needs {gb:g} GB and {reserve:g} GB stays free for the user, and {free:.1f} GB is free",
-                         f"memory: {free:.1f} GB free of {gb + reserve:g} GB needed", round(free, 1), gb + reserve)
+                         f"memory: {free:.1f} GB free of {gb:g} GB + {reserve:g} GB reserve", round(free, 1),
+                         gb + reserve)
     return None
 
 

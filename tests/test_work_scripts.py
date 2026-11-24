@@ -2,6 +2,8 @@
 in a temporary folder, a stand-in for claude that logs its arguments and can act as the agent, and a stand-in for gh
 that logs lib/budget.py's read of the API budget, the one part of a run that still reads GitHub."""
 
+import compileall
+import hashlib
 import json
 import os
 import subprocess
@@ -22,6 +24,10 @@ REPO = "o/r"
 UNIT = "agent-desk-agent-o-r-1-1.service"
 SIGNED = "\n\n<sub>Posted by agent-desk in agent-desk-agent-o-r-1-1</sub>"
 SESSION = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+# The agent sends its branch to origin, as a push of the branch before the agent's first commit would.
+PUSH = 'git push -q origin "HEAD:refs/heads/$(git branch --show-current)"'
+# The API key the desk keeps in its config folder, made up.
+DESK_KEY = "sk-ant-made-up-for-tests-KEYS"
 
 
 def git(*args, cwd):
@@ -30,6 +36,12 @@ def git(*args, cwd):
 
 class Desk(unittest.TestCase):
     """An origin with main, a main checkout cloned from it, a store in its own state folder, and the stand-ins."""
+
+    @classmethod
+    def setUpClass(cls):
+        # The scripts start python3 -B many times a run, and -B writes no bytecode, so each start would compile lib/
+        # again. lib/__pycache__, which git ignores, holds it compiled once, as the main checkout's does.
+        compileall.compile_dir(LIB, quiet=1, maxlevels=0)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -76,7 +88,8 @@ class Desk(unittest.TestCase):
         identity = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@example.com"}
         self.env = {key: value for key, value in os.environ.items()
-                    if key not in ("REPLY_PR", "EVENT", "AGENT_DESK_BASE", "AGENT_DESK_AUTHOR", "REQUEST")}
+                    if key not in ("REPLY_PR", "EVENT", "AGENT_DESK_BASE", "AGENT_DESK_AUTHOR", "REQUEST",
+                                   "AGENT_DESK_ACCOUNT", "AGENT_DESK_ISSUE_RUNNER")}
         # A unit the dispatcher started carries AGENT_DESK_RUN, which the agent's writes keep and the script's drop.
         self.env.update({"PATH": f"{fakes}:{os.environ['PATH']}", "AGENT_DESK_CHECKOUT": str(self.main),
                          "GH_REPO": REPO, "XDG_STATE_HOME": str(root / "state"),
@@ -118,6 +131,18 @@ class Desk(unittest.TestCase):
     def claude_args(self):
         return self.claude_log.read_text().splitlines() if self.claude_log.exists() else []
 
+    def codex_fake(self, *events):
+        fake = self.root / "fakes" / "codex"
+        self.codex_log = self.root / "codex.log"
+        fake.write_text((fake.parent / "claude").read_text().replace(str(self.claude_log), str(self.codex_log)))
+        fake.chmod(0o755)
+        stream = self.root / "codex.jsonl"
+        stream.write_text("".join(json.dumps(event) + "\n" for event in [
+            {"type": "thread.started", "thread_id": SESSION}, *events,
+            {"type": "turn.completed", "usage": {"input_tokens": 42}},
+        ]))
+        return {"FAKE_STREAM": str(stream)}
+
     def worktree(self, slug):
         return self.main.parent / f"desk-{slug}"
 
@@ -134,8 +159,35 @@ class Desk(unittest.TestCase):
                 {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": command}}]}},
             {"type": "system", "subtype": "task_started", "task_id": "b1", "tool_use_id": "toolu_1"},
             {"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "duration_ms": 60000}]))
-        return {"FAKE_STREAM": str(stream), "FAKE_LINGER": "1", "AGENT_DESK_RESULT_GRACE": "1",
+        # The stand-in never exits by itself, so the shortest grace still ends the run early.
+        return {"FAKE_STREAM": str(stream), "FAKE_LINGER": "1", "AGENT_DESK_RESULT_GRACE": "0.1",
                 "AGENT_DESK_KILL_GRACE": "1"}
+
+    def billing(self, account, agent=""):
+        """The environment of a run the dispatcher started on `account`, with the desk's key saved, ANTHROPIC_API_KEY
+        set where the run starts, and an agent that writes the ANTHROPIC_API_KEY it sees and then runs `agent`."""
+        key = self.root / "config" / "agent-desk" / "anthropic-api-key"
+        key.parent.mkdir(parents=True, exist_ok=True)
+        key.write_text(DESK_KEY)
+        key.chmod(0o600)
+        self.seen_key = self.root / "seen-key"
+        # A run that starts no claude leaves no log from an earlier run to pass for its own.
+        self.seen_key.unlink(missing_ok=True)
+        self.claude_log.unlink(missing_ok=True)
+        return {"AGENT_DESK_ACCOUNT": account, "ANTHROPIC_API_KEY": "sk-ant-from-the-environment",
+                "FAKE_AGENT": f'echo "${{ANTHROPIC_API_KEY-unset}}" >"{self.seen_key}"; {agent or ":"}'}
+
+    def assert_billed(self, account, result):
+        """claude got the flags that bill `account`, and neither it nor the agent's commands saw ANTHROPIC_API_KEY."""
+        self.assertIn(f"Account: {account}.", result.stdout)
+        args = self.claude_args()
+        self.assertEqual(self.seen_key.read_text(), "unset\n")
+        self.assertNotIn(DESK_KEY, "\n".join(args) + result.stdout + result.stderr)
+        if account == "api":
+            helper = json.loads(args[args.index("--settings") + 1])["apiKeyHelper"]
+            self.assertEqual(subprocess.run(helper, shell=True, capture_output=True, text=True).stdout, DESK_KEY)
+        else:
+            self.assertNotIn("--settings", args)
 
     def assert_no_github_writes(self):
         """The gh stand-in heard nothing."""
@@ -169,18 +221,115 @@ class WorkIssueTest(Desk):
         self.assertTrue(dest.is_dir())
         self.assert_no_github_writes()
 
-    def test_a_run_without_a_review_frees_the_issue_and_removes_the_worktree(self):
+    def test_codex_works_the_issue_and_resumes_its_thread_after_a_timeout(self):
+        self.check_codex_launch_and_resume("codex", ["--approve-for-me"])
+
+    def test_local_codex_works_the_issue_and_resumes_with_the_same_provider_and_model(self):
+        self.check_codex_launch_and_resume("local", ["--oss", "--local-provider", "ollama", "--model=example:24b",
+                                                    "--sandbox", "workspace-write", "-c", 'approval_policy="never"'])
+
+    def check_codex_launch_and_resume(self, runner, options):
+        config_path = self.main / ".agent-desk.json"
+        config = json.loads(config_path.read_text())
+        config["issueRunner"] = runner
+        if runner == "local":
+            config["localRunner"] = {"provider": "ollama", "model": "example:24b"}
+        config_path.write_text(json.dumps(config))
+        issue = self.issue()
+        self.assertEqual(self.store.request_run(REPO, "agent", str(issue), False, {}), 1)
+        env = self.codex_fake(
+            {"type": "item.started", "item": {"type": "command_execution", "id": "item_1", "command": "just test"}},
+            {"type": "item.completed", "item": {"type": "command_execution", "id": "item_1", "exit_code": 0}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Opened the review."}},
+        )
+        agent = f'"$DESK" review create --branch agent/issue-{issue} --title Work --draft --fixes {issue}'
+        result = self.run_lib("work-issue.sh", str(issue), FAKE_AGENT=agent, AGENT_DESK_ACCOUNT="api", **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dest = self.worktree(f"issue-{issue}")
+        self.assertEqual(self.claude_args(), [])
+        args = self.codex_log.read_text().splitlines()
+        prefix = [str(dest), "exec", *options, "--json"]
+        self.assertEqual(args[:len(prefix) + 1], [*prefix, "--"])
+        self.assertIn(f"Work issue #{issue}.", args[len(prefix) + 1])
+        self.assertIn("inbox/skills/work-issue/SKILL.md", args[len(prefix) + 1])
+        resume_options = "--oss --local-provider ollama --model=example:24b " if runner == "local" else ""
+        self.assertIn(f"codex resume {resume_options}{SESSION}", result.stdout)
+        self.assertIn("→ Shell: just test", result.stdout)
+        self.assertIn("Opened the review.", result.stdout)
+        self.assertIn("Codex session ID is in the run log", self.notes(issue)[0][1])
+        self.assertEqual(self.store.run(1)["session"], SESSION)
+        self.assertIsNone(self.store.run(1)["cost"])
+        path_key = hashlib.sha256(os.fsencode(dest)).hexdigest()
+        transcript = self.database.parent / "codex-logs" / path_key / f"{SESSION}.jsonl"
+        events = [json.loads(line) for line in transcript.read_text().splitlines()]
+        self.assertEqual([event["type"] for event in events], ["system", "assistant", "user", "assistant", "result"])
+        self.assertEqual(events[0].get("local_runner"), config.get("localRunner"))
+        self.assertTrue(all(event.get("timestamp") for event in events))
+        self.store.comment(REPO, issue, "The agent run was cancelled or timed out (log: x).")
+        result = self.run_lib("work-issue.sh", str(issue), **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        resumed = self.codex_log.read_text().splitlines()
+        self.assertEqual(resumed[:len(prefix) + 3], [*prefix, "resume", "--", SESSION])
+        self.assertIn("takes up the same session", " ".join(resumed))
+        self.assertEqual(self.store.run(1)["start"], "resumed")
+        self.assertEqual(len(transcript.read_text().splitlines()), len(events) * 2)
+
+        state = self.database.with_name("hold.json")
+        state.write_text(json.dumps({"state": "running", "issueRunners": {REPO: "claude"}}))
+        self.store.comment(REPO, issue, "The agent run was cancelled or timed out (log: x).")
+        result = self.run_lib("work-issue.sh", str(issue))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--session-id", self.claude_args())
+        self.assertNotIn("--resume", self.claude_args())
+        state.unlink()
+        self.store.comment(REPO, issue, "The agent run was cancelled or timed out (log: x).")
+        result = self.run_lib("work-issue.sh", str(issue), **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.codex_log.read_text().splitlines()[len(prefix)], "--")
+
+    def test_local_codex_reports_missing_settings_and_unavailable_provider(self):
+        config_path = self.main / ".agent-desk.json"
+        config = json.loads(config_path.read_text())
+        self.database.with_name("hold.json").write_text(json.dumps({"issueRunners": {REPO: "local"}}))
+        codex = self.root / "fakes" / "codex"
+        codex.write_text('#!/bin/bash\necho "LM Studio is not responding" >&2\nexit 1\n')
+        codex.chmod(0o755)
+
+        for settings, error in (({}, "set localRunner.provider"),
+                                ({"provider": "lmstudio", "model": ["example"]}, "set localRunner.model")):
+            with self.subTest(settings=settings):
+                config["localRunner"] = settings
+                config_path.write_text(json.dumps(config))
+                issue = self.issue()
+                result = self.run_lib("work-issue.sh", str(issue))
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.item(issue)["status"], "open")
+                self.assertIn(error, self.notes(issue)[-1][1])
+                self.assertFalse(self.worktree(f"issue-{issue}").exists())
+
+        config["localRunner"] = {"provider": "lmstudio", "model": "example"}
+        config_path.write_text(json.dumps(config))
+        issue = self.issue()
+        result = self.run_lib("work-issue.sh", str(issue))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("LM Studio is not responding", result.stderr)
+        self.assertIn("Local Codex using lmstudio exited with status 1", self.notes(issue)[-1][1])
+        self.assertEqual(self.item(issue)["status"], "open")
+
+    def test_a_run_without_a_review_frees_the_issue_and_removes_the_worktree_and_its_untouched_branch(self):
         # The run claims its queued issue in the store, so the agent works an issue in progress, and the run's end
-        # frees it.
+        # frees it. The agent sent its branch to origin before any commit, so origin's main holds it.
         issue = self.issue(status="queued")
         seen = self.root / "status"
         result = self.run_lib("work-issue.sh", str(issue), EVENT="issues",
-                              FAKE_AGENT=f'"$DESK" issue view {issue} --json status >"{seen}"')
+                              FAKE_AGENT=f'{PUSH} && "$DESK" issue view {issue} --json status >"{seen}"')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(seen.read_text()), {"status": "in-progress"})
         self.assertEqual(self.item(issue)["status"], "open")
         self.assertTrue(self.notes(issue)[-1][1].startswith("The agent stopped without opening a PR (log: "))
         self.assertFalse(self.worktree(f"issue-{issue}").exists())
+        self.assertIn(f"Deleted agent/issue-{issue} on origin.", result.stdout)
+        self.assertFalse(self.origin_has(f"agent/issue-{issue}"))
 
     def test_a_serial_issue_whose_slot_is_held_waits_without_an_agent(self):
         holder = self.issue(labels=["serial"])
@@ -195,16 +344,46 @@ class WorkIssueTest(Desk):
         self.assertEqual(self.claude_args(), [])
         self.assert_no_github_writes()
 
-    def test_an_issue_the_agent_closed_stays_closed(self):
-        issue = self.issue()
-        result = self.run_lib("work-issue.sh", str(issue), FAKE_AGENT=f'"$DESK" issue close {issue}')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.item(issue)["status"], "closed")
-
-    def test_a_run_that_stops_for_a_decision_posts_nothing_more(self):
+    def test_a_run_that_stops_for_a_decision_posts_nothing_more_and_deletes_its_untouched_branch(self):
         issue = self.issue()
         result = self.run_lib("work-issue.sh", str(issue),
-                              FAKE_AGENT=f'"$DESK" issue edit {issue} --status needs-design')
+                              FAKE_AGENT=f'{PUSH} && "$DESK" issue edit {issue} --status needs-design')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.item(issue)["status"], "needs-design")
+        self.assertEqual(len(self.notes(issue)), 1)
+        self.assertFalse(self.worktree(f"issue-{issue}").exists())
+        self.assertEqual(git("branch", "--list", f"agent/issue-{issue}", cwd=self.main), "")
+        self.assertFalse(self.origin_has(f"agent/issue-{issue}"))
+
+    def origin_has(self, branch):
+        return bool(git("ls-remote", "origin", f"refs/heads/{branch}", cwd=self.main))
+
+    def test_a_run_without_a_review_leaves_a_closed_issue_closed_and_keeps_a_branch_beyond_main_on_origin(self):
+        issue = self.issue()
+        result = self.run_lib("work-issue.sh", str(issue),
+                              FAKE_AGENT=f'git commit -q --allow-empty -m wip && {PUSH} && "$DESK" issue close {issue}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.item(issue)["status"], "closed")
+        self.assertIn(f"Kept agent/issue-{issue} on origin: it has commits that aren't on refs/remotes/origin/main.",
+                      result.stdout)
+        self.assertTrue(self.origin_has(f"agent/issue-{issue}"))
+
+    def test_a_run_without_an_open_review_keeps_the_branch_of_a_closed_one_on_origin(self):
+        # A closed review's comments may tell the user to restore its work from origin's copy.
+        issue = self.issue()
+        review = self.review(f"agent/issue-{issue}", fixes=issue)
+        self.store.set_state(REPO, review, "closed", "closed")
+        result = self.run_lib("work-issue.sh", str(issue),
+                              FAKE_AGENT=f'{PUSH} && "$DESK" issue edit {issue} --status needs-design')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.worktree(f"issue-{issue}").exists())
+        self.assertTrue(self.origin_has(f"agent/issue-{issue}"))
+
+    def test_a_run_that_stops_for_a_decision_on_its_review_keeps_the_worktree(self):
+        issue = self.issue()
+        agent = (f'"$DESK" review create --branch agent/issue-{issue} --title Work --draft --fixes {issue} && '
+                 f'"$DESK" issue edit {issue} --status needs-design')
+        result = self.run_lib("work-issue.sh", str(issue), FAKE_AGENT=agent)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.item(issue)["status"], "needs-design")
         self.assertEqual(len(self.notes(issue)), 1)
@@ -219,10 +398,16 @@ class WorkIssueTest(Desk):
         # out of reach.
         git("commit", "-q", "--allow-empty", "-m", "landed", cwd=self.main)
         self.lose_origin()
-        # The last run's start is on the issue and its cut-off note on the review, and its session is on this machine.
+        # The last run's start is on the issue, and its session is on this machine. Its unit was stopped before it
+        # reported, and its exit handler's release left the cut-off notes the next run reads.
         self.store.comment(REPO, issue, f"An agent started on `agent/issue-{issue}`. To take over, run "
                                         f"`claude --resume {SESSION}` in `{dest}`.")
-        self.store.comment(REPO, review, "The agent run was cancelled or timed out (log: x).")
+        released = subprocess.run([sys.executable, "-B", str(LIB / "release.py"), str(issue), "cancelled"],
+                                  cwd=self.main, env={**self.env, "AGENT_DESK_UNIT": "agent-desk-agent-o-r-1-0.service",
+                                                      "EVENT": "issue_comment", "REPLY_PR": str(review)},
+                                  capture_output=True, text=True, timeout=60)
+        self.assertEqual(released.returncode, 0, released.stderr)
+        self.assertTrue(self.notes(review)[0][1].startswith("The agent run was cancelled or timed out"))
         sessions = self.home / ".claude" / "projects" / "desk"
         sessions.mkdir(parents=True)
         (sessions / f"{SESSION}.jsonl").touch()
@@ -233,6 +418,7 @@ class WorkIssueTest(Desk):
         self.assertEqual(git("log", "-1", "--format=%s", cwd=dest), "landed")
         args = self.claude_args()
         self.assertEqual(args[args.index("--resume") + 1], SESSION)
+        self.assertNotIn("--session-id", args)
         # The prompt says what the skill says: work reaches the review by a commit, with no push and no PR.
         prompt = args[args.index("-p") + 1]
         self.assertIn("since your last commit", prompt)
@@ -245,37 +431,9 @@ class WorkIssueTest(Desk):
         self.assertIn(f"claude --resume {SESSION}", review_notes[1])
         self.assertTrue(review_notes[2].startswith(f"The agent finished: review #{review} (still a draft)"))
         issue_notes = [body for _, body in self.notes(issue)]
-        self.assertTrue(issue_notes[1].startswith(f"An agent started on feedback from #{review} (log: "))
-        self.assertTrue(issue_notes[2].startswith(f"The agent finished: review #{review}"))
+        self.assertTrue(issue_notes[2].startswith(f"An agent started on feedback from #{review} (log: "))
+        self.assertTrue(issue_notes[3].startswith(f"The agent finished: review #{review}"))
         self.assert_no_github_writes()
-
-    def test_a_run_after_a_cancelled_one_takes_up_its_session(self):
-        issue = self.issue()
-        dest = self.worktree(f"issue-{issue}")
-        git("worktree", "add", "-q", "-b", f"agent/issue-{issue}", str(dest), "main", cwd=self.main)
-        sessions = self.home / ".claude" / "projects" / "desk"
-        sessions.mkdir(parents=True)
-        (sessions / f"{SESSION}.jsonl").touch()
-        # The last run started, and its unit was stopped before it reported; its exit handler released the issue.
-        earlier = "agent-desk-agent-o-r-1-0.service"
-        self.store.comment(REPO, issue, f"An agent started on `agent/issue-{issue}` (log: `journalctl --user -u "
-                                        f"{earlier}`). To take over, run `claude --resume {SESSION}` in `{dest}`.")
-        released = subprocess.run([sys.executable, "-B", str(LIB / "release.py"), str(issue), "cancelled"],
-                                  cwd=self.main, env={**self.env, "AGENT_DESK_UNIT": earlier},
-                                  capture_output=True, text=True, timeout=60)
-        self.assertEqual(released.returncode, 0, released.stderr)
-        self.assertEqual(self.item(issue)["status"], "open")
-        author, note = self.notes(issue)[-1]
-        self.assertEqual(author, "desk")
-        self.assertTrue(note.startswith(f"The agent run was cancelled or timed out (log: `journalctl --user -u "
-                                        f"{earlier}`)."))
-
-        result = self.run_lib("work-issue.sh", str(issue), EVENT="issues")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        args = self.claude_args()
-        self.assertEqual(args[args.index("--resume") + 1], SESSION)
-        self.assertNotIn("--session-id", args)
-        self.assertIn("taking up the session stopped last time", self.notes(issue)[-2][1])
 
     def test_a_run_that_stops_early_says_so_keeps_its_worktree_and_exits_stopped(self):
         issue = self.issue()
@@ -350,14 +508,6 @@ class WorkIssueTest(Desk):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.claude_args()[2], f"/agent-desk:work-issue {parent}")
 
-    def test_an_issue_without_sub_issues_gets_a_full_run(self):
-        issue = self.issue(title="Split me", labels=["agent-ready"], status="queued")
-        result = self.run_lib("work-issue.sh", str(issue), EVENT="issues")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        args = self.claude_args()
-        self.assertEqual(args[0], str(self.worktree(f"issue-{issue}")))
-        self.assertEqual(args[2], f"/agent-desk:work-issue {issue}")
-
 
 class CloseParentTest(Desk):
     """A parent issue labelled agent-ready once its sub-issues have all closed gets lib/close-parent.sh's check."""
@@ -405,6 +555,17 @@ class CloseParentTest(Desk):
         self.assertNotIn(str(tree), git("worktree", "list", cwd=self.main))
         self.assertEqual(git("branch", "--list", cwd=self.main), branches)
         self.assert_no_github_writes()
+
+    def test_a_parent_check_uses_codex_and_reads_the_close_parent_skill(self):
+        parent = self.parent()
+        env = self.codex_fake()
+        agent = f'"$DESK" issue close {parent} --reason completed'
+        result = self.run_lib("work-issue.sh", str(parent), EVENT="issues", AGENT_DESK_ISSUE_RUNNER="codex",
+                              FAKE_AGENT=agent, **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"/inbox/skills/close-parent/SKILL.md for issue #{parent}", self.codex_log.read_text())
+        self.assertEqual(self.item(parent)["status"], "closed")
+        self.assertEqual(self.claude_args(), [])
 
     def test_a_check_that_asks_for_a_decision_leaves_the_parent_in_needs_design(self):
         parent = self.parent()
@@ -455,6 +616,26 @@ class CloseParentTest(Desk):
 class DiscussIdeaTest(Desk):
     def idea_tree(self, number):
         return self.root / "cache" / "agent-desk" / "ideas" / "o__r" / str(number)
+
+    def test_codex_discussions_keep_their_thread_until_the_project_switches_runners(self):
+        idea = self.issue(labels=["idea"], status="open")
+        env = self.codex_fake()
+
+        def discuss(runner, **extra):
+            result = self.run_lib("discuss-idea.sh", str(idea), AGENT_DESK_ISSUE_RUNNER=runner, **extra)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.idea_tree(idea).exists())
+
+        discuss("codex", **env)
+        args = self.codex_log.read_text().splitlines()
+        self.assertEqual(args[4], "--")
+        self.assertIn(f"/inbox/skills/discuss-idea/SKILL.md for issue #{idea}", args[5])
+        discuss("codex", **env)
+        self.assertEqual(self.codex_log.read_text().splitlines()[4:7], ["resume", "--", SESSION])
+        discuss("claude")
+        self.assertIn("--session-id", self.claude_args())
+        discuss("codex", **env)
+        self.assertEqual(self.codex_log.read_text().splitlines()[4], "--")
 
     def test_a_discussion_answers_from_a_worktree_of_main_it_removes_and_leaves_the_idea_as_it_was(self):
         idea = self.issue(title="Maybe a map", labels=["idea", "serial:web"], status="open")
@@ -534,6 +715,15 @@ class DiscussIdeaTest(Desk):
 
 class WorkPrTest(Desk):
     BRANCH = "agent/chore-audit-20261111-1200"
+
+    def test_a_review_follow_up_uses_codex_and_receives_the_request(self):
+        review = self.review(self.BRANCH)
+        env = self.codex_fake()
+        result = self.run_lib("work-pr.sh", str(review), REQUEST="Merge main", AGENT_DESK_ISSUE_RUNNER="codex", **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("<request>\nMerge main\n</request>", self.codex_log.read_text())
+        self.assertIn("Codex session ID is in the run log", self.notes(review)[0][1])
+        self.assertEqual(self.claude_args(), [])
 
     def test_a_run_posts_its_session_and_outcome_on_the_review(self):
         review = self.review(self.BRANCH)

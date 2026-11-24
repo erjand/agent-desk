@@ -7,7 +7,8 @@ for the board:
                                                  writes it
 
 An excerpt quotes the log lines that say what failed, each but a compiler's with the lines after it, which hold a failed
-test's expected and actual values.
+test's expected and actual values. A summary, which lib/merges.py gives a review that leaves the queue for failed
+checks, names the first failing tests.
 """
 
 import re
@@ -136,6 +137,97 @@ def check_brief(check):
 def excerpt_review(desk, repo, number, checkout):
     """The briefs of each failed check on review `number`'s head, read from the local store and git."""
     return "\n\n".join(check_brief(check) for check in failed_checks(desk, repo, number, checkout))
+
+
+# The lines that name a failed test, each with the name as its first group, or as its second for unittest's, whose first
+# is the test method: cargo-nextest's `FAIL [ 3.054s] (113/241) crate::binary test`, libtest's `test a::b ... FAILED`,
+# unittest's `FAIL: test_x (module.Case.test_x)`, pytest's `FAILED tests/a.py::test_b - …`, go's `--- FAIL: TestX`,
+# dotnet's `Failed Name [9 ms]`, bun's `(fail) name [1.2ms]`, node's and jest's `✖ name (1.2ms)`, and a runner's
+# `FAIL name: why`.
+TEST_LINES = (
+    re.compile(r"^\s*(?:FAIL|TIMEOUT)\s+\[\s*[\d.]+m?s\]\s+(?:\(\s*\d+/\d+\)\s+)?(.+?)\s*$"),
+    re.compile(r"^\s*test (\S+) \.\.\. FAILED\s*$"),
+    re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)"),
+    re.compile(r"^FAILED (\S+::\S+)"),
+    re.compile(r"^\s*--- FAIL: (\S+)"),
+    re.compile(r"^\s*Failed (\S+) \[[\d.]+ m?s\]"),
+    re.compile(r"^\s*\(fail\) (.+?)(?: \[[\d.]+m?s\])?\s*$"),
+    re.compile(r"^\s*[✖✕] (.+?) \([\d.]+ ?m?s\)\s*$"),
+    re.compile(r"^FAIL ([^:\[\s][^:\[]*?): "),
+)
+# How many characters of test names a summary shows before it counts the rest.
+SUMMARY_WIDTH = 52
+
+
+def test_name(line):
+    """The failed test a log line names, or None."""
+    for pattern in TEST_LINES:
+        match = pattern.match(line)
+        if not match:
+            continue
+        if match.lastindex == 2:
+            method, where = match.groups()
+            return where if where.endswith(f".{method}") else f"{where}.{method}"
+        return match.group(1)
+    return None
+
+
+def same_test(one, other):
+    """Whether `other` names `one` in short, as libtest's line inside nextest's output names the test nextest did."""
+    return one == other or any(one.endswith(f"{mark}{other}") for mark in (" ", ":", "."))
+
+
+def failed_tests(log):
+    """
+    The tests a check's log names as failed, in the order it first names them, each once: a runner that names a test
+    twice, as nextest and libtest do together, or in a summary at the end, adds no second name.
+    """
+    names = []
+    for line in map(clean_local, log.splitlines()):
+        name = test_name(line)
+        if name is None or any(same_test(known, name) for known in names):
+            continue
+        names = [known for known in names if not same_test(name, known)] + [name]
+    return names
+
+
+def clip(text, width):
+    return text if len(text) <= width else text[:width - 1].rstrip() + "…"
+
+
+def shown_tests(names, width=SUMMARY_WIDTH):
+    """The first of `names` that fit in `width` characters, the first clipped to fit, and how many more there are."""
+    shown = [clip(names[0], width)]
+    for name in names[1:]:
+        if len(", ".join(shown + [name])) > width:
+            break
+        shown.append(name)
+    more = len(names) - len(shown)
+    return ", ".join(shown) + (f" and {more} more" if more else "")
+
+
+def summary(log):
+    """
+    What failed in a check's log, in a line for the merge queue's note: the first failing tests by name, or, when the
+    log names none, the first line failure_excerpt picks; None when the log says nothing.
+    """
+    names = failed_tests(log)
+    if names:
+        return shown_tests(names)
+    excerpt, _ = failure_excerpt(log, context=0, limit=1)
+    return clip(excerpt[0].strip(), SUMMARY_WIDTH) if excerpt and excerpt[0].strip() else None
+
+
+def check_summary(check):
+    """
+    summary of a failed check's log, or None when its log is gone or says nothing. `check` is a row of the store's
+    `checks`.
+    """
+    try:
+        return summary(Path(check["log_path"]).read_text(encoding="utf-8", errors="replace")) \
+            if check.get("log_path") else None
+    except OSError:
+        return None
 
 
 def main(argv):

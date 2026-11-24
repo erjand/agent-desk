@@ -85,19 +85,94 @@ class IssueGateTest(DispatchCase):
         self.assertEqual(self.status(runs[1]), "running")
 
     def test_fresh_starts_take_free_slots_in_the_start_order_and_other_requests_keep_their_time(self):
+        self.configure({"slots": {"agent": 3}})
         first, second, third = self.issue(), self.issue(), self.issue()
+        worked = self.issue("in-progress")
         self.store.move(REPO, third, "top")
         runs = {first: self.labelled(first)}
-        comment = self.request("agent", "99")
+        other = self.request("agent", "99")
         runs.update({second: self.labelled(second), third: self.labelled(third)})
+        self.request("agent", str(worked), env={"EVENT": "issue_comment"})
         self.dispatcher.tick()
-        # The order is #3, #1, #2; the comment's run keeps the second place its request time gives it.
-        self.assertEqual(self.systemd.commands(), [["work-issue", str(third)], ["work-issue", "99"]])
+        # The follow-up, asked for last, starts first. The fresh starts' order is #3, #1, #2, and the other request
+        # keeps the second place its request time gives it among them.
+        self.assertEqual(self.systemd.commands(),
+                         [["work-issue", str(worked)], ["work-issue", str(third)], ["work-issue", "99"]])
         self.store.move(REPO, second, "top")
-        self.end(comment)
+        self.end(other)
         self.dispatcher.tick()
-        self.assertEqual(self.systemd.commands()[2:], [["work-issue", str(second)]])
+        self.assertEqual(self.systemd.commands()[3:], [["work-issue", str(second)]])
         self.assertEqual(self.status(runs[first]), "requested")
+
+    def test_a_follow_up_on_a_review_takes_the_next_free_slot_ahead_of_queued_issues(self):
+        self.configure({"slots": {"agent": 1}})
+        worked = self.issue("in-progress")
+        busy = self.request("agent", "99")
+        self.dispatcher.tick()
+        fresh = [self.labelled(self.issue()), self.labelled(self.issue())]
+        review = self.store.create(REPO, "review", "Work", branch=f"agent/issue-{worked}")
+        self.store.comment(REPO, review, "Rename the button.", to_agent=True)
+        self.dispatcher.tick()
+        [follow_up] = [run["id"] for run in self.store.runs(["requested"]) if run["id"] not in fresh]
+        self.assertEqual(self.store.request_of(follow_up)["payload"]["env"],
+                         {"EVENT": "issue_comment", "REPLY_PR": str(review)})
+        # The one slot is busy, so nothing starts over the limit.
+        self.assertEqual([self.status(run) for run in [follow_up, *fresh]], ["requested"] * 3)
+        self.end(busy)
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in [follow_up, *fresh]], ["running", "requested", "requested"])
+        self.end(follow_up)
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in fresh], ["running", "requested"])
+
+    def test_a_gpu_issue_waits_for_a_gpu_slot_while_issues_behind_it_take_the_free_agent_slots(self):
+        self.configure({"slots": {"agent": 3, "gpu": 1}})
+        rendered, later = self.issue(labels=["gpu"]), self.issue()
+        lit, plain = self.issue(labels=["gpu"]), self.issue()
+        runs = [self.labelled(one) for one in (rendered, later, lit, plain)]
+        # #later's agent adds `gpu` once its run asked, so its label counts from then on.
+        self.store.edit(REPO, later, add_labels=["gpu"])
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in runs], ["running", "requested", "requested", "running"])
+        self.assertIn(f"Run {runs[1]} waits: its project's 1 gpu slots are busy.", self.said)
+        self.assertEqual(self.waits(runs[2]), ("slot", "a free gpu slot"))
+        # A free agent slot goes to no gpu issue while the gpu slot is busy.
+        self.assertEqual(len(self.systemd.commands()), 2)
+        self.end(runs[0])
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in runs[1:3]], ["running", "requested"])
+
+    def test_a_gpu_count_left_unset_caps_nothing_beyond_the_agent_slots(self):
+        self.configure({"slots": {"agent": 2}})
+        runs = [self.labelled(self.issue(labels=["gpu"])) for _ in range(3)]
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in runs], ["running", "running", "requested"])
+        self.assertIn(f"Run {runs[2]} waits: its project's 2 agent slots are busy.", self.said)
+
+    def test_a_resume_of_an_in_progress_issue_takes_the_free_slot_ahead_of_older_fresh_starts(self):
+        self.configure({"slots": {"agent": 1}})
+        busy = self.request("agent", "99")
+        self.dispatcher.tick()
+        queued = self.issue()
+        fresh = self.labelled(queued)
+        # The run on #worked timed out with the issue in-progress, and its resume asks after the fresh start.
+        worked = self.issue("in-progress")
+        resume = self.labelled(worked)
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in (resume, fresh)], ["requested", "requested"])
+        self.end(busy)
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in (resume, fresh)], ["running", "requested"])
+        self.assertEqual(self.systemd.commands()[1:], [["work-issue", str(worked)]])
+
+    def test_a_merge_queue_fix_starts_before_a_follow_up(self):
+        number = self.issue()
+        fresh = self.labelled(number)
+        follow_up = self.request("agent", "pr-40", env={"REQUEST": "Rename the button."})
+        fix = self.request("fix", "41")
+        self.dispatcher.tick()
+        self.assertEqual(self.systemd.commands(), [["fix", "41"], ["work-pr", "40"], ["work-issue", str(number)]])
+        self.assertEqual([self.status(run) for run in (fix, follow_up, fresh)], ["running"] * 3)
 
     def test_a_move_alone_reorders_the_waiting_requests_for_the_next_free_slot(self):
         self.configure({"slots": {"agent": 1}})
@@ -110,6 +185,19 @@ class IssueGateTest(DispatchCase):
         self.end(busy)
         self.dispatcher.tick()
         self.assertEqual([self.status(run) for run in runs], ["requested", "running"])
+
+    def test_a_sort_alone_reorders_the_waiting_requests_for_the_next_free_slot(self):
+        self.configure({"slots": {"agent": 1}})
+        busy = self.request("agent", "99")
+        first, second = self.issue(), self.issue()
+        self.store.move(REPO, second, "top")
+        runs = [self.labelled(first), self.labelled(second)]
+        self.dispatcher.tick()
+        self.assertTrue(self.store.sort_order(REPO))
+        self.assertTrue(self.dispatcher.tick())
+        self.end(busy)
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in runs], ["running", "requested"])
 
     def test_a_serial_groups_slot_goes_to_its_first_issue_in_the_start_order(self):
         holder = self.issue("in-progress", labels=["serial:audio"])

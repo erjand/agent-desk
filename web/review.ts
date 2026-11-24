@@ -12,8 +12,9 @@ import { markdownText, renderMarkdown } from './markdown.ts'
 import { childEnv, HERE, host } from './state.ts'
 import type { Desk } from './state.ts'
 import { storedAnswers, storedAsset, storedChecks, storedComments, storedItem, storedLabels, storedLineComments,
-  storedLinked, storedReview, storePath } from './store.ts'
-import type { StoredCheck, StoredComment, StoredItem, StoredLineComment, StoredLinked, StoredReview } from './store.ts'
+  storedLinked, storedPosting, storedReview, storePath } from './store.ts'
+import type { PostingIdentity, StoredCheck, StoredComment, StoredItem, StoredLineComment, StoredLinked, StoredReview }
+  from './store.ts'
 
 const STORE_CLI = join(HERE, '..', 'lib', 'store_cli.py')
 
@@ -76,10 +77,9 @@ export type LineComment = Comment & { id: number; path: string; line: number; sh
   outdated: boolean; code?: { line: number; text: string }[]; sent: boolean }
 
 /**
- * Who wrote something: `you`, `agent`, `desk`, or the login an import kept for someone else. The store keeps no
- * pictures, so the page draws the login's initial in a circle.
+ * The store's author and the recorded model of the run that posted as that author.
  */
-export type Person = { login: string }
+export type Person = { login: string; posting?: PostingIdentity }
 
 /** A label, with its color as six hex digits. */
 type Label = { name: string; color: string }
@@ -201,6 +201,15 @@ export function personOf(author: string | null): Person {
   return { login: author ?? 'ghost' }
 }
 
+const LEGACY_SIGNATURE = /(?:^|\n)<sub>Posted by agent-desk\b[^\n]*<\/sub>\s*(?:<!-- agent-desk -->\s*)?$/
+
+function postOf(desk: Desk, post: StoredItem | StoredComment): { author: Person; body: string } {
+  const author = personOf(post.author)
+  const posting = author.login === 'agent' && post.author_run ? storedPosting(desk.repo, post.author_run) : undefined
+  return posting ? { author: { ...author, posting }, body: post.body.replace(LEGACY_SIGNATURE, '') }
+    : { author, body: post.body }
+}
+
 function labelsOf(labels: Label[]): Label[] {
   return labels.map(({ name, color }) => ({ name, color: /^[0-9a-f]{6}$/i.test(color) ? color : 'ededed' }))
 }
@@ -239,8 +248,9 @@ function sectionWithAssets(desk: Desk, section: DecisionSection): DecisionSectio
 
 /** A stored comment as the page shows it, with its Decisions Needed sections and the section it answers. */
 function commentOf(desk: Desk, one: StoredComment): Comment {
-  return { id: one.id, author: personOf(one.author), at: one.createdAt, html: markdownOf(desk, one.body),
-    parts: partsOf(desk, one.body, `comment-${one.id}`, `the comment of ${one.createdAt}`),
+  const { author, body } = postOf(desk, one)
+  return { id: one.id, author, at: one.createdAt, html: markdownOf(desk, body),
+    parts: partsOf(desk, body, `comment-${one.id}`, `the comment of ${one.createdAt}`),
     answers: answerOf(one.body) ?? undefined, ...marksOf(one) }
 }
 
@@ -287,8 +297,8 @@ function ranOf(runs: Map<number, number>, id: number): { run?: number } {
 const AGENT_STATES = new Set(['queued', 'in-progress', 'waiting', 'closed'])
 
 /**
- * Whether a stored item is an idea, as the board's Ideas column shows one and lib/dispatch.py's is_idea reads it: an
- * open issue labelled idea in no agent state. A comment sent to the agent on one asks for a discussion of it.
+ * Whether a stored item is an idea, as the board's Ideas column shows one and lib/dispatch_comments.py's is_idea reads
+ * it: an open issue labelled idea in no agent state. A comment sent to the agent on one asks for a discussion of it.
  */
 function isIdeaItem(desk: Desk, item: StoredItem): boolean {
   return item.kind === 'issue' && !AGENT_STATES.has(item.state) && storedLabels(desk.repo, item.number).includes('idea')
@@ -303,10 +313,11 @@ export function issuePreviewOf(desk: Desk, number: number): IssuePreview | null 
   const answers = storedAnswers(desk.repo, number)
   const comments = commentsOf(desk, number, answers.runs)
   const state = issueState(issue)
+  const { author, body } = postOf(desk, issue)
   return { number, title: issue.title, url: itemLink(desk, number), state, ...duplicateOf(desk, number, state),
-    author: personOf(issue.author), at: issue.createdAt, labels: coloredLabels(desk, number),
-    body: markdownOf(desk, issue.body, true),
-    bodyParts: partsOf(desk, issue.body, 'issue-body', 'the description', true), version: bodyVersion(issue.body),
+    author, at: issue.createdAt, labels: coloredLabels(desk, number),
+    body: markdownOf(desk, body, true),
+    bodyParts: partsOf(desk, body, 'issue-body', 'the description', true), version: bodyVersion(issue.body),
     commentCount: comments.length,
     comments, waiting: answers.waiting, idea: isIdeaItem(desk, issue), reviews: reviewsFixing(desk, number) }
 }
@@ -547,9 +558,10 @@ export async function previewOf(desk: Desk, number: number): Promise<Preview | n
   const files = 'files' in diff ? diff.files : []
   const tip = 'tip' in diff ? diff.tip : null
   const answers = storedAnswers(desk.repo, number)
+  const { author, body } = postOf(desk, item)
   return {
     number, title: item.title, url: itemLink(desk, number), state: reviewState(item, review),
-    author: personOf(item.author), at: item.createdAt, head: review.branch, base: review.base,
+    author, at: item.createdAt, head: review.branch, base: review.base,
     commits: 'commits' in diff ? diff.commits : 0, labels: coloredLabels(desk, number),
     additions: files.reduce((sum, file) => sum + file.additions, 0),
     deletions: files.reduce((sum, file) => sum + file.deletions, 0), files,
@@ -557,7 +569,7 @@ export async function previewOf(desk: Desk, number: number): Promise<Preview | n
     checks: storedChecks(desk.repo, review.branch, review.head).map(check => checkOf(desk, check)),
     issues: storedLinked(desk.repo, number, 'fixes', true).map(one => ({ number: one.number, title: one.title,
       url: itemLink(desk, one.number) })),
-    body: markdownOf(desk, item.body), bodyParts: partsOf(desk, item.body, 'review-body', 'the description'),
+    body: markdownOf(desk, body), bodyParts: partsOf(desk, body, 'review-body', 'the description'),
     comments: commentsOf(desk, number, answers.runs), waiting: answers.waiting,
     tip, lineComments: await Promise.all(storedLineComments(desk.repo, number)
       .map(one => lineCommentOf(desk, one, tip, answers.runs))),
@@ -629,7 +641,8 @@ async function placeOf(desk: Desk, one: StoredLineComment, tip: string):
 async function lineCommentOf(desk: Desk, one: StoredLineComment, tip: string | null, runs: Map<number, number>):
   Promise<LineComment> {
   // A line comment reaches the agent in the comment that quoted it, or on its own when it was sent to the agent.
-  const comment = { id: one.id, author: personOf(one.author), at: one.createdAt, html: markdownOf(desk, one.body),
+  const { author, body } = postOf(desk, one)
+  const comment = { id: one.id, author, at: one.createdAt, html: markdownOf(desk, body),
     path: one.path, line: one.line, sent: one.sentIn !== null, ...ranOf(runs, one.sentIn ?? one.id), ...marksOf(one) }
   if (tip === null) {
     return { ...comment, shown: null, outdated: false }
@@ -788,7 +801,7 @@ export function agentRequest(text: string, unsent: Quoted[]): string {
   return quoted.length === 0 ? lead : `${lead}\n\n**Line comments**\n\n${quoted.join('\n\n')}`
 }
 
-// The branches an agent works, as lib/dispatch.py's AGENT_BRANCH names them.
+// The branches an agent works, as lib/dispatch_comments.py's AGENT_BRANCH names them.
 const AGENT_BRANCH = /^agent\/[a-z0-9][a-z0-9-]*$/
 
 async function quotedOf(desk: Desk, unsent: StoredLineComment[], tip: string | null): Promise<Quoted[]> {

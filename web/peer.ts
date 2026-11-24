@@ -65,6 +65,16 @@ export function socketUid(table: string, hex: string, port: number, serverPort: 
   return null
 }
 
+/**
+ * Whether `address`, a connection's remote address, is this machine's loopback: 127.0.0.0/8, `::1`, or an
+ * IPv4-mapped loopback address such as `::ffff:127.0.0.1`.
+ */
+export function loopback(address: string | undefined): boolean {
+  const lower = (address ?? '').toLowerCase()
+  const ipv4 = lower.startsWith('::ffff:') ? lower.slice('::ffff:'.length) : lower
+  return lower === '::1' || (isIPv4(ipv4) && ipv4.startsWith('127.'))
+}
+
 const verdicts = new WeakMap<Socket, Promise<boolean>>()
 
 /**

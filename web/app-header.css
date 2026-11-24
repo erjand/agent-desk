@@ -3,17 +3,18 @@
 
 header { flex: none; background: var(--chrome); border-bottom: 1px solid var(--border); }
 /* In light, the header's text on --chrome takes deeper warning, error, and healthy tones than the page's, so the notices,
-   the disconnected status, and the gauges keep AA contrast on the bar and on the gauges' pill. */
+   the disconnected status, the gauges, and the GitHub button's failing count keep AA contrast on the bar, on the gauges'
+   pill, and on the button. */
 @media (prefers-color-scheme: light) {
-  header .notice, header .code-notice, header .offline, header .gauges, header .usage {
+  header .notice, header .code-notice, header .offline, header .gauges, header .usage, header .counter {
     --warning: oklch(0.49 0.11 75);
     --error: oklch(0.51 0.18 25);
     --gauge-ok: oklch(0.47 0.09 155);
   }
 }
 
-/* The bar's controls align to the top of their line, each as tall as a button, so the restart notice under the right
-   end's row leaves them level with it. */
+/* The bar's controls align to the top of their line, each as tall as a button, so the restart notice under the page's
+   name leaves them level with it. */
 .bar {
   display: flex;
   flex-wrap: wrap;
@@ -21,7 +22,9 @@ header { flex: none; background: var(--chrome); border-bottom: 1px solid var(--b
   gap: 6px 14px;
   padding: 12px 16px 6px;
 }
-.bar > .name, .bar > .muted, .bar > .offline { line-height: 32px; }
+.brand > .name, .bar > .muted, .bar > .offline { line-height: 32px; }
+/* The page's name, with the restart notice on a line of its own under it, at the bar's left. */
+.brand { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 
 .name { font-size: 16px; font-weight: 600; }
 .hold { display: flex; align-items: center; gap: 8px; min-height: 32px; }
@@ -54,14 +57,15 @@ header { flex: none; background: var(--chrome); border-bottom: 1px solid var(--b
   border-color: var(--mode-held);
   color: var(--mode-held);
 }
-/* The weekly usage limit beside the mode buttons: a small muted button while it is off, the week's usage while it is
-   on, in the pressed Hold button's amber at or over the limit, and in the error tone while it can't read usage. Its
-   popover opens under it, over the page, and hides the button's tooltip while it shows. */
 .usage { position: relative; display: flex; align-items: center; min-height: 32px; }
-.usage-button { font-variant-numeric: tabular-nums; }
-.usage-button.off { height: 24px; padding: 0 8px; color: var(--muted); font-size: 12px; }
-.usage-button.over { border-color: var(--mode-held); color: var(--mode-held); font-weight: 600; }
-.usage-button.unread { color: var(--error); }
+.usage-button { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.usage-button.over { border-color: var(--mode-held); }
+.usage-button .balance { display: flex; align-items: center; gap: 6px; }
+.usage-button .balance + .balance { padding-left: 8px; border-left: 1px solid var(--border); }
+.usage-button .account-name { font-weight: 600; }
+.usage-button .reading.idle { color: var(--muted); }
+.usage-button .reading.over { color: var(--mode-held); font-weight: 600; }
+.usage-button .reading.unread { color: var(--error); }
 .usage-pop {
   position: absolute;
   z-index: 40;
@@ -69,7 +73,9 @@ header { flex: none; background: var(--chrome); border-bottom: 1px solid var(--b
   left: 0;
   display: grid;
   gap: 10px;
-  width: 300px;
+  width: 320px;
+  max-height: calc(100dvh - 100px);
+  overflow: auto;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -79,6 +85,30 @@ header { flex: none; background: var(--chrome); border-bottom: 1px solid var(--b
   line-height: 1.4;
 }
 .usage-pop p { margin: 0; }
+.billing-provider { display: flex; align-items: baseline; gap: 6px; }
+.usage-pop h3 { margin: 4px 0 -4px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; }
+.account-part, .issue-runner, .issue-runner label { display: grid; gap: 8px; }
+.issue-runner label { min-width: 0; gap: 3px; }
+.issue-runner select { min-width: 0; }
+.account-choice, .account-key, .account-buttons { display: flex; align-items: center; gap: 6px; }
+.account-choice > span { margin-right: 4px; }
+.account-choice button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.account-key { justify-content: space-between; }
+.account-confirm { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--inset); }
+.account-key-field { display: grid; gap: 6px; }
+.account-key-field input, .issue-runner select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--button-border);
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--fg);
+  font: inherit;
+}
+.account-key-field input[aria-invalid="true"] { border-color: var(--error); }
+.account-key-field input:focus-visible, .issue-runner select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .usage-switch { display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
 /* The switch is a checkbox drawn as a track and knob, in the accent while on. */
 .usage-switch input {
@@ -114,7 +144,7 @@ header { flex: none; background: var(--chrome); border-bottom: 1px solid var(--b
 .usage-percent { display: flex; align-items: center; gap: 6px; margin: 0; }
 .usage-percent label { margin-right: 4px; }
 .usage-percent input {
-  width: 72px;
+  width: 80px;
   height: 28px;
   padding: 0 8px;
   border: 1px solid var(--button-border);
@@ -181,8 +211,7 @@ button[data-tip]:hover::after, button[data-tip]:focus-visible::after {
 .tab-mode.held { color: var(--mode-held); }
 /* The bar's right end is a row that wraps as one unit under the bar's other controls: the machine's gauges in a pill,
    the History and Runners buttons, and the help button. The pill is a button, as tall as the others, that opens the
-   Resources view. A window too narrow for the row wraps the gauges inside the pill, which then grows taller. The
-   restart notice takes a line of its own under the row, at the bar's right. */
+   Resources view. A window too narrow for the row wraps the gauges inside the pill, which then grows taller. */
 .meters { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 0; margin-left: auto; }
 .side-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .side-row > button { flex: none; }
@@ -206,7 +235,7 @@ button[data-tip]:hover::after, button[data-tip]:focus-visible::after {
   font-variant-numeric: tabular-nums;
 }
 .gauges:hover { background: var(--button-hover); }
-.code-notice { font-size: 12px; line-height: 1.3; text-align: right; }
+.code-notice { font-size: 12px; line-height: 1.3; }
 .gauges > span { white-space: nowrap; }
 .gauges .divider { color: var(--muted); opacity: 0.6; }
 

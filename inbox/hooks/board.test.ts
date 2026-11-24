@@ -1,8 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Row } from '../types'
-import { agentWork, ago, backupOf, choreColumns, choreLines, cite, fetchBoard, githubRows, heldBy, isBacklog, isIdea,
-  isInFlight, linkOf, mergeQueueOf, originRow, stackedOn, stopOf, stoppedRow, when } from './board.ts'
+import { agentWork, ago, backupOf, byListOrder, choreColumns, choreLines, cite, fetchBoard, githubRows, heldBy,
+  isBacklog, isIdea, isInFlight, linkOf, mergeQueueOf, originRow, stackedOn, stopOf, stoppedRow, when } from './board.ts'
 import type { BackupState, Host, StoreBoard } from './board.ts'
 import { BOARD_READ, NOW, issue, review, storeHost, storeOf } from './board.fixtures.ts'
 import { GOLDEN } from './board.golden.ts'
@@ -82,8 +82,8 @@ test('each column comes from the store: an issue\'s state, its blockers and labe
   expect(board.runners.map(row => [row.key, row.number, row.url])).toEqual([
     ['unit-5', 72, 'http://127.0.0.1:7480/#game:72']])
   expect(board.design.map(row => row.key)).toEqual(['decide-76'])
-  expect(board.blocked.map(row => [row.key, row.note])).toEqual([['blocked-77', 'on hold'],
-    ['blocked-79', 'blocked by #70']])
+  expect(board.blocked.map(row => [row.key, row.note])).toEqual([['blocked-79', 'blocked by #70'],
+    ['blocked-77', 'on hold']])
   // An idea's row moves it to Open with Move to Open, and has no Agent-ready button.
   expect(board.ideas.map(row => [row.key, row.actions])).toEqual([['idea-78', ['open', 'to-open', 'close']]])
   expect(board.merging.map(row => [row.key, row.text])).toEqual([['merging-83', 'PR 83  (checks running)'],
@@ -108,15 +108,17 @@ test('the golden read tests/test_board.py checks builds every column, from one c
   expect(board.error).toBeNull()
   expect(board.at).toBe('12:00')
   expect(board.next.map(row => row.key)).toEqual(['next-1'])
-  // #2 is picked for Manual, so it says so, waits for a slot and not for Start, and offers Unpick. Fix sent #15 back
-  // to its agent, whose comment the dispatcher hasn't answered, and its row follows the issues in the start order.
+  // Fix sent #15 back to its agent, whose comment the dispatcher hasn't answered, and its row leads the issues in the
+  // start order. #2 is picked for Manual, so it says so, waits for a slot and not for Start, and offers Unpick.
   // Nobody picked serial #4, so it waits for Start too.
   expect(board.queued.map(row => [row.key, row.note, row.actions])).toEqual([
-    ['queued-2', 'picked', ['open', 'unpick', 'to-open', 'close', 'down']],
-    ['waiting-3', 'waiting on #1', ['open', 'to-open', 'close', 'up', 'down', 'top']],
-    ['waiting-4', 'waiting on #5', ['open', 'start', 'to-open', 'close', 'up', 'top']],
-    ['rerun-pr-15', 'fixing conflicts', ['open']]])
-  expect(board.runners.map(row => [row.key, row.number, row.labels])).toEqual([['unit-1', 9, ['benchmark']]])
+    ['rerun-pr-15', 'fixing conflicts', ['open']],
+    ['queued-2', 'picked', ['open', 'unpick', 'to-open', 'close', 'down', 'bottom']],
+    ['waiting-3', 'waiting on #1', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+    ['waiting-4', 'waiting on #5', ['open', 'start', 'to-open', 'close', 'up', 'top']]])
+  // #9's run stalled at 11:48 in a test that left the CPU idle.
+  expect(board.runners.map(row => [row.key, row.number, row.labels, row.note, row.stalled])).toEqual([['unit-1', 9,
+    ['benchmark'], 'stalled 12 min in Bash: cargo test --workspace', true]])
   // The project sets no slots, so it has the defaults; #13's retry is the running check.
   expect(board.slots).toEqual([{ kind: 'agent', busy: 1, total: 3 }, { kind: 'chore', busy: 0, total: 1 },
     { kind: 'fix', busy: 0, total: 1 }, { kind: 'check', busy: 1, total: 2 }])
@@ -131,8 +133,7 @@ test('the golden read tests/test_board.py checks builds every column, from one c
   expect(board.needs.map(row => [row.key, row.state, row.note, row.actions, row.rerun])).toEqual([
     ['pr-11', 'review', undefined, ['open', 'merge'], undefined],
     ['pr-13', 'failing', 'test failed: map.ts:4: error: no tiles', ['open', 'fix'], undefined],
-    ['failed-unit-2', 'failed', 'agent', ['open', 'log', 'retry', 'dismiss'], undefined],
-    ['stopped-5', 'stopped', undefined, ['open', 'restart', 'close'], -2],
+    ['stopped-5', 'stopped', 'failed', ['open', 'log', 'restart', 'close'], -2],
     ['draft-19', 'draft', undefined, ['open', 'undraft'], undefined],
   ])
   expect(board.merged.map(row => [row.key, row.time])).toEqual([['merged-21', 'Nov 10 10:30']])
@@ -154,10 +155,10 @@ test('Unblock frees an issue on hold or behind open blockers, and not one waitin
   issue(53, 'in-progress', { landed: { base: 'agent/issue-52', basePr: { number: 186, state: 'OPEN' } } })]
   const board = await fetchBoard(storeHost(storeOf({ issues })), { root: '/x', main: '/x' })
   expect(board.blocked.map(row => [row.key, row.note, row.actions])).toEqual([
-    ['blocked-82', 'blocked by #70', ['open', 'unpause', 'unblock', 'close']],
-    ['blocked-81', 'blocked by #70', ['open', 'ready', 'unblock', 'close']],
-    ['blocked-80', 'on hold', ['open', 'unpause', 'unblock', 'close']],
-    ['blocked-53', 'waiting on PR #186', ['open']],
+    ['blocked-82', 'blocked by #70', ['open', 'unpause', 'unblock', 'close', 'down', 'bottom']],
+    ['blocked-81', 'blocked by #70', ['open', 'ready', 'unblock', 'close', 'up', 'down', 'top', 'bottom']],
+    ['blocked-80', 'on hold', ['open', 'unpause', 'unblock', 'close', 'up', 'top']],
+    ['stack-wait-53', 'waiting on PR #186', ['open']],
   ])
 
   // Once the base PR merges too, the issue needs closing by hand.
@@ -186,7 +187,8 @@ test('an in-progress issue with no agent counts as in flight, unless a PR or a r
 
 test('an idea an agent discusses stays in Ideas while Runners shows the discussion, and its failure in Needs You',
   async () => {
-  const ideas = [issue(8, 'open', { labels: ['idea'] }), issue(9, 'open', { labels: ['idea'] })]
+  const ideas = [issue(8, 'open', { labels: ['idea'], listPosition: 1 }),
+    issue(9, 'open', { labels: ['idea'], listPosition: 2 })]
   const runs = [{ id: 4, kind: 'agent', target: 'idea-8', status: 'running', unit: 'u4.service',
     started_at: '2026-10-29T11:50:00Z' },
   { id: 5, kind: 'agent', target: 'idea-9', status: 'failed', unit: 'u5.service', started_at: '2026-10-29T11:00:00Z',
@@ -221,22 +223,24 @@ test('an issue labelled backlog sits in Backlog until the person queues it, and 
   expect(isBacklog(new Set(['enhancement']), 'open')).toBe(false)
 })
 
-test('Backlog lists the issues labelled backlog newest first, apart from Open, Blocked, and Needs Design, with Move '
-  + 'to Open and no Agent-ready button', async () => {
-  const at = (minute: number) => ({ createdAt: `2026-10-29T09:${String(minute).padStart(2, '0')}:00Z` })
+test('Backlog lists the issues labelled backlog in the list order, apart from Open, Blocked, and Needs Design, with '
+  + 'Move to Open and no Agent-ready button', async () => {
+  const at = (place: number) => ({ listPosition: place })
   const issues = [
-    issue(90, 'open', { labels: ['backlog'], ...at(10) }),
-    issue(91, 'needs-design', { labels: ['backlog'], ...at(30) }),
-    issue(92, 'on-hold', { labels: ['backlog'], ...at(20) }),
-    issue(93, 'open', { labels: ['backlog'], blockedBy: [{ number: 96, state: 'OPEN' }], ...at(40) }),
-    issue(94, 'open', { labels: ['backlog', 'idea'], ...at(50) }),
-    issue(95, 'queued', { labels: ['backlog'], ...at(5) }),
-    issue(96, 'open', at(1)),
+    issue(90, 'open', { labels: ['backlog'], ...at(5) }),
+    issue(91, 'needs-design', { labels: ['backlog'], ...at(3) }),
+    issue(92, 'on-hold', { labels: ['backlog'], ...at(4) }),
+    issue(93, 'open', { labels: ['backlog'], blockedBy: [{ number: 96, state: 'OPEN' }], ...at(2) }),
+    issue(94, 'open', { labels: ['backlog', 'idea'], ...at(1) }),
+    issue(95, 'queued', { labels: ['backlog'] }),
+    issue(96, 'open', at(6)),
   ]
   const board = await fetchBoard(storeHost(storeOf({ issues })), { root: '/x', main: '/x' })
   expect(board.backlog.map(row => [row.key, row.actions])).toEqual([
-    ['backlog-93', ['open', 'to-open', 'close']], ['backlog-91', ['open', 'to-open', 'close']],
-    ['backlog-92', ['open', 'to-open', 'close']], ['backlog-90', ['open', 'to-open', 'close']]])
+    ['backlog-93', ['open', 'to-open', 'close', 'down', 'bottom']],
+    ['backlog-91', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+    ['backlog-92', ['open', 'to-open', 'close', 'up', 'down', 'top', 'bottom']],
+    ['backlog-90', ['open', 'to-open', 'close', 'up', 'top']]])
   expect(board.backlog[0]?.labels).toEqual(['backlog'])
   // Open rows offer Move to Backlog beside Agent-ready; an issue queued another way leaves Backlog for Queued.
   expect(board.next.map(row => [row.key, row.actions])).toEqual([['next-96', ['open', 'ready', 'to-backlog', 'close']]])
@@ -244,6 +248,46 @@ test('Backlog lists the issues labelled backlog newest first, apart from Open, B
   expect(board.queued.map(row => row.key)).toEqual(['queued-95'])
   expect([...board.blocked, ...board.design].map(row => row.key)).toEqual([])
   expect(board.designTotal).toBe(0)
+})
+
+test('Open, Blocked, Needs Design, Backlog, and Ideas list their issues in the list order, those without a place '
+  + 'after, the highest number first, and Blocked lists an issue waiting on a stacked PR\'s base last', async () => {
+  const at = (place: number) => ({ listPosition: place })
+  const issues = [
+    issue(10, 'open', at(6)), issue(11, 'open', at(2)), issue(12, 'open'), issue(13, 'open', at(9)), issue(14, 'open'),
+    issue(20, 'on-hold', at(4)), issue(21, 'open', { blockedBy: [{ number: 10, state: 'OPEN' }], ...at(1) }),
+    issue(22, 'in-progress', { landed: { base: 'agent/issue-9', basePr: { number: 186, state: 'OPEN' } }, ...at(3) }),
+    issue(30, 'needs-design', at(8)), issue(31, 'needs-design', at(5)),
+    issue(40, 'open', { labels: ['backlog'], ...at(11) }), issue(41, 'open', { labels: ['backlog'], ...at(7) }),
+    issue(50, 'open', { labels: ['idea'], ...at(12) }), issue(51, 'open', { labels: ['idea'], ...at(10) }),
+  ]
+  const board = await fetchBoard(storeHost(storeOf({ issues })), { root: '/x', main: '/x' })
+  expect(board.next.map(row => row.number)).toEqual([11, 10, 13, 14, 12])
+  expect(board.blocked.map(row => row.number)).toEqual([21, 20, 22])
+  expect(board.design.map(row => row.number)).toEqual([31, 30])
+  expect(board.backlog.map(row => row.number)).toEqual([41, 40])
+  expect(board.ideas.map(row => row.number)).toEqual([51, 50])
+  expect([issue(3), issue(5), issue(4, 'open', at(1))].sort(byListOrder).map(one => one.number)).toEqual([4, 5, 3])
+
+  // Each issue gets the moves its place in its section allows, after its other buttons, and Blocked's issue that
+  // waits on a stacked PR's base gets none.
+  const moves = (rows: Row[]) => rows.map(row => row.actions.filter(one => ['up', 'down', 'top', 'bottom'].includes(one)))
+  expect(moves(board.next)).toEqual([['down', 'bottom'], ['up', 'down', 'top', 'bottom'],
+    ['up', 'down', 'top', 'bottom'], ['up', 'down', 'top', 'bottom'], ['up', 'top']])
+  expect(board.blocked.map(row => [row.key, row.actions])).toEqual([
+    ['blocked-21', ['open', 'ready', 'unblock', 'close', 'down', 'bottom']],
+    ['blocked-20', ['open', 'unpause', 'unblock', 'close', 'up', 'top']], ['stack-wait-22', ['open']]])
+  expect(board.design.map(row => row.actions)).toEqual([['open', 'designed', 'close', 'down', 'bottom'],
+    ['open', 'designed', 'close', 'up', 'top']])
+  expect(board.backlog.map(row => row.actions)).toEqual([['open', 'to-open', 'close', 'down', 'bottom'],
+    ['open', 'to-open', 'close', 'up', 'top']])
+  expect(board.ideas.map(row => row.actions)).toEqual([['open', 'to-open', 'close', 'down', 'bottom'],
+    ['open', 'to-open', 'close', 'up', 'top']])
+  // A section with one issue has no moves.
+  const lone = await fetchBoard(storeHost(storeOf({ issues: [issue(60, 'open'), issue(61, 'open', { labels: ['idea'] })] })),
+    { root: '/x', main: '/x' })
+  expect([lone.next[0]?.actions, lone.ideas[0]?.actions]).toEqual([['open', 'ready', 'to-backlog', 'close'],
+    ['open', 'to-open', 'close']])
 })
 
 test('a PR stacked on another agent branch waits on the base PR, then merges with it', () => {
@@ -293,12 +337,12 @@ test('a merging review whose auto-fix or branch check the dispatcher holds says 
     started_at: null, ...extra }]
   const board = async (parts: Partial<StoreBoard>) => fetchBoard(storeHost(storeOf({ reviews, queue, ...parts })),
     { root: '/x', main: '/x' })
-  const memory = await board({ runs: fix({ gate: 'memory', reason: 'memory: 5.3 GB free of 9 GB needed' }) })
+  const memory = await board({ runs: fix({ gate: 'memory', reason: 'memory: 5.3 GB free of 1 GB + 8 GB reserve' }) })
   expect(memory.merging.map(row => [row.key, row.note])).toEqual([
-    ['merging-298', 'conflicts with main; auto-fix waits for memory: 5.3 GB free of 9 GB needed'],
+    ['merging-298', 'conflicts with main; auto-fix waits for memory: 5.3 GB free of 1 GB + 8 GB reserve'],
     ['merging-300', 'after #298'], ['merging-303', 'after #300']])
-  expect(memory.merging[0]?.text).toBe('PR 298  (conflicts with main; auto-fix waits for memory: 5.3 GB free of 9 GB '
-    + 'needed)')
+  expect(memory.merging[0]?.text).toBe('PR 298  (conflicts with main; auto-fix waits for memory: 5.3 GB free of 1 GB '
+    + '+ 8 GB reserve)')
   const slot = await board({ runs: fix({ gate: 'slot', reason: 'a free fix slot' }) })
   expect(slot.merging[0]?.note).toBe('conflicts with main; auto-fix waits for a free fix slot')
   // A fix the dispatcher records no reason for, or one that works, leaves the note as the queue wrote it.
@@ -402,9 +446,10 @@ test('a run the dispatcher holds shows in Runners while it works and in Queued w
     // Its issue closed since, so the failure has nothing left to retry.
     { id: 8, kind: 'agent', target: '44', status: 'failed', unit: 'u8.service', started_at: null },
   ]
+  // #9's stopped row carries its failed run, so the run shows there alone.
   const after = await fetchBoard(storeHost(storeOf({ issues, runs: ended })), { root: '/x', main: '/x' })
-  expect(after.needs.filter(row => row.key.startsWith('failed-')).map(row => row.key))
-    .toEqual(['failed-unit-6', 'failed-unit-7'])
+  expect(after.needs.filter(row => row.number === 9 || row.key.startsWith('failed-')).map(row => [row.key, row.rerun]))
+    .toEqual([['failed-unit-7', undefined], ['stopped-9', -6]])
 })
 
 test('a PR whose comment to the agent the dispatcher hasn\'t answered waits in Queued for its agent, and one no agent '
@@ -436,8 +481,8 @@ test('an issue sent back to its open review names the review in Queued and Worki
   // Each issue shows once, by its review and its issue, with Cancel for the request that waits on it.
   expect(waiting.queued.map(row => [row.key, row.number, row.issue, row.pr, row.url, row.request, row.actions]))
     .toEqual([
-      ['rerun-590', 641, 590, true, 'http://127.0.0.1:7480/#game:641', 8, ['open', 'cancel']],
-      ['rerun-pr-640', 640, 588, true, 'http://127.0.0.1:7480/#game:640', 7, ['open', 'cancel']]])
+      ['rerun-pr-640', 640, 588, true, 'http://127.0.0.1:7480/#game:640', 7, ['open', 'cancel']],
+      ['rerun-590', 641, 590, true, 'http://127.0.0.1:7480/#game:641', 8, ['open', 'cancel']]])
   expect(waiting.needs).toEqual([])
   const running = requested.map(one => ({ ...one, status: 'running', unit: `u${one.id}.service`,
     started_at: '2026-10-29T11:00:00Z' }))
@@ -471,6 +516,25 @@ test('a PR whose checks fail shows failing with its first error and Fix, and a c
     ['pr-82', 'conflicts', 'auto-fix on Merge', ['open', 'merge', 'fix']],
     ['pr-83', 'review', undefined, ['open', 'merge']],
     ['pr-84', 'review', undefined, ['open', 'merge']],
+  ])
+})
+
+test('a ready PR names the base its check merged: a failure names the commit, and a pass against an older one how far behind',
+  async () => {
+  const log = '/state/agent-desk/checks/org__game/32.log'
+  const reviews = [review(85, { checks: [{ name: 'test', status: 'failed', attempt: 2, log, base: 'main',
+    baseSha: '01840f3c9e2a', recheck: true }] }),
+  review(86, { checks: [{ name: 'test', status: 'passed', attempt: 1, base: 'main', baseSha: 'aa', behind: 2 }] }),
+  review(87, { checks: [{ name: 'test', status: 'passed', attempt: 1, base: 'main', baseSha: 'bb', behind: 1 }] }),
+  review(88, { checks: [{ name: 'test', status: 'passed', attempt: 1, base: 'main', baseSha: 'cc' }] })]
+  const host = storeHost(storeOf({ reviews }),
+    argv => (argv[2] === `exec python3 -B ${FAILURES} log "$1"` ? 'tests/frame.rs:9: error: bad header\n' : ''))
+  const board = await fetchBoard(host, { root: '/behind', main: '/behind' })
+  expect(board.needs.map(row => [row.key, row.state, row.note, row.actions])).toEqual([
+    ['pr-85', 'failing', 'test failed merged with main at 01840f3: frame.rs:9: error: bad header', ['open', 'fix']],
+    ['pr-86', 'review', 'test passed, 2 merges behind', ['open', 'merge']],
+    ['pr-87', 'review', 'test passed, 1 merge behind', ['open', 'merge']],
+    ['pr-88', 'review', undefined, ['open', 'merge']],
   ])
 })
 
@@ -617,9 +681,39 @@ test('Restart asks again for the newest failed agent run of a stopped issue, unl
   const board = await fetchBoard(storeHost(store), { root: '/x', main: '/x' })
   const stopped = board.needs.filter(row => row.state === 'stopped')
   expect(stopped.map(row => [row.key, row.rerun, row.actions])).toEqual([
-    ['stopped-1297', -32, ['open', 'restart', 'close']],
+    ['stopped-1297', -32, ['open', 'log', 'restart', 'close']],
     ['stopped-1391', undefined, ['open', 'resume', 'restart', 'close']],
   ])
+})
+
+test('a stopped issue and its timed-out run show as one row, while a run on an issue with a review or no stopped row '
+  + 'keeps its own', async () => {
+  const ended = (id: number, target: string, status: string, at: string) => ({ id, kind: 'agent', target, status,
+    unit: `u${id}.service`, started_at: null, ended_at: at })
+  const store = storeOf({
+    // #1158 has no review, and another agent's comment edit at 10:01 changed it after its run timed out at 09:31.
+    // #1160's agent opened draft review 1161 before it failed, and #1170 left progress after its run failed.
+    issues: [issue(1158, 'in-progress', { updatedAt: '2026-10-29T10:01:00Z' }), issue(1160, 'in-progress'),
+      issue(1170, 'open')],
+    reviews: [review(1161, { draft: true })],
+    runs: [ended(1465, '1158', 'timed-out', '2026-10-29T09:31:00Z'), ended(1470, '1160', 'failed',
+      '2026-10-29T09:40:00Z'), ended(1480, '1170', 'failed', '2026-10-29T09:50:00Z')],
+  })
+  const board = await fetchBoard(storeHost(store), { root: '/x', main: '/x' })
+  expect(board.needs.map(row => [row.key, row.text, row.number, row.issue, row.pr, row.run, row.rerun, row.since,
+    row.log, row.actions])).toEqual([
+    ['failed-unit-1470', 'failed  agent: Issue 1160', 1161, 1160, true, -1470, undefined, '2026-10-29T09:40:00Z',
+      'journalctl --user -u u1470.service', ['open', 'log', 'retry', 'dismiss']],
+    ['failed-unit-1480', 'failed  agent: Issue 1170', 1170, undefined, undefined, -1480, undefined,
+      '2026-10-29T09:50:00Z', 'journalctl --user -u u1480.service', ['open', 'log', 'retry', 'dismiss']],
+    ['stopped-1158', 'stopped  Issue 1158  (timed out)', 1158, undefined, undefined, undefined, -1465,
+      '2026-10-29T09:31:00Z', 'journalctl --user -u u1465.service', ['open', 'log', 'restart', 'close']],
+    ['stopped-1160', 'stopped  Issue 1160  (failed)', 1160, undefined, undefined, undefined, -1470,
+      '2026-10-29T09:40:00Z', 'journalctl --user -u u1470.service', ['open', 'log', 'restart', 'close']],
+  ])
+  // The failed run on #1160 opens its issue, and Continue on #1158 takes up the timed-out run's session.
+  expect(board.needs[0]?.url?.endsWith('#game:1160')).toBe(true)
+  expect(board.needs[2]?.continues).toBe(true)
 })
 
 test('a draft whose checks fail shows its first error and Fix, one whose checks all passed shows Ready, and one '

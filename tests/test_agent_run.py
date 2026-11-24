@@ -12,17 +12,22 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "lib"
 sys.path.insert(0, str(LIB))
 
 import agent_run  # noqa: E402
+import store  # noqa: E402
 
 RESULT_GRACE = 1
 KILL_GRACE = 1
-BEAT = 0.5
+# The graces of a test whose claude outlives its result, which waits each grace out to its end.
+QUICK = {"AGENT_DESK_RESULT_GRACE": "0.1", "AGENT_DESK_KILL_GRACE": "0.1"}
+BEAT = 0.25
 SESSION = "5f1c2a9e-0000-4000-8000-000000000518"
 
 
@@ -75,33 +80,27 @@ class AgentRunTest(unittest.TestCase):
         """A claude that prints line, then waits on a child that runs in its own session for five minutes."""
         self.claude(f"{trap}\nsetsid sleep 300 &\necho $! >\"{self.child_pid}\"\necho '{line}'\nwait")
 
-    def agent_run(self, call="desk_agent_run \"$work\" \"\" new", **extra):
+    def agent_run(self, call='desk_agent_run "$work" "" new "$prompt" "$session"', **extra):
         """Runs desk_agent_run, or another call on the fake given the folder in $work and the stream in $stream, with
-        BASH_MAX_TIMEOUT_MS and BASH_DEFAULT_TIMEOUT_MS unset unless extra sets them, and returns the result and how
-        long it took."""
+        BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS, and AGENT_DESK_UNIT unset unless extra sets them, so a test that
+        runs inside a unit never follows that unit's journal, and returns the result and how long it took."""
         env = {**os.environ, "PATH": f"{self.fakes}:{os.environ['PATH']}", "XDG_STATE_HOME": str(self.root / "state"),
                "AGENT_DESK_RESULT_GRACE": str(RESULT_GRACE), "AGENT_DESK_KILL_GRACE": str(KILL_GRACE),
                "AGENT_DESK_BEAT": str(BEAT), "AGENT_DESK_CHECKOUT": str(self.checkout), "GH_REPO": "o/r",
-               "work": str(self.work), "stream": str(self.stream)}
+               "work": str(self.work), "stream": str(self.stream), "prompt": "/agent-desk:work-issue 7",
+               "session": SESSION}
         env.pop("BASH_MAX_TIMEOUT_MS", None)
         env.pop("BASH_DEFAULT_TIMEOUT_MS", None)
+        env.pop("AGENT_DESK_UNIT", None)
+        env.pop("AGENT_DESK_ACCOUNT", None)
+        env.pop("AGENT_DESK_RUN", None)
         env.update(extra)
-        script = (f'source "{LIB}/common.sh"; desk_model_args=(); desk_model=; desk_effort=; '
-                  f'{call} "/agent-desk:work-issue 7"')
+        script = f'source "{LIB}/common.sh"; desk_runner=claude; desk_model_args=(); desk_model=; desk_effort=; {call}'
         began = time.monotonic()
         done = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60)
         return done, time.monotonic() - began
 
-    def test_a_run_ends_at_its_result_and_ends_the_task_left_running(self):
-        self.lingering(result())
-        done, took = self.agent_run()
-        self.assertEqual(done.returncode, agent_run.STOPPED, done.stderr)
-        self.assertLess(took, RESULT_GRACE + KILL_GRACE + 5)
-        self.assertIn("Agent finished (success) after 3 turns, 1.0 min", done.stdout)
-        self.assertIn("so the run ends it", done.stdout)
-        self.assertFalse(alive(int(self.child_pid.read_text())))
-
-    def test_a_run_that_ends_a_task_the_agent_left_stops_early_and_names_the_task(self):
+    def test_a_run_ends_at_its_result_ends_the_task_the_agent_left_and_names_it(self):
         bench = "just bench --ride=c-halcrow > .scratch/bench.log 2>&1"
         events = [
             {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash",
@@ -113,19 +112,32 @@ class AgentRunTest(unittest.TestCase):
         ]
         lines = "\n".join(f"echo '{json.dumps(event)}'" for event in events)
         self.lingering(result(), trap=lines)
-        done, took = self.agent_run('desk_claude_run "$work" "$stream"')
+        # desk_left holds the task desk_claude_run wrote to <stream>.left, once desk_agent_run has read it.
+        done, took = self.agent_run('run() { desk_agent_run "$@"; local status=$?; echo "left: $desk_left"; '
+                                    'return "$status"; }; run "$work" "" new "$prompt" "$session"', **QUICK)
         self.assertEqual(done.returncode, agent_run.STOPPED, done.stderr)
-        self.assertLess(took, RESULT_GRACE + KILL_GRACE + 5)
+        self.assertLess(took, 5)
+        self.assertIn("Agent finished (success) after 3 turns, 1.0 min", done.stdout)
         self.assertIn(f"held by `{bench}`, so the run ends it and stops early.", done.stdout)
-        self.assertEqual(Path(f"{self.stream}.left").read_text(), f"`{bench}`")
+        self.assertIn(f"left: `{bench}`\n", done.stdout)
         self.assertFalse(alive(int(self.child_pid.read_text())))
 
-    def test_desk_agent_run_leaves_the_task_a_run_that_stopped_early_left(self):
-        self.lingering(result())
-        done, _ = self.agent_run('run() { desk_agent_run "$@"; local status=$?; echo "left: $desk_left"; '
-                                 'return "$status"; }; run "$work" "" new')
-        self.assertEqual(done.returncode, agent_run.STOPPED, done.stderr)
-        self.assertIn("left: a task it started\n", done.stdout)
+    def test_a_runs_row_records_the_session_it_takes_up_before_claude_starts(self):
+        desk = store.Store(self.root / "state" / "agent-desk" / "desk.sqlite")
+        self.addCleanup(desk.close)
+        cut, resumed = desk.request_run("o/r", "agent", "7"), desk.request_run("o/r", "agent", "7")
+        # A run cut off at its time limit reports no result, and its row still names its session.
+        self.claude("exit 143")
+        done, _ = self.agent_run(AGENT_DESK_RUN=str(cut))
+        self.assertEqual(done.returncode, 143, done.stderr)
+        self.assertEqual((desk.run(cut)["session"], desk.run(cut)["cost"]), (SESSION, None))
+        event = json.dumps({"type": "result", "session_id": SESSION, "num_turns": 3, "duration_ms": 60000,
+                            "total_cost_usd": 4.5})
+        self.claude(f"echo '{event}'")
+        done, _ = self.agent_run('desk_agent_run "$work" "" resumed "$prompt" "$session" "$session"',
+                                 AGENT_DESK_RUN=str(resumed))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((desk.run(resumed)["session"], desk.run(resumed)["cost"]), (SESSION, 4.5))
 
     def test_desk_left_task_reads_and_removes_the_task_only_for_a_run_that_stopped_early(self):
         tasks = Path(f"{self.stream}.left")
@@ -141,22 +153,22 @@ class AgentRunTest(unittest.TestCase):
 
     def test_a_failed_result_gives_the_run_a_failed_status(self):
         self.lingering(result(is_error=True))
-        done, _ = self.agent_run()
+        done, _ = self.agent_run(**QUICK)
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertFalse(alive(int(self.child_pid.read_text())))
 
     def test_a_claude_that_ignores_term_is_killed(self):
         self.lingering(result(), trap="trap '' TERM")
-        done, took = self.agent_run()
+        done, took = self.agent_run(**QUICK)
         self.assertEqual(done.returncode, agent_run.STOPPED, done.stderr)
-        self.assertLess(took, RESULT_GRACE + KILL_GRACE + 5)
+        self.assertLess(took, 5)
         self.assertFalse(alive(int(self.child_pid.read_text())))
 
     def test_a_task_whose_parent_exited_ends_with_the_run(self):
         self.claude(f'(setsid sleep 300 & echo $! >"{self.child_pid}")\necho \'{result()}\'\nexec sleep 300')
-        done, took = self.agent_run()
+        done, took = self.agent_run(**QUICK)
         self.assertEqual(done.returncode, agent_run.STOPPED, done.stderr)
-        self.assertLess(took, RESULT_GRACE + KILL_GRACE + 5)
+        self.assertLess(took, 5)
         self.assertFalse(alive(int(self.child_pid.read_text())))
 
     def test_an_adopted_orphan_leaves_no_zombie_once_it_exits(self):
@@ -184,10 +196,11 @@ class AgentRunTest(unittest.TestCase):
         self.assertNotIn("so the run ends it", done.stdout)
 
     def test_a_claude_that_never_reports_a_result_runs_until_it_exits(self):
-        self.claude("echo not json\nsleep 2\nexit 4")
-        done, took = self.agent_run()
+        # The claude outlives the result grace, which a run without a result never starts.
+        self.claude("echo not json\nsleep 0.5\nexit 4")
+        done, took = self.agent_run(**QUICK)
         self.assertEqual(done.returncode, 4, done.stderr)
-        self.assertGreaterEqual(took, 2)
+        self.assertGreaterEqual(took, 0.5)
         self.assertIn("not json", done.stdout)
 
     def events(self, *events):
@@ -228,13 +241,141 @@ class AgentRunTest(unittest.TestCase):
     def test_a_run_with_steady_events_logs_no_beat(self):
         tick = self.events({"type": "system", "subtype": "status"})
         init = self.events({"type": "system", "subtype": "init", "session_id": SESSION, "model": "opus"})
-        self.claude(f"{init}\nfor _ in $(seq 15); do\n{tick}\nsleep 0.1\ndone\necho '{result()}'")
+        self.claude(f"{init}\nfor _ in $(seq 12); do\n{tick}\nsleep {BEAT / 5}\ndone\necho '{result()}'")
         done, took = self.agent_run()
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertGreater(took, BEAT * 2)
         self.assertNotIn("Still in", done.stdout)
         self.assertNotIn("Quiet for", done.stdout)
         self.assertFalse((self.root / "state" / "agent-desk" / "beats").exists())
+
+    def test_progress_resets_the_silence_and_a_heartbeat_does_not(self):
+        progress = {
+            "an assistant message": {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi"}]}},
+            "a tool result": {"type": "user", "message": {"content": [{"type": "tool_result",
+                                                                       "tool_use_id": "toolu_1"}]}},
+            "a task starting": {"type": "system", "subtype": "task_started", "task_id": "b1",
+                                "tool_use_id": "toolu_1", "description": "Build"},
+            "a task ending": {"type": "system", "subtype": "task_notification", "task_id": "b1",
+                              "status": "completed"},
+            "a line that is not JSON": None,
+        }
+        heartbeat = {"type": "tool_progress", "tool_use_id": "toolu_1-heartbeat-0", "tool_name": "Bash",
+                     "parent_tool_use_id": "toolu_1", "elapsed_time_seconds": 30, "heartbeat": True}
+        for name, event in [*progress.items(), ("a heartbeat", heartbeat)]:
+            with self.subTest(name):
+                tasks = agent_run.Tasks()
+                tasks.heard = 0.0
+                line = b"not json\n" if event is None else json.dumps(event).encode() + b"\n"
+                with redirect_stdout(io.StringIO()):
+                    agent_run.copy([line], io.BytesIO(), [], tasks)
+                if event is heartbeat:
+                    self.assertEqual(tasks.heard, 0.0)
+                else:
+                    self.assertGreater(tasks.heard, 0.0)
+
+    def test_a_failed_call_logs_its_error_when_its_result_arrives(self):
+        self.claude(self.events(
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash",
+                                                           "input": {"command": "cargo test",
+                                                                     "description": "Run the GPU tests"}}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True,
+                                                      "content": "Exit code 101\nerror: test failed"}]}},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1"}]}},
+        ) + f"\necho '{result()}'")
+        done, _ = self.agent_run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = [line.split(" ", 1)[1] for line in done.stdout.splitlines() if " Bash" in line]
+        self.assertEqual(lines, ["→ Bash: Run the GPU tests · cargo test", "← Bash 0 s, failed: error: test failed"])
+
+    def test_a_crash_under_the_run_logs_one_line_and_the_beats_file_keeps_it(self):
+        unit = "agent-desk-agent-o-r-7-1.service"
+        entry = {"COREDUMP_COMM": "gpu-aa4bea58f34", "COREDUMP_SIGNAL_NAME": "SIGSEGV", "COREDUMP_SIGNAL": "11",
+                 "__CURSOR": "s=1"}
+        follower, args = self.root / "journalctl.pid", self.root / "journalctl.args"
+        journalctl = self.fakes / "journalctl"
+        journalctl.write_text(f'#!/bin/bash\necho $$ >"{follower}"\nprintf "%s\\n" "$@" >"{args}"\nsleep 0.1\n'
+                              f"echo {shlex.quote(json.dumps(entry))}\nexec sleep 300\n")
+        journalctl.chmod(0o755)
+        init = self.events({"type": "system", "subtype": "init", "session_id": SESSION, "model": "opus"})
+        self.claude(f"{init}\nsleep 0.6\necho '{result()}'")
+        done, _ = self.agent_run(AGENT_DESK_UNIT=unit)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        crashes = [line.split(" ", 1)[1] for line in done.stdout.splitlines() if "crashed" in line]
+        self.assertEqual(crashes, ["A process under the run crashed: gpu-aa4bea58f34 (SIGSEGV)"])
+        self.assertIn(f"COREDUMP_USER_UNIT={unit}", args.read_text().splitlines())
+        written = [json.loads(line) for line in
+                   (self.root / "state" / "agent-desk" / "beats" / SESSION).read_text().splitlines()]
+        self.assertEqual([line["text"] for line in written if line["type"] == "crash"], crashes)
+        self.assertFalse(alive(int(follower.read_text())))
+
+    def test_the_run_keeps_no_core_files_unless_a_command_asks(self):
+        limits = self.root / "limits"
+        self.claude(f'echo "$(ulimit -Sc) $(ulimit -Hc)" >"{limits}"\necho \'{result()}\'')
+        done, _ = self.agent_run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        hard = subprocess.run(["bash", "-c", "ulimit -Hc"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(limits.read_text().split(), ["0", hard])
+
+    def stalling(self, body):
+        """
+        A claude that starts a Bash call to `cargo test`, runs body while the call waits, then returns the call's
+        result and its own, and a run of it under a stall rule of half a second's wait and a half-second window. body
+        copies the run's saved stall to seen.json while it stands. Returns the run's result, the notifications sent,
+        and the stall the body saw, or None.
+        """
+        before = self.events(
+            {"type": "system", "subtype": "init", "session_id": SESSION, "model": "opus"},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash",
+                                                           "input": {"command": "cargo test --workspace"}}]}})
+        after = self.events({"type": "user", "message": {"content": [{"type": "tool_result",
+                                                                      "tool_use_id": "toolu_1"}]}})
+        saved = self.root / "state" / "agent-desk" / "stalls" / "7.json"
+        seen = self.root / "seen.json"
+        told = self.root / "notify.log"
+        notify = self.fakes / "notify-send"
+        notify.write_text(f'#!/bin/bash\nprintf "%s|" "$@" >>"{told}"\necho >>"{told}"\n')
+        notify.chmod(0o755)
+        self.claude(f"{before}\n( {body} ) &\nbody=$!\nwhile kill -0 $body 2>/dev/null; do "
+                    f"[ -e \"{saved}\" ] && cp \"{saved}\" \"{seen}\"; sleep 0.05; done\n{after}\necho '{result()}'")
+        done, _ = self.agent_run(AGENT_DESK_STALL_AFTER="0.5", AGENT_DESK_STALL_WINDOW="0.5", AGENT_DESK_RUN="7",
+                                 AGENT_DESK_UNIT="")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(saved.exists(), "the mark clears once the call returns")
+        return (done, told.read_text().splitlines() if told.exists() else [],
+                json.loads(seen.read_text()) if seen.exists() else None)
+
+    def test_a_call_on_a_command_that_left_the_cpu_idle_stalls_once_until_it_returns(self):
+        done, told, seen = self.stalling("sleep 1")
+        self.assertEqual((seen["tool"], seen["summary"]), ("Bash", "cargo test --workspace"))
+        self.assertRegex(seen["since"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(told, ["--app-name=agent-desk|An agent run stalled|run 7: stalled 0 min in Bash: "
+                                "cargo test --workspace|"])
+        self.assertEqual(len([line for line in done.stdout.splitlines() if " Stalled: " in line]), 1, done.stdout)
+
+    def test_a_long_command_that_keeps_the_cpu_busy_never_stalls(self):
+        (self.fakes / "spin.py").write_text("while True:\n    pass\n")
+        done, told, seen = self.stalling(f'PYTHONPATH="{self.fakes}" timeout 1 python3 -m spin')
+        self.assertEqual((told, seen), ([], None))
+        self.assertNotIn("Stalled:", done.stdout)
+
+    def test_a_call_waiting_on_the_gpu_lock_never_stalls(self):
+        env = {**os.environ, "XDG_RUNTIME_DIR": str(self.root / "runtime"), "XDG_STATE_HOME": str(self.root / "gpu"),
+               "AGENT_DESK_GPU_SLOTS": "1", "AGENT_DESK_RUN": ""}
+        (self.root / "runtime").mkdir()
+        holder = subprocess.Popen(["bash", str(LIB / "gpu.sh"), "--", "sleep", "60"], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.terminate)
+        for _ in range(100):
+            if list((self.root / "runtime" / "agent-desk").glob("gpu.held.*")):
+                break
+            time.sleep(0.05)
+        wait = (f'XDG_RUNTIME_DIR="{self.root / "runtime"}" AGENT_DESK_GPU_SLOTS=1 bash "{LIB / "gpu.sh"}" -- true '
+                '2>/dev/null & gpu=$!; sleep 1; kill $gpu')
+        done, told, seen = self.stalling(wait)
+        self.assertEqual((told, seen), ([], None))
+        self.assertNotIn("Stalled:", done.stdout)
 
     def test_the_run_forbids_tools_that_outlive_the_agents_last_turn(self):
         self.claude(f"echo '{result()}'")
@@ -244,32 +385,56 @@ class AgentRunTest(unittest.TestCase):
         self.assertEqual(args[args.index("--disallowedTools") + 1], "ScheduleWakeup,CronCreate,Monitor")
         self.assertEqual(args[args.index("--output-format") + 1], "stream-json")
 
-    def test_a_run_may_wait_two_hours_on_one_command(self):
-        self.claude(f"echo \"$BASH_MAX_TIMEOUT_MS\" >\"{self.root / 'max'}\"\necho '{result()}'")
+    def timeouts(self):
+        """A claude that writes the command limit and the default timeout it runs under to the file timeouts."""
+        self.claude(f"echo \"$BASH_MAX_TIMEOUT_MS $BASH_DEFAULT_TIMEOUT_MS\" >\"{self.root / 'timeouts'}\"\n"
+                    f"echo '{result()}'")
+
+    def test_a_run_may_wait_two_hours_on_one_command_and_fifteen_minutes_on_one_given_no_timeout(self):
+        self.timeouts()
         done, _ = self.agent_run()
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "max").read_text(), "7200000\n")
+        self.assertEqual((self.root / "timeouts").read_text(), "7200000 900000\n")
 
-    def test_a_run_keeps_the_users_own_command_limit(self):
-        self.claude(f"echo \"$BASH_MAX_TIMEOUT_MS\" >\"{self.root / 'max'}\"\necho '{result()}'")
-        done, _ = self.agent_run('desk_claude_run "$work" "$stream"', BASH_MAX_TIMEOUT_MS="900000")
+    def test_a_run_keeps_the_users_own_command_limit_and_default_timeout(self):
+        self.timeouts()
+        done, _ = self.agent_run('desk_claude_run "$work" "$stream" "$prompt"', BASH_MAX_TIMEOUT_MS="900000",
+                                 BASH_DEFAULT_TIMEOUT_MS="300000")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "max").read_text(), "900000\n")
-
-    def test_a_command_given_no_timeout_waits_fifteen_minutes(self):
-        self.claude(f"echo \"$BASH_DEFAULT_TIMEOUT_MS\" >\"{self.root / 'default'}\"\necho '{result()}'")
-        done, _ = self.agent_run()
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "default").read_text(), "900000\n")
-
-    def test_a_run_keeps_the_users_own_default_timeout(self):
-        self.claude(f"echo \"$BASH_DEFAULT_TIMEOUT_MS\" >\"{self.root / 'default'}\"\necho '{result()}'")
-        done, _ = self.agent_run('desk_claude_run "$work" "$stream"', BASH_DEFAULT_TIMEOUT_MS="300000")
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.root / "default").read_text(), "300000\n")
+        self.assertEqual((self.root / "timeouts").read_text(), "900000 300000\n")
 
 
 class StreamTest(unittest.TestCase):
+    def test_claude_attribution_uses_the_model_the_stream_reports(self):
+        init = {"type": "system", "subtype": "init", "model": "claude-opus-4-6"}
+        with mock.patch.object(agent_run.run_log, "record_identity", return_value=True) as record:
+            agent_run.copy([json.dumps(init).encode()], io.BytesIO(), [], agent_run.Tasks(),
+                           identity=(3, "1.2.3", datetime.now(timezone.utc)))
+        record.assert_called_once_with(3, "claude-opus-4-6", "anthropic", "1.2.3")
+
+    def test_codex_attribution_reads_the_resumed_turn_and_ignores_the_previous_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            rollout = home / "sessions" / "2026" / f"rollout-2026-11-14-{SESSION}.jsonl"
+            rollout.parent.mkdir(parents=True)
+            rows = [{"type": "session_meta", "payload": {"id": SESSION, "model_provider": "openai"}},
+                    {"type": "turn_context", "timestamp": "2026-11-14T18:00:00Z", "payload": {"model": "gpt-old"}}]
+            rollout.write_text("\n".join(map(json.dumps, rows)) + "\n", encoding="utf-8")
+            launch = datetime(2026, 11, 14, 19, tzinfo=timezone.utc)
+            self.assertIsNone(agent_run.codex_stream.turn_model(home, SESSION, launch))
+            with rollout.open("a", encoding="utf-8") as file:
+                file.write(json.dumps({"type": "turn_context", "timestamp": "2026-11-14T19:00:01Z",
+                                       "payload": {"model": "gpt-new"}}) + "\n")
+
+            stream = [{"type": "thread.started", "thread_id": SESSION}, {"type": "turn.completed"}]
+            with (mock.patch.dict(os.environ, {"CODEX_HOME": tmp, "AGENT_DESK_LOCAL_PROVIDER": ""}),
+                  mock.patch.object(agent_run, "beats_folder", return_value=home / "beats"),
+                  mock.patch.object(agent_run, "codex_session"),
+                  mock.patch.object(agent_run.run_log, "record_identity", return_value=True) as record):
+                agent_run.copy([json.dumps(event).encode() for event in stream], io.BytesIO(), [],
+                               agent_run.Tasks(), codex=True, identity=(9, "1.2.3", launch))
+            record.assert_called_once_with(9, "gpt-new", "openai", "1.2.3")
+
     def test_the_stream_file_holds_claudes_output_as_it_came(self):
         with tempfile.TemporaryDirectory() as tmp:
             stream = Path(tmp) / "stream"
@@ -310,6 +475,15 @@ class StreamTest(unittest.TestCase):
         tasks.see({"type": "system", "subtype": "task_started", "task_id": "a1", "description": "Judge item 4"})
         self.assertEqual(tasks.waiting(), "Still in Agent for 0 s: Explore the store · background: Judge item 4")
 
+    def test_a_crash_line_names_the_program_and_its_signal(self):
+        for entry, line in [
+            ({"COREDUMP_COMM": "gpu-aa4", "COREDUMP_SIGNAL_NAME": "SIGABRT", "COREDUMP_SIGNAL": "6"},
+             "gpu-aa4 (SIGABRT)"),
+            ({"COREDUMP_EXE": "/srv/target/debug/gpu", "COREDUMP_SIGNAL": "11"}, "gpu (signal 11)"),
+            ({"COREDUMP_COMM": ["not", "text"]}, "a program"),
+        ]:
+            self.assertEqual(agent_run.crash_line(entry), f"A process under the run crashed: {line}")
+
     def test_a_stretch_reads_in_seconds_then_minutes(self):
         self.assertEqual(agent_run.span(42.9), "42 s")
         self.assertEqual(agent_run.span(12 * 60 + 59), "12 min")
@@ -346,9 +520,13 @@ class StreamTest(unittest.TestCase):
         spin = subprocess.Popen([sys.executable, "-c", "while True: pass"])
         self.addCleanup(spin.wait)
         self.addCleanup(spin.kill)
-        time.sleep(0.3)
-        sample = agent_run.cpu_sample(os.getpid())
-        names = {name: ticks for (pid, _), (name, ticks) in sample.items() if pid == spin.pid}
+        deadline = time.monotonic() + 10
+        while True:
+            sample = agent_run.cpu_sample(os.getpid())
+            names = {name: ticks for (pid, _), (name, ticks) in sample.items() if pid == spin.pid}
+            if names.get("python -c") or time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
         self.assertEqual(list(names), ["python -c"])
         self.assertGreater(names["python -c"], 0)
 

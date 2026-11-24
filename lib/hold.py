@@ -5,7 +5,7 @@
                                                  Auto, Manual, or Hold for one project, leaving the others as they are
     python3 hold.py resume                       goes back to Auto or Manual, as the desk was before Hold
     python3 hold.py status                       prints {"state", "since", "before", "picked", "pickedRuns",
-                                                 "projects", "slots", "usageLimit"} as JSON
+                                                 "projects", "slots", "usageLimit", "account", "apiBudget"} as JSON
     python3 hold.py running                      prints the runs working in the dispatcher's units as JSON
     python3 hold.py start <n> [<owner/repo>]     picks issue n for Manual; on Hold it picks for Resume into Manual
     python3 hold.py start-runs <run>...          picks requests the dispatcher holds, by their ids in the store, for
@@ -14,12 +14,11 @@
     python3 hold.py unpick <n> [<owner/repo>]    drops issue n's pick and those of its agent requests that wait, so
                                                  its run waits for Start again; exits 1 when the issue has no pick
     python3 hold.py unpick --all [<owner/repo>]  drops every pick, or one project's, and prints how many
-    python3 hold.py held [fix]                   exits 0 unless GH_REPO's project runs, so the chore timer starts
-                                                 nothing, and without fix while lib/usage.py's weekly usage limit
-                                                 holds too; with fix, Manual counts as running, so lib/fixes.py asks
-                                                 for the merge queue's fixes, which wait in Queued for Start
+    python3 hold.py held [fix|codex]             exits 0 unless GH_REPO's project runs. With fix, Manual counts as
+                                                 running so the merge queue's fixes can wait in Queued for Start.
+                                                 With neither argument, Claude's usage limit and budget hold too.
     python3 hold.py slots [<owner/repo>]         prints each project's slots, or one's, with its config's and its
-                                                 overrides
+                                                 overrides, and `-` for a gpu count left unset
     python3 hold.py slots [<owner/repo>] <kind>=<n>...
                                                  overrides a project's slots of each kind named, or the current
                                                  project's; a count equal to its config's drops that kind's override
@@ -44,6 +43,7 @@ gives each project back its own.
 `slots` keeps, by repository, the slot counts `agent-desk slots` sets over a project's `.agent-desk.json`, which
 lib/run_units.py's slots_of lays over the config's. Mode changes and Resume leave them alone. Every change to the state
 reads it afresh under a lock, so two changes at once never write back a state the other has changed since.
+`issueRunners` keeps each project's choice of Claude Code, Codex, or Local for headless agent runs.
 """
 
 import fcntl
@@ -52,6 +52,7 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -64,7 +65,9 @@ STATES = ("running", "manual", "held")
 MODES = ("running", "manual")
 # The fields of the state keyed by project, each with what it holds of the project, as `agent-desk project remove`
 # and `rename` report it.
-PROJECT_FIELDS = {"projects": "its mode", "before_projects": "its mode before Hold", "slots": "its slot overrides"}
+PROJECT_FIELDS = {"projects": "its mode", "before_projects": "its mode before Hold", "slots": "its slot overrides",
+                  "issueRunners": "its issue runner override"}
+ISSUE_RUNNERS = ("claude", "codex", "local")
 REPO = r"[\w.-]+/[\w.-]+"
 # What a request or check that Hold keeps waiting waits for, as its card says it after "waits for", and why, as the
 # dispatcher's journal says it.
@@ -79,9 +82,10 @@ def status():
     if not isinstance(data, dict):
         data = {}
     if data.get("state") not in STATES:
-        # The weekly usage limit, which lib/usage.py reads, outlasts a state that went missing.
+        # The weekly usage limit, which lib/usage.py reads, the account, which lib/account.py reads, and the API
+        # budget, which lib/budget.py reads, outlast a state that went missing.
         data = {"state": "running", "since": None,
-                **{key: data[key] for key in ("usageLimit", "slots") if key in data}}
+                **{key: data[key] for key in ("usageLimit", "slots", "account", "apiBudget", "issueRunners") if key in data}}
     # The issues picked for Manual, as owner/repo#n, and the requests, by their run ids in the store.
     data.setdefault("picked", [])
     data.setdefault("picked_runs", [])
@@ -100,9 +104,45 @@ def slot_override(data, repo):
     return override if isinstance(override, dict) else {}
 
 
+def issue_runner_override(data, repo):
+    """The runner selected for this project, or None when it follows its config."""
+    runners = data.get("issueRunners")
+    runner = runners.get(repo) if isinstance(runners, dict) else None
+    return runner if runner in ISSUE_RUNNERS else None
+
+
+def set_issue_runner(repo, choice, *more_repos):
+    """Sets or clears the runner override for the named projects in one update."""
+    if choice not in (*ISSUE_RUNNERS, "default"):
+        raise ValueError("Choose claude, codex, local, or default.")
+
+    def change(data):
+        saved = data.get("issueRunners")
+        runners = dict(saved) if isinstance(saved, dict) else {}
+        for project in (repo, *more_repos):
+            if choice == "default":
+                runners.pop(project, None)
+            else:
+                runners[project] = choice
+        if runners:
+            data["issueRunners"] = runners
+        else:
+            data.pop("issueRunners", None)
+
+    update(change)
+
+
 def save(data):
-    STATE.mkdir(parents=True, exist_ok=True)
-    HOLD.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    """Replaces the state in one step so readers see a complete snapshot."""
+    HOLD.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=HOLD.parent, delete=False) as handle:
+        pending = Path(handle.name)
+        try:
+            handle.write(json.dumps(data) + "\n")
+            handle.close()
+            pending.replace(HOLD)
+        finally:
+            pending.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -368,6 +408,12 @@ def reset_slots(repo, kinds=()):
         data, repo, {kind: n for kind, n in slot_override(data, repo).items() if kinds and kind not in kinds}))
 
 
+def shown(count):
+    """A slot count as `agent-desk slots` prints it: `-` for a `gpu` count left unset, which caps nothing beyond the
+    agent slots."""
+    return "-" if count is None else count
+
+
 def show_slots(repos):
     """Each project's slots of each kind, with its config's count and whether an override sets it, as lines."""
     import run_units
@@ -379,7 +425,7 @@ def show_slots(repos):
         lines.append(repo)
         for kind in configured:
             count = override.get(kind, configured[kind])
-            lines.append(f"  {kind:<10}{count:>3}   config {configured[kind]:>2}"
+            lines.append(f"  {kind:<10}{shown(count):>3}   config {shown(configured[kind]):>2}"
                          + ("   override" if kind in override else ""))
     return lines
 
@@ -436,9 +482,21 @@ def main(argv):
         current = status()
         print(json.dumps({**{key: current.get(key) for key in ("state", "since", "before", "picked")},
                           "pickedRuns": current["picked_runs"], "projects": current.get("projects", {}),
-                          "slots": current.get("slots", {}), "usageLimit": current.get("usageLimit")}))
+                          "slots": current.get("slots", {}), "usageLimit": current.get("usageLimit"),
+                          "account": current.get("account", "subscription"),
+                          "apiBudget": current.get("apiBudget")}))
     elif len(argv) >= 2 and argv[1] == "slots":
         return slots_main(argv[2:])
+    elif (len(argv) >= 3 and argv[1] == "issue-runner"
+          and all(re.fullmatch(REPO, repo) for repo in (argv[2], *argv[4:]))):
+        if len(argv) == 3:
+            print(issue_runner_override(status(), argv[2]) or "")
+        else:
+            try:
+                set_issue_runner(argv[2], argv[3], *argv[4:])
+            except ValueError as error:
+                print(f"agent-desk: {error}", file=sys.stderr)
+                return 2
     elif len(argv) == 2 and argv[1] == "running":
         print(json.dumps(running()))
     elif len(argv) in (3, 4) and argv[1] == "start" and argv[2].isdigit():
@@ -465,15 +523,16 @@ def main(argv):
         repo = os.environ.get("GH_REPO", "")
         if repo:
             spend(int(argv[2]), repo)
-    elif len(argv) in (2, 3) and argv[1] == "held" and argv[2:] in ([], ["fix"]):
+    elif len(argv) in (2, 3) and argv[1] == "held" and argv[2:] in ([], ["fix"], ["codex"]):
         current = status()
         repo = os.environ.get("GH_REPO", "")
         state = mode_of(current, repo) if repo else current["state"]
         if state != "running" and not (state == "manual" and argv[2:] == ["fix"]):
             return 0
         if argv[2:] == []:
+            import budget
             import usage
-            return 0 if usage.holds(current) else 1
+            return 0 if usage.holds(current) or budget.holds(current) else 1
         return 1
     else:
         print(__doc__.strip(), file=sys.stderr)

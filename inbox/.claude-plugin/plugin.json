@@ -1,6 +1,6 @@
 {
   "name": "agent-desk",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "An inbox pane for agent-desk projects: what each run works on, reviews to read, decisions, stopped agents, the queue, and chores",
   "author": {
     "name": "erjand"

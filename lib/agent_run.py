@@ -1,4 +1,7 @@
-"""Runs a headless agent's claude -p, logs it as agent_log.py does, and ends the run at the agent's result.
+"""Supervises a headless Claude Code or Codex process and logs its progress.
+
+Codex runs translate CLI events with codex_stream.py and keep them for Agent Log. They record the thread when it starts
+and use Codex exit status and turn events to report the result.
 
 claude -p stays alive after the agent's final message while a task the agent started in the background, such as a
 Bash command, still runs, and the run would hold its runner and its memory claim until the task ends. This script
@@ -19,8 +22,10 @@ path with `.left` added: a Bash command in a code span, another task by its desc
 names none. A run that didn't stop early writes no such file. AGENT_DESK_RESULT_GRACE and AGENT_DESK_KILL_GRACE set
 the two waits in seconds.
 
-While claude -p writes no stream event for BEAT seconds, as when the agent waits on a long foreground command, the
-script logs a beat line every BEAT seconds the silence lasts, so the journal tells a working run from a stuck one:
+While claude -p writes no stream event but its heartbeats for BEAT seconds, as when the agent waits on a long
+foreground command, the script logs a beat line every BEAT seconds the silence lasts, so the journal tells a working run
+from a stuck one. claude -p writes a heartbeat, a `tool_progress` event marked `heartbeat`, every 30 seconds a tool
+call runs, so a heartbeat shows the call still waits and counts as silence:
 
     Still in Bash for 12 min: timeout 7000 bash -c 'until … · background: just bank-fill … · busy: claude -p ×3 (85% CPU)
 
@@ -29,12 +34,29 @@ and the three commands under the run that used the most CPU since the last line 
 appends each beat, as a JSON line of its type, UTC timestamp, and text, to a file named by the session id under
 agent-desk's state folder, `beats/<session id>`, for the web page's Agent Log tab. AGENT_DESK_BEAT sets the interval in
 seconds.
+
+A process under the run that crashes logs one line, from the journal entry systemd-coredump writes for its unit, which
+AGENT_DESK_UNIT names:
+
+    A process under the run crashed: gpu-aa4bea58f34 (SIGSEGV)
+
+The line goes to the session's beats file too, as type `crash`. The run's soft limit on core files is 0, so
+systemd-coredump keeps no core and logs no stack trace, which would put a hundred lines into the run's journal for
+each crash; a command that wants its core raises the limit with `ulimit -c unlimited`.
+
+Beside the beat, the script samples the processes under the run and flags it as stalled while the newest tool call has
+waited 5 minutes and the commands have left the CPU idle for 2, as lib/run_stall.py describes, for the board's card and
+a desktop notification. While AGENT_DESK_RUN names the run, it also answers `agent-desk stop-command`, which ends the
+processes of the call the run waits on and leaves the run going, as lib/run_stop.py describes, and logs a line saying
+the user stopped the command, which goes to the beats file too, as type `stop`.
 """
 
 import ctypes
 import json
 import os
 import re
+import resource
+import shlex
 import signal
 import subprocess
 import sys
@@ -43,7 +65,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_log import describe, stamp, summarize
+import codex_stream
+import run_log
+import run_stall
+import run_stop
+from agent_log import Calls, moment, span, stamp, summarize
 
 RESULT_GRACE = float(os.environ.get("AGENT_DESK_RESULT_GRACE", "30"))
 KILL_GRACE = float(os.environ.get("AGENT_DESK_KILL_GRACE", "10"))
@@ -65,6 +91,9 @@ BEAT_SUMMARY = 80
 # How many commands a beat line's busy list names.
 BUSY_TOP = 3
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+# The MESSAGE_ID of the journal entry systemd-coredump writes for each core dump, and the fields a crash line reads.
+COREDUMP_MESSAGE = "fc2e22bc6ee647b6b90729ab34a250b1"
+CRASH_FIELDS = ("COREDUMP_COMM", "COREDUMP_EXE", "COREDUMP_SIGNAL_NAME", "COREDUMP_SIGNAL")
 PYTHON = re.compile(r"python[\d.]*")
 # The options of `uv run` and of python that take the next argument as their value.
 UV_VALUE_OPTIONS = {"--with", "--with-editable", "--with-requirements", "--python", "-p", "--project", "--directory",
@@ -92,11 +121,15 @@ class Tasks:
         # Each tool call still waiting on its result, by id, with the time the stream named it.
         self.pending = {}
         self.session = None
-        # When the stream last wrote a line, or when the run started.
+        # When the stream last wrote a line other than a heartbeat, or when the run started.
         self.heard = time.monotonic()
         self.lock = threading.Lock()
 
-    def hear(self):
+    def hear(self, event=None):
+        """Notes that the stream wrote a line, a JSON event or None for another line, unless the event is a heartbeat
+        claude -p writes while a tool call runs, which shows no progress."""
+        if isinstance(event, dict) and event.get("heartbeat") is True:
+            return
         with self.lock:
             self.heard = time.monotonic()
 
@@ -161,10 +194,18 @@ class Tasks:
         background = [cut(command or description or "a task") for command, description in tasks]
         return head + (f" · background: {', '.join(background)}" if background else "")
 
-
-def span(seconds):
-    """A stretch of time as a beat line gives it: whole seconds under a minute, whole minutes past one."""
-    return f"{int(seconds)} s" if seconds < 60 else f"{int(seconds // 60)} min"
+    def call(self):
+        """The newest tool call still waiting on its result, as run_stall.Watch.check and run_stop.stop take it: its
+        id, its tool, the first line of its input cut to BEAT_SUMMARY characters, how many seconds it has waited, and a
+        shell call's whole command, or None for another tool. Returns None for no call."""
+        with self.lock:
+            if not self.pending:
+                return None
+            key, (block, since) = list(self.pending.items())[-1]
+        given = block.get("input") if isinstance(block.get("input"), dict) else {}
+        command = given.get("command") if block.get("name") in ("Bash", "Shell") else None
+        return {"id": key, "tool": block.get("name") or "a tool", "summary": cut(summarize(given)),
+                "waited": time.monotonic() - since, "command": command if isinstance(command, str) else None}
 
 
 def cut(text, limit=BEAT_SUMMARY):
@@ -178,26 +219,92 @@ def code(text):
     return f"{fence}{pad}{text}{pad}{fence}"
 
 
-def copy(source, stream, results, tasks):
-    """Copies each line of claude -p's output to the stream file, prints its log lines, keeps each result event, and
-    follows the background tasks."""
+def codex_session(path, session, resume):
+    """Save the ID for a retry and for the run row, even if the turn gets cut off."""
+    if path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pending = path.with_suffix(".new")
+            pending.write_text(session + "\n", encoding="utf-8")
+            pending.replace(path)
+        except OSError as error:
+            log(f"Could not record the Codex session: {error}")
+    log(f"To take over, run: cd {shlex.quote(os.getcwd())} && {resume}")
+    subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("run_log.py")), "session", session],
+                   check=False)
+
+
+def copy(source, stream, results, tasks, codex=False, codex_path=None, identity=None):
+    """Writes the run stream, prints its log lines, and tracks pending calls and results."""
+    calls = Calls()
+    started = time.monotonic()
+    transcript = None
+    session = None
+    next_identity_check = started
+    resume_args = ["codex", "resume"]
+    if provider := os.environ.get("AGENT_DESK_LOCAL_PROVIDER"):
+        resume_args.extend(["--oss", "--local-provider", provider, f"--model={os.environ['AGENT_DESK_LOCAL_MODEL']}"])
     for raw in source:
-        tasks.hear()
-        stream.write(raw)
-        stream.flush()
+        if not codex:
+            stream.write(raw)
+            stream.flush()
         text = raw.decode("utf-8", "replace")
         try:
             event = json.loads(text)
         except json.JSONDecodeError:
+            tasks.hear()
             log(text.rstrip())
             continue
+        tasks.hear(event)
         if not isinstance(event, dict):
             continue
-        for line in describe(event):
-            print(f"{stamp(event)} {line}", flush=True)
-        tasks.see(event)
-        if event.get("type") == "result":
-            results.append(event)
+        if identity and codex and session and (time.monotonic() >= next_identity_check
+                                               or event.get("type") in ("turn.completed", "turn.failed")):
+            run_id, version, launched_at = identity
+            codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+            reported = codex_stream.turn_model(codex_home, session, launched_at)
+            if reported:
+                model, reported_provider = reported
+                mark = "openai" if reported_provider == "openai" and not provider else None
+                if run_log.record_identity(run_id, model, mark, version):
+                    identity = None
+            next_identity_check = time.monotonic() + 1
+        events = codex_stream.events(event, time.monotonic() - started) if codex else (event,)
+        for entry in events:
+            if identity and not codex and entry.get("type") == "system" and entry.get("subtype") == "init":
+                run_id, version, _ = identity
+                model = entry.get("model")
+                mark = "anthropic" if isinstance(model, str) and model.startswith("claude-") else None
+                if run_log.record_identity(run_id, model, mark, version):
+                    identity = None
+            if codex:
+                entry["timestamp"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+                init = entry.get("subtype") == "init"
+                if init:
+                    session = entry["session_id"]
+                    resume = shlex.join([*resume_args, session])
+                    if provider:
+                        entry["local_runner"] = {"provider": provider, "model": os.environ["AGENT_DESK_LOCAL_MODEL"]}
+                    transcript = codex_stream.transcript(beats_folder().parent, os.getcwd(), session)
+                encoded = (json.dumps(entry) + "\n").encode()
+                stream.write(encoded)
+                stream.flush()
+                if transcript is not None:
+                    try:
+                        transcript.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        fd = os.open(transcript, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+                        with os.fdopen(fd, "wb") as stored:
+                            stored.write(encoded)
+                    except OSError as error:
+                        log(f"Could not write the Codex transcript: {error}")
+                        transcript = None
+                if init:
+                    codex_session(codex_path, session, resume)
+            for line in calls.describe(entry, moment(entry) or datetime.now().astimezone()):
+                print(f"{stamp(entry)} {line}", flush=True)
+            tasks.see(entry)
+            if entry.get("type") == "result":
+                results.append(entry)
 
 
 def descendants(root):
@@ -253,11 +360,11 @@ def command_name(argv):
     return base
 
 
-def cpu_sample(root):
-    """Each live process below root, keyed by its pid and start time so a reused pid counts as a new process, with
-    its command's name and the CPU time it has used, in clock ticks."""
+def cpu_sample(root, skip=()):
+    """Each live process below root but the pids in skip, keyed by its pid and start time so a reused pid counts as a
+    new process, with its command's name and the CPU time it has used, in clock ticks."""
     sample = {}
-    for pid in descendants(root):
+    for pid in set(descendants(root)) - set(skip):
         try:
             stat = Path(f"/proc/{pid}/stat").read_text()
             argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
@@ -298,43 +405,106 @@ def beats_folder():
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "agent-desk" / "beats"
 
 
-def record_beat(session, text):
-    """Appends a beat to its session's beats file, skipping a session id that can't name a file."""
+def record_beat(session, text, kind="beat"):
+    """Appends a beat, or a line of another kind, to its session's beats file, skipping a session id that can't name a
+    file."""
     if not session or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
         return
-    moment = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    when = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     folder = beats_folder()
     try:
         folder.mkdir(parents=True, exist_ok=True)
         with open(folder / session, "a", encoding="utf-8") as beats:
-            beats.write(json.dumps({"type": "beat", "timestamp": moment, "text": text}) + "\n")
+            beats.write(json.dumps({"type": kind, "timestamp": when, "text": text}) + "\n")
     except OSError as error:
         log(f"Could not write the beat to {folder / session}: {error}")
 
 
-def beat(tasks, interval, stop):
-    """Logs a beat line once the stream has been quiet for interval seconds, and another every interval seconds the
-    silence lasts, until stop is set. The CPU of the first line counts from the last stream line, as of the next
-    check after it, and of each later line from the line before."""
+def beat(tasks, interval, stop, skip=()):
+    """Logs a beat line once the stream has been quiet but for heartbeats for interval seconds, and another every
+    interval seconds the silence lasts, until stop is set. The CPU of the first line counts from the last stream line
+    other than a heartbeat, as of the next check after it, and of each later line from the line before. The busy list
+    leaves out the pids in skip."""
     tick = min(5, interval / 5)
     root = os.getpid()
-    heard, sample, sampled, beaten = None, cpu_sample(root), time.monotonic(), 0.0
+    heard, sample, sampled, beaten = None, cpu_sample(root, skip), time.monotonic(), 0.0
     while not stop.wait(tick):
         with tasks.lock:
             latest = tasks.heard
         if latest != heard:
-            heard, sample, sampled = latest, cpu_sample(root), time.monotonic()
+            heard, sample, sampled = latest, cpu_sample(root, skip), time.monotonic()
             continue
         now = time.monotonic()
         if now - max(heard, beaten) < interval:
             continue
-        current = cpu_sample(root)
+        current = cpu_sample(root, skip)
         text = f"{tasks.waiting()} · {busy(sample, current, now - sampled)}"
         if stop.is_set():
             return
         log(text)
         record_beat(tasks.session, text)
         sample, sampled, beaten = current, now, now
+
+
+def crash_line(entry):
+    """The line a core dump logs, from the fields of systemd-coredump's journal entry: the program's name and its
+    signal."""
+    def field(name):
+        value = entry.get(name)
+        return value if isinstance(value, str) else ""
+    program = field("COREDUMP_COMM") or os.path.basename(field("COREDUMP_EXE")) or "a program"
+    number = field("COREDUMP_SIGNAL")
+    signal_name = field("COREDUMP_SIGNAL_NAME") or (f"signal {number}" if number else "")
+    return f"A process under the run crashed: {program}" + (f" ({signal_name})" if signal_name else "")
+
+
+def report_crashes(entries, tasks):
+    """Logs a crash line for each journal entry, a line of JSON, that journalctl writes, and adds it to the session's
+    beats file."""
+    for raw in entries:
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            text = crash_line(entry)
+            log(text)
+            record_beat(tasks.session, text, "crash")
+
+
+def watch_crashes(unit, tasks):
+    """Starts journalctl following the core dumps systemd-coredump records for unit from now on, and a thread that
+    reports each. Returns the journalctl process, or None when it can't start."""
+    try:
+        follow = subprocess.Popen(
+            ["journalctl", "--user", "--follow", "--lines=0", "--output=json",
+             f"--output-fields={','.join(CRASH_FIELDS)}", f"COREDUMP_USER_UNIT={unit}",
+             f"MESSAGE_ID={COREDUMP_MESSAGE}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError as error:
+        log(f"Could not follow the run's core dumps: {error}")
+        return None
+    threading.Thread(target=report_crashes, args=(follow.stdout, tasks), daemon=True).start()
+    return follow
+
+
+def limit_cores():
+    """Sets the soft limit on core files to 0 for this process and every process it starts, leaving the hard limit,
+    so a command can raise it again."""
+    _, hard = resource.getrlimit(resource.RLIMIT_CORE)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, hard))
+
+def watch(tasks, claude, stop, every=run_stall.SAMPLE, stalls=None):
+    """Samples the processes under the run every `every` seconds, leaving out the pids in `claude` (claude -p and the journalctl follower), and flags the run as
+    stalled while run_stall's rule holds, until stop is set. The run's end clears the flag."""
+    stalls = stalls or run_stall.Watch(log=log)
+    root = os.getpid()
+    try:
+        while not stop.wait(every):
+            ticks, desk = run_stall.sample(descendants(root), skip=set(claude))
+            stalls.check(time.monotonic(), tasks.call(), ticks, desk)
+    finally:
+        stalls.clear()
 
 
 def reap(proc):
@@ -396,41 +566,80 @@ def status_of(code):
     return 128 - code if code < 0 else code
 
 
-def run(command, stream_path, result_grace=RESULT_GRACE, kill_grace=KILL_GRACE, interval=BEAT):
-    """Runs command, logging its stream-json and a beat line for each interval seconds of silence, and returns its
-    status, ending it result_grace seconds after its result."""
+def stopped(tasks):
+    """What logs a command the user stopped: a line in the journal, and a line of type `stop` in the beats file."""
+    def say(text):
+        log(text)
+        record_beat(tasks.session, text, "stop")
+    return say
+
+
+def run(command, stream_path, result_grace=RESULT_GRACE, kill_grace=KILL_GRACE, interval=BEAT, unit=None,
+        run_id=None, codex=False, codex_path=None):
+    """Runs command, logging its stream-json, a beat line for each interval seconds of silence, and a crash line for
+    each core dump the journal records for unit, when one is given, and returns its status, ending it result_grace
+    seconds after its result. With run_id, it answers `agent-desk stop-command` for that run."""
     libc = ctypes.CDLL(None, use_errno=True)
     libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    results, tasks = [], Tasks()
+    follow = watch_crashes(unit, tasks) if unit else None
     with open(stream_path, "wb") as stream:
+        version = run_log.posting_version() if run_id else ""
+        identity = (run_id, version, datetime.now(timezone.utc)) if version else None
         proc = subprocess.Popen(command, stdout=subprocess.PIPE)
         # A signal meant for the run, such as the unit's stop, reaches claude -p too, which exits and ends the run.
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, lambda number, _frame: proc.send_signal(number))
-        results, tasks = [], Tasks()
-        reader = threading.Thread(target=copy, args=(proc.stdout, stream, results, tasks), daemon=True)
+        reader = threading.Thread(target=copy, args=(proc.stdout, stream, results, tasks, codex, codex_path, identity),
+                                  daemon=True)
         reader.start()
         stop = threading.Event()
-        threading.Thread(target=beat, args=(tasks, interval, stop), daemon=True).start()
+        skip = (follow.pid,) if follow else ()
+        threading.Thread(target=beat, args=(tasks, interval, stop, skip), daemon=True).start()
+        watcher = threading.Thread(target=watch, args=(tasks, {proc.pid, *skip}, stop), daemon=True)
+        watcher.start()
+        # The answer to `agent-desk stop-command`, which the run waits for before it exits, so a stop that ends the
+        # agent's last command still logs and answers.
+        answerer = threading.Thread(target=run_stop.answer, daemon=True,
+                                    args=(run_id, tasks.call, os.getpid(), {proc.pid, *skip}, stopped(tasks), stop),
+                                    kwargs={"codex_pid": proc.pid if codex else None})
+        if run_id:
+            answerer.start()
         wait_until(proc, lambda: exited(proc) or results)
         ended = bool(results) and not wait_until(proc, lambda: exited(proc), result_grace)
         if ended:
             left = tasks.left()
             Path(f"{stream_path}.left").write_text(left, encoding="utf-8")
             held = left or "a task the agent left running"
-            log(f"claude -p still ran {result_grace:g} s after the agent's result, held by {held}, so the run ends "
+            name = "Codex" if codex else "claude -p"
+            log(f"{name} still ran {result_grace:g} s after the agent's result, held by {held}, so the run ends "
                 "it and stops early.")
             end_tree(proc, kill_grace)
         wait_until(proc, lambda: not reader.is_alive(), DRAIN_WAIT if ended else None)
         stop.set()
+        watcher.join(DRAIN_WAIT)
+        if answerer.is_alive():
+            answerer.join(run_stop.TERM_GRACE + DRAIN_WAIT)
+    if follow:
+        follow.terminate()
+        follow.wait()
     if ended:
         return 1 if results[-1].get("is_error") else STOPPED
-    return status_of(proc.returncode)
+    status = status_of(proc.returncode)
+    if codex and results and results[-1].get("is_error"):
+        return status or 1
+    return status
 
 
 def main():
     if len(sys.argv) < 3:
         sys.exit("usage: agent_run.py <stream file> <command>...")
-    sys.exit(run(sys.argv[2:], sys.argv[1]))
+    limit_cores()
+    marker = os.environ.pop("AGENT_DESK_CODEX_SESSION_FILE", None)
+    codex = os.environ.pop("AGENT_DESK_CODEX", None) == "1" or bool(marker)
+    sys.exit(run(sys.argv[2:], sys.argv[1], unit=os.environ.get("AGENT_DESK_UNIT") or None,
+                 run_id=os.environ.get("AGENT_DESK_RUN") or None, codex=codex,
+                 codex_path=Path(marker) if marker else None))
 
 
 if __name__ == "__main__":

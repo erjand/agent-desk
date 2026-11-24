@@ -1,8 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 
 import { ago } from './board.ts'
-import { branchIssues, checkRows, deskRuns, gpuUse, lastFailure, runningChecks, slotCounts, timeLeft, unitFailures,
-  unitRequests, unitRows, waitingRequest } from './units.ts'
+import { branchIssues, checkRows, deskRuns, gpuUse, lastFailure, runningChecks, slotCounts, stallNote, stopAsk, timeLeft,
+  unitFailures, unitRequests, unitRows, waitingRequest } from './units.ts'
 import type { DeskRun, RunningCheck, UnitContext } from './units.ts'
 
 const NOW = Date.parse('2026-10-29T12:00:00Z')
@@ -31,6 +31,8 @@ function context(): UnitContext {
     workRef: number => (number === 9 ? { number: 30, issue: 9, pr: true, url: 'https://example.test/30' } : { number }),
     timeLeft: (workflow, started, _issue, benchmark, limit) => timeLeft(NOW, workflow, started, benchmark, limit),
     ago: stamp => ago(NOW, stamp),
+    stalled: stall => stallNote(NOW, stall),
+    stopAsk: stall => stopAsk(NOW, stall),
   }
 }
 
@@ -77,6 +79,44 @@ test('a unit at work says how long its GPU calls held and queued for the GPU, an
   expect(rows[0]?.text).toBe('agent     Issue 7  (serial · 20 min left · Held GPU for 12 mins, waited 9 mins for it)')
 })
 
+test('a stalled unit leads its note with its stall and carries the mark, and one that works on has neither', () => {
+  const stalled = { since: '2026-10-29T11:48:00Z', tool: 'Bash', summary: 'cargo test …' }
+  const rows = unitRows([
+    desk(3, 'agent', '7', 'running', { started_at: '2026-10-29T09:20:00Z', stalled }),
+    desk(5, 'chore', 'audit', 'running', { started_at: '2026-10-29T11:00:00Z' }),
+  ], context())
+  expect(rows.map(row => [row.note, row.stalled])).toEqual([
+    ['stalled 12 min in Bash: cargo test … · serial · 20 min left', true], [undefined, undefined]])
+  expect(rows[0]?.text).toBe('agent     Issue 7  (stalled 12 min in Bash: cargo test … · serial · 20 min left)')
+})
+
+test('a stalled agent on an issue has Stop Command, which asks with the command and its minutes', () => {
+  const stalled = { since: '2026-10-29T11:48:00Z', tool: 'Bash', summary: 'cargo test …' }
+  const rows = unitRows([
+    desk(3, 'agent', '7', 'running', { started_at: '2026-10-29T09:20:00Z', stalled }),
+    desk(4, 'agent', '9', 'running'),
+    // A stalled chore has no issue for `agent-desk stop-command` to name.
+    desk(5, 'chore', 'audit', 'running', { stalled }),
+  ], context())
+  expect(rows.map(row => [row.actions, row.stopAsk])).toEqual([
+    [['open', 'stop-command', 'pause'], 'Stop Bash: cargo test … after 12 min? The agent goes on with its failure.'],
+    [['open', 'pause'], undefined],
+    [[], undefined]])
+  expect(stopAsk(NOW, { since: '2026-10-29T11:00:00Z', tool: 'mcp__godot__run' })).toBe(
+    'Stop mcp__godot__run after 60 min? The agent goes on with its failure.')
+  expect(stopAsk(NOW, { since: 'soon', tool: 'Bash' })).toBe(undefined)
+})
+
+test('a stall reads its minutes from when its call started, and a malformed one reads as none', () => {
+  expect(stallNote(NOW, { since: '2026-10-29T11:54:30Z', tool: 'Bash', summary: 'make' })).toBe(
+    'stalled 5 min in Bash: make')
+  expect(stallNote(NOW, { since: '2026-10-29T11:00:00Z', tool: 'mcp__godot__run' })).toBe(
+    'stalled 60 min in mcp__godot__run')
+  for (const bad of [undefined, null, {}, { since: 'soon', tool: 'Bash' }, { since: '2026-10-29T11:00:00Z' }]) {
+    expect(stallNote(NOW, bad)).toBe(undefined)
+  }
+})
+
 test('GPU minutes read whole, a part of one reads as under one, and no hold reads as no GPU use', () => {
   expect(gpuUse(0.2, 0.4)).toBe('Held GPU for <1 min, waited <1 min for it')
   expect(gpuUse(0, 5)).toBe('Held GPU for 0 mins, waited 5 mins for it')
@@ -111,12 +151,29 @@ test('a unit that failed, timed out, or vanished shows in Needs You while its is
   ], context())
   expect(rows.map(row => [row.key, row.text, row.run, row.number, row.issue, row.state, row.note, row.since,
     row.actions])).toEqual([
-    ['failed-unit-6', 'failed  agent: Issue 9', -6, 9, undefined, 'failed', 'agent', '2026-10-29T10:30:00Z',
+    ['failed-unit-6', 'failed  agent: Issue 9', -6, 30, 9, 'failed', 'agent', '2026-10-29T10:30:00Z',
       ['open', 'retry', 'dismiss']],
     ['failed-unit-7', 'timed out  chores: audit', -7, undefined, undefined, 'timed out', 'chores',
       '2026-10-29T11:00:00Z', ['retry', 'dismiss']],
     ['failed-unit-8', 'failed  fix: PR for issue 9', -8, 30, 9, 'failed', 'fix', undefined,
       ['open', 'retry', 'dismiss']],
+  ])
+})
+
+test('a failed agent run names its issue\'s open review and opens the issue, and one a stopped row carries leaves',
+  () => {
+  const units = [
+    // Issue 9 has the open review 30, so its run's card reads #9 → #30.
+    desk(6, 'agent', '9', 'timed-out', { ended_at: '2026-10-29T10:30:00Z' }),
+    // Issue 8 has no open review, and no stopped row carries its run.
+    desk(7, 'agent', '8', 'failed', { ended_at: '2026-10-29T10:40:00Z' }),
+    // Issue 7's stopped row carries its run.
+    desk(8, 'agent', '7', 'timed-out', { ended_at: '2026-10-29T10:50:00Z' }),
+  ]
+  expect(unitFailures(units, context(), new Set([8])).map(row => [row.key, row.number, row.issue, row.pr, row.url,
+    row.run, row.actions])).toEqual([
+    ['failed-unit-6', 30, 9, true, 'https://example.test/9', -6, ['open', 'retry', 'dismiss']],
+    ['failed-unit-7', 8, undefined, undefined, 'https://example.test/8', -7, ['open', 'retry', 'dismiss']],
   ])
 })
 
@@ -242,7 +299,7 @@ test('Restart asks again for an issue\'s newest failed agent run, unless an agen
   const units = [ended(4, '7', 'failed', '2026-10-29T09:00:00Z'), ended(6, '7', 'timed-out', '2026-10-29T10:00:00Z'),
     ended(8, '9', 'failed', '2026-10-29T11:00:00Z'), ended(9, 'pr-7', 'failed', '2026-10-29T11:30:00Z'),
     { ...ended(10, '7', 'running', '2026-10-29T11:40:00Z'), ended_at: null }]
-  expect(lastFailure(units, 7, () => false)).toBe(-6)
+  expect(lastFailure(units, 7, () => false)?.id).toBe(6)
   expect(lastFailure(units, 9, ended => ended < '2026-10-29T11:10:00Z')).toBeUndefined()
   expect(lastFailure(units, 12, () => false)).toBeUndefined()
 })

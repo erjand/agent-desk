@@ -1,9 +1,9 @@
-// The Runners sidebar: one table of the shown projects' dispatcher slots under its title, one row per slot with what
-// works in it or `free`, and each project's local sessions started with `agent-desk start`, which take no slot, after
-// its slots.
+// The Runners sidebar: one table of the shown projects' dispatcher slots under its title, rows with the steppers that
+// set each project's agent and gpu slots, one row per slot with what works in it or `free`, and each project's local
+// sessions started with `agent-desk start`, which take no slot, after its slots.
 import { html } from './vendor/preact-htm.js'
 import { Chip, chipWidth, Numbers } from './app-parts.js'
-import { deskOf, runnerProjects, select, ui, visit } from './app-state.js'
+import { deskOf, draw, post, runnerProjects, select, ui, visit, worksIn } from './app-state.js'
 
 /** The most characters the Project column gives a chip, so a long project title leaves room for Title. */
 export const PROJECT_WIDTH_LIMIT = 12
@@ -40,10 +40,13 @@ export function ProjectCell({ desk, chip }) {
 
 /**
  * A row's Runner cell: the kind in the attention tone when every slot of it is busy, which tells why a queued request
- * waits, in Working's orange when the slot works, and in gray when it is free.
+ * waits, in Working's orange when the slot works, and in gray when it is free. An agent slot working an issue labelled
+ * `gpu` marks it, so the agent slots' marks count the gpu slots in use.
  */
-function RunnerCell({ kind, busy, tone }) {
-  return html`<td class=${`runner ${tone === 'full' ? 'full' : busy ? 'working' : ''}`}>${kind}</td>`
+function RunnerCell({ kind, busy, tone, gpu = false }) {
+  return html`<td class=${`runner ${tone === 'full' ? 'full' : busy ? 'working' : ''}`}>${kind}${gpu
+    ? html` <span class="gpu-mark" title="Works an issue labelled gpu, in one of its project's gpu slots">gpu</span>`
+    : null}</td>`
 }
 
 /**
@@ -57,7 +60,7 @@ export function Runner({ kind, row, desk, shown, tone, chip = null }) {
   const title = row.title ?? row.text.slice(10)
   return html`<tr class=${`runner-row busy ${id === null ? '' : 'pressable'}`} title=${row.text} onClick=${open}>
     <${ProjectCell} desk=${desk} chip=${chip} />
-    <${RunnerCell} kind=${kind} busy=${true} tone=${tone} />
+    <${RunnerCell} kind=${kind} busy=${true} tone=${tone} gpu=${kind === 'agent' && worksIn('gpu', row)} />
     <td class="number">
       <${Numbers} issue=${row.pr ? row.issue : row.number} pr=${row.pr ? row.number : undefined} /></td>
     <td class="title">${id === null ? title : html`<button type="button">${title}</button>`}</td>
@@ -84,11 +87,75 @@ export function SlotRow({ desk, slot, shown, chip = null }) {
 }
 
 /**
+ * Sets a project's slots of `kind`, agent or gpu, to `count` through the server, as `agent-desk slots <repo>
+ * <kind>=<n>` does, or with null drops the override so the project follows its `.agent-desk.json` again. The steppers
+ * wait for the answer before they take another press, and the server's next state shows the new count.
+ */
+export async function setSlots(desk, kind, count) {
+  ui.slotsSaving.add(desk)
+  draw()
+  const sent = count === null ? { desk, reset: kind } : { desk, [kind]: count }
+  await post('/api/slots', sent, deskOf(desk)?.title ?? desk)
+  ui.slotsSaving.delete(desk)
+  draw()
+}
+
+/**
+ * A stepper row of a project's slots of `kind`: the kind in its tone, − and + around the count, which − stops at 0
+ * and + at `most`, and, when an override sets the count, the config's count beside it, such as `1 of 3`, and Reset,
+ * which drops the override and says what the count goes back to.
+ */
+function SlotsRow({ desk, kind, count, config, override, most, back, tone, chip }) {
+  const saving = ui.slotsSaving.has(desk)
+  return html`<tr class=${`runner-row slot-control ${kind}`}>
+    <${ProjectCell} desk=${desk} chip=${chip} />
+    <${RunnerCell} kind=${kind} busy=${tone === 'busy'} tone=${tone} />
+    <td class="slots" colspan="3"><div class="slot-line"><span class="stepper">
+      <button type="button" aria-label=${`One ${kind} slot fewer`} title=${`One ${kind} slot fewer`}
+        disabled=${saving || count === 0} onClick=${() => setSlots(desk, kind, count - 1)}>−</button>
+      <span class="slot-count">${count}${override ? html`<span class="muted"> of ${config}</span>` : null}</span>
+      <button type="button" aria-label=${`One ${kind} slot more`} title=${`One ${kind} slot more`}
+        disabled=${saving || count >= most} onClick=${() => setSlots(desk, kind, count + 1)}>+</button>
+    </span><span class="muted">${count === 1 ? 'slot' : 'slots'}</span>
+    ${override ? html`<button type="button" class="reset" disabled=${saving} title=${back}
+      onClick=${() => setSlots(desk, kind, null)}>Reset</button>` : null}</div></td>
+  </tr>`
+}
+
+// The most agent slots the stepper sets, as server.ts's MAX_SLOTS.
+const MAX_AGENT_SLOTS = 20
+
+/**
+ * A project's agent stepper row, first in its group: − and + around the agent count, with the config's count and
+ * Reset when an override sets it, as SlotsRow draws them.
+ */
+export function AgentSlotsRow({ desk, agents, tone, chip = null }) {
+  return html`<${SlotsRow} desk=${desk} kind="agent" count=${agents.count} config=${agents.config}
+    override=${agents.override} most=${MAX_AGENT_SLOTS}
+    back=${`Back to the ${agents.config} agent slots .agent-desk.json sets`} tone=${tone} chip=${chip} />`
+}
+
+/**
+ * A project's gpu stepper row, under its agent stepper: how many of its agent runs may work issues labelled `gpu` at
+ * once, which never shows above the agent count, and an unset count shows as the agent count. Its tone counts the
+ * agent slots that work such an issue, `busy` of them.
+ */
+export function GpuSlotsRow({ desk, agents, gpu, busy, chip = null }) {
+  const count = Math.min(gpu.count ?? agents.count, agents.count)
+  const config = Math.min(gpu.config ?? agents.count, agents.count)
+  const tone = busy >= count ? 'full' : busy > 0 ? 'busy' : 'free'
+  const back = gpu.config === null ? 'Back to the agent count, since .agent-desk.json sets no gpu slots'
+    : `Back to the ${gpu.config} gpu slots .agent-desk.json sets`
+  return html`<${SlotsRow} desk=${desk} kind="gpu" count=${count} config=${config} override=${gpu.override}
+    most=${agents.count} back=${back} tone=${tone} chip=${chip} />`
+}
+
+/**
  * The Runners sidebar, in History's column: its title, then one table with a header row. Each shown project's rows sit
- * together in the page's order, a row per slot and then a `local` row per local session, or `no slots` when it has
- * neither. On All a Project column names each group on its first row and a rule separates one group from the next; a
- * project's tab shows one group and leaves both out. `shown` holds the ids of the cards the list shows, which a pressed
- * row selects.
+ * together in the page's order: the agent and GPU steppers, one row per slot, and each local
+ * session. On All a Project column names each group on its first row and a rule separates
+ * one group from the next; a project's tab shows one group and leaves both out. `shown` holds the ids of the cards the
+ * list shows, which a pressed row selects.
  */
 export function Runners({ shown }) {
   const projects = runnerProjects()
@@ -109,15 +176,22 @@ export function Runners({ shown }) {
         <th class="title">Title</th>
         <th class="time">Time</th>
       </tr></thead>
-      ${projects.map(({ desk, rows, locals }) => html`<tbody key=${desk}>
+      ${projects.map(({ desk, slots, rows, locals, agents, gpu }) => {
+        const top = agents ? (gpu ? 2 : 1) : 0
+        return html`<tbody key=${desk}>
+        ${agents ? html`<${AgentSlotsRow} desk=${desk} agents=${agents}
+          tone=${slots.find(one => one.kind === 'agent')?.tone ?? 'free'} chip=${chipAt(0)} />` : null}
+        ${agents && gpu ? html`<${GpuSlotsRow} desk=${desk} agents=${agents} gpu=${gpu} busy=${gpu.busy}
+          chip=${chipAt(1)} />` : null}
         ${rows.map((slot, at) => html`<${SlotRow} key=${slot.row?.key ?? `${slot.kind}-${at}`} desk=${desk} slot=${slot}
-          shown=${shown} chip=${chipAt(at)} />`)}
+          shown=${shown} chip=${chipAt(top + at)} />`)}
         ${locals.map((row, at) => html`<${Runner} key=${row.key} kind="local" row=${row} desk=${desk} shown=${shown}
-          chip=${chipAt(rows.length + at)} />`)}
-        ${rows.length + locals.length === 0 ? html`<tr class="runner-row free">
+          chip=${chipAt(top + rows.length + at)} />`)}
+        ${top + rows.length + locals.length === 0 ? html`<tr class="runner-row free">
           <${ProjectCell} desk=${desk} chip=${chipAt(0)} /><td class="muted" colspan="4">no slots</td>
         </tr>` : null}
-      </tbody>`)}
+      </tbody>`
+      })}
     </table>`}
   </aside>`
 }

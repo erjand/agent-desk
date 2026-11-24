@@ -3,27 +3,31 @@
 // card's issue, PR, and actions in a panel beside it. Preact draws it from `ui`, and draw() draws it again after any
 // change; Preact keeps whatever didn't change, so a redraw leaves scroll positions, open lists, and pictures alone.
 // The modules beside it draw the rest: app-state.js holds `ui` and what changes it, app-parts.js the chips, icons, and
-// labels, app-header.js the header, app-detail.js the selected card's panel, app-runners.js the Runners sidebar,
-// app-history.js the History column, app-chat.js the Chat column, app-hovercard.js the hovercards, app-new-issue.js
-// the New Issue form, app-resources.js the Resources view, app-drag.js dragging a queued card to a new place, and
-// app-help.js the keyboard shortcuts dialog.
+// labels, app-item.js each card's row and the Detailed button, app-header.js the header, app-detail.js the selected
+// card's panel, app-runners.js the Runners sidebar, app-github.js the GitHub sidebar, app-history.js the History
+// column, app-chat.js the Chat column, app-hovercard.js the hovercards, app-new-issue.js the New Issue form,
+// app-resources.js the Resources view, app-drag.js dragging a card to a new place in its group, app-order.js the
+// groups' Sort buttons, and app-help.js the keyboard shortcuts dialog.
 import { html, render } from './vendor/preact-htm.js'
 import { applyChat, Chat } from './app-chat.js'
+import { choreCard, choreId } from './app-chore.js'
 import { barHeight, Detail, LOG_MS, onDetailScroll, reviewKey, showTabTop } from './app-detail.js'
-import { dragClass, dragProps } from './app-drag.js'
+import { GitHub } from './app-github.js'
 import { Help } from './app-help.js'
 import { History } from './app-history.js'
 import { hideHovercard, hoverRoot, onLinkOut, onLinkOver } from './app-hovercard.js'
+import { DetailedToggle, Item, noteOf } from './app-item.js'
 import { closeNewIssue, NewIssue, openNewIssue, showCreated } from './app-new-issue.js'
 import { Header, placeTip } from './app-header.js'
+import { GroupSort, SORTED } from './app-order.js'
 import { closeResources, Resources } from './app-resources.js'
 import { followMark, markFileInView } from './app-review.js'
 import { onUsageOutside } from './app-usage.js'
-import { Chip, chipWidth, Icon, iconOf, labelNamed, Numbers, tagsOf } from './app-parts.js'
+import { Chip, chipWidth } from './app-parts.js'
 import { Runners } from './app-runners.js'
-import { act, age, byNumber, clickedItem, closeDetail, deskOf, draw, drawWith, githubRows, hotkeyOf, itemHref, KEYS,
-  pageItemOf, pickDetailTab, post, press, ready, remember, select, showRun, shownDesks, SORTABLE, STAGE_NAMES,
-  STAGES, toast, toggleSide, ui, visit } from './app-state.js'
+import { act, clickedItem, closeDetail, deskOf, draw, drawWith, foldAll, hotkeyOf, itemHref, KEYS, pageItemOf, post,
+  press, ready, remember, rememberFolds, select, showRun, shownDesks, STAGE_NAMES, STAGES, toast, toggleSide, ui,
+  visit } from './app-state.js'
 
 // The most characters of a note the list's note column makes room for; a longer note clips.
 const NOTE_CHARS = 40
@@ -35,6 +39,8 @@ let pointer = null
 let drawnTab = null
 // The heading a fold from its stuck place holds where it shows, as a mark for holdList(), until the next draw.
 let foldMark = null
+// Whether the next draw shows the list from its top, as it does after every group folds.
+let listTop = false
 
 /**
  * Where the list's rows sit on screen: the row under the pointer first, then each one in view, top down. A stuck
@@ -100,11 +106,12 @@ function drawPage() {
     ui.pinned = false
   }
   // A search filters the list from its top, so only a redraw that leaves the search alone holds rows still.
-  const marks = foldMark ? [foldMark] : drawnTab === ui.tab && !ui.searched ? listMarks() : []
+  const marks = foldMark ? [foldMark] : drawnTab === ui.tab && !ui.searched && !listTop ? listMarks() : []
   foldMark = null
-  if (ui.searched) {
+  if (ui.searched || listTop) {
     root.querySelector('.list')?.scrollTo(0, 0)
     ui.searched = false
+    listTop = false
   }
   render(html`<${App} />`, root)
   holdList(marks)
@@ -152,10 +159,20 @@ function choreCards(desk) {
   const board = desk.board
   const taken = name => board.runners.some(row => row.title?.endsWith(name))
   return (board.choreList ?? []).filter(chore => /^(running|starting)/.test(chore.last) && !taken(chore.name))
-    .map(chore => ({ id: `${desk.id}:chore-${chore.name}`, desk: desk.id, stage: 'queued', title: chore.name,
+    .map(chore => choreCard(desk, chore, { stage: 'queued',
       note: [chore.last === 'starting' ? 'chore, starting' : 'chore, waiting for a runner',
-        queueNote(desk.repeats?.[chore.name])].filter(Boolean).join(' · '), key: '', actions: [],
-      chore }))
+        queueNote(desk.repeats?.[chore.name])].filter(Boolean).join(' · ') }))
+}
+
+/** The card of the Chores row whose id is `id`, among the shown projects' chores, or undefined. */
+function choreRowCard(id) {
+  for (const desk of shownDesks().filter(ready)) {
+    const chore = (desk.board.choreList ?? []).find(one => choreId(desk.id, one.name) === id)
+    if (chore) {
+      return choreCard(desk, chore, { note: `chore, next ${chore.next}` })
+    }
+  }
+  return undefined
 }
 
 const since = card => (card.since ? Date.parse(card.since) : Infinity)
@@ -182,19 +199,18 @@ function matches(card, words) {
 }
 
 /**
- * The list's groups for the shown projects: Needs You longest waiting first, and Open, Blocked, Needs Design, Backlog,
- * and Ideas by issue number within each project, in the direction the person picked. The History column lists merges.
+ * The list's groups for the shown projects: Needs You longest waiting first, and the rest as each project's board lists
+ * them, so Open, Blocked, Needs Design, Backlog, and Ideas follow its list order. On All, each project's cards stay
+ * together in project order. The History column lists merges.
  */
 function groups() {
   const words = searchWords()
   const cards = shownDesks().filter(ready).flatMap(desk => [...desk.cards, ...choreCards(desk)])
     .filter(card => words.length === 0 || matches(card, words))
   return STAGES.map(([stage, title, hue]) => {
-    let list = cards.filter(card => card.stage === stage)
+    const list = cards.filter(card => card.stage === stage)
     if (stage === 'needs') {
       list.sort((a, b) => since(a) - since(b))
-    } else if (SORTABLE.has(stage)) {
-      list = byNumber(list, ui.ascending.has(stage))
     }
     return { stage, title, hue, cards: list }
   })
@@ -226,8 +242,8 @@ function panelTaken() {
 }
 
 /**
- * The selected card, or the item a link showed that the list has no card for, or the first card when the selected one
- * isn't shown.
+ * The selected card, or the item a link showed that the list has no card for, or the chore a Chores row opened, or the
+ * first card when the selected one isn't shown.
  */
 function chosen() {
   if (ui.server === null) {
@@ -235,7 +251,7 @@ function chosen() {
   }
   const all = groups().flatMap(group => group.cards)
   return all.find(card => card.id === ui.selected) ?? (ui.visiting?.id === ui.selected ? ui.visiting : null)
-    ?? stepped()[0] ?? all[0] ?? null
+    ?? choreRowCard(ui.selected) ?? stepped()[0] ?? all[0] ?? null
 }
 
 /**
@@ -250,74 +266,8 @@ function toggleGroup(stage) {
   } else {
     ui.collapsed.add(stage)
   }
-  remember('inbox-collapsed', [...ui.collapsed])
+  rememberFolds()
   draw()
-}
-
-/** Flips a sortable group between highest issue number first and lowest first. */
-function flipOrder(stage) {
-  if (ui.ascending.has(stage)) {
-    ui.ascending.delete(stage)
-  } else {
-    ui.ascending.add(stage)
-  }
-  remember('inbox-ascending', [...ui.ascending])
-  draw()
-}
-
-function timeOf(card) {
-  return card.stage === 'needs' && card.since ? age(card.since) : card.time ?? ''
-}
-
-/** A card in the list: its icon, its project on All, its number, title, state, and labels, then its note and time. */
-function Item({ card, selected }) {
-  const [icon, tone] = iconOf(card)
-  // A note, such as `checks failed` or `waiting on #295`, sits in a column of its own before the time; one that names
-  // a label shows as that label. A review the merge queue stopped on draws its note in the warning tone.
-  const note = noteOf(card)
-  const noteClass = card.stage === 'merging' && card.state === 'stopped' ? 'note warning' : 'note'
-  const classes = ['item', selected ? 'selected' : '', dragClass(card)].filter(Boolean).join(' ')
-  // Working names the run's kind, such as `fix` or `check`, but not `agent`, which most of them are.
-  const runner = card.runner !== 'agent' ? card.runner : undefined
-  return html`<div role="option" class=${classes} aria-selected=${String(selected)} data-key=${card.id}
-    ...${dragProps(card)} onClick=${() => select(card.id)}>
-    <${Icon} name=${icon} tone=${tone} />
-    ${ui.tab === 'all' ? html`<span class="chip-cell"><${Chip} desk=${card.desk} /></span>` : null}
-    <${Numbers} issue=${card.number !== card.pr ? card.number : undefined} pr=${card.pr} />
-    <span class="text" title=${card.title}>${card.title}</span>
-    ${card.subs ? html`<${SubsBadge} card=${card} />` : null}
-    ${card.state ? html`<span class=${`badge ${card.state}`}>${card.state}</span>` : null}
-    ${runner ? html`<span class="note runner">${runner}</span>` : null}
-    <span class="tags">${tagsOf(card.desk, card.labels, card.note, { noteApart: true })}</span>
-    ${note ? html`<span class="note-cell"><span class=${noteClass} title=${note}>${note}</span></span>` : null}
-    <span class="time">${timeOf(card)}</span>
-  </div>`
-}
-
-/**
- * A parent issue's sub-issue progress beside its title, as GitHub draws it: a ring that fills as its sub-issues close,
- * and how many are done. Clicking it opens the card's Dependencies tab.
- */
-function SubsBadge({ card }) {
-  const { done, total } = card.subs
-  const turn = 2 * Math.PI * 5
-  return html`<button type="button" class=${done === total ? 'subs-badge done' : 'subs-badge'}
-    title=${`${done} of ${total} sub-issues done`} aria-label=${`${done} of ${total} sub-issues done`}
-    onClick=${event => {
-      event.stopPropagation()
-      select(card.id)
-      pickDetailTab('deps')
-    }}>
-    <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
-      <circle cx="7" cy="7" r="5" fill="none" stroke="var(--border)" stroke-width="2" />
-      <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="2"
-        stroke-dasharray=${`${(turn * done) / total} ${turn}`} transform="rotate(-90 7 7)" />
-    </svg>${`${done}/${total}`}</button>`
-}
-
-/** A card's note for its own column, or null for none or one that shows as a label. */
-function noteOf(card) {
-  return card.note && !labelNamed(card.desk, card.note) ? card.note : null
 }
 
 /** The width of the list's note column, in the notes' characters: its longest note up to NOTE_CHARS, with its tile. */
@@ -326,16 +276,10 @@ function noteWidth() {
   return Math.min(longest, NOTE_CHARS) + 3
 }
 
-/** A sortable group's button that flips it between highest issue number first and lowest first. */
-function SortButton({ stage }) {
-  const ascending = ui.ascending.has(stage)
-  const says = ascending ? 'Lowest number first; press for highest first'
-    : 'Highest number first; press for lowest first'
-  return html`<button type="button" class="sort" title=${says} aria-label=${says}
-    onClick=${() => flipOrder(stage)}># ${ascending ? '↑' : '↓'}</button>`
-}
-
-/** A group's box: its heading, which collapses it, a sortable group's sort button beside it, and its cards. */
+/**
+ * A group's box: its heading, which collapses it, and its cards. The Sort button of Queued, Open, Blocked, Needs
+ * Design, Backlog, and Ideas, which sorts the group's order in the store, sits beside its heading.
+ */
 function Group({ group, selected }) {
   const folded = shut(group.stage)
   const searching = ui.query.trim() !== ''
@@ -349,7 +293,7 @@ function Group({ group, selected }) {
     <span class="counter">${group.cards.length}</span>
   </button>`
   return html`<section class="box">
-    ${SORTABLE.has(group.stage) ? html`<div class="box-heading">${head}<${SortButton} stage=${group.stage} /></div>`
+    ${SORTED.has(group.stage) ? html`<div class="box-heading">${head}<${GroupSort} stage=${group.stage} /></div>`
       : head}
     ${folded ? null : group.cards.length === 0 ? html`<div class="empty">Nothing needs you.</div>`
       : group.cards.map(card => html`<${Item} key=${card.id} card=${card} selected=${card.id === selected} />`)}
@@ -514,7 +458,10 @@ function statsOf(info) {
     .filter(Boolean).join(' · ')
 }
 
-/** The shown projects' chores, each with its model, when it ran and runs next, how its runs went, and its buttons. */
+/**
+ * The shown projects' chores, each with its model, when it ran and runs next, how its runs went, and its buttons. A
+ * click on a row outside its buttons and inputs opens the chore's page in the panel.
+ */
 function Chores() {
   const words = searchWords()
   const rows = shownDesks().filter(ready).flatMap(desk => (desk.board.choreList ?? []).map(chore => ({ desk, chore })))
@@ -524,14 +471,20 @@ function Chores() {
     return null
   }
   const folded = shut('chores')
+  const open = current()?.id
   return html`<section class="box chores" style=${{ '--chip-col': ui.tab === 'all' ? `${chipWidth()}ch` : '0px' }}>
     <button type="button" class="box-head" aria-expanded=${String(!folded)} data-key="group:chores"
       onClick=${() => toggleGroup('chores')}>
       <span class="caret">${folded ? '▸' : '▾'}</span><span style=${{ color: 'var(--chores)' }}>Chores</span>
       <span class="counter">${rows.length}</span>
     </button>
-    ${folded ? null : rows.map(({ desk, chore }) => html`<div class="chore-row" key=${`${desk.id}:${chore.name}`}
-      data-key=${`chore:${desk.id}:${chore.name}`}>
+    ${folded ? null : rows.map(({ desk, chore }) => html`<div key=${`${desk.id}:${chore.name}`}
+      class=${choreId(desk.id, chore.name) === open ? 'chore-row selected' : 'chore-row'}
+      data-key=${`chore:${desk.id}:${chore.name}`} onClick=${event => {
+        if (!event.target.closest('button, input, select, textarea, a, label')) {
+          select(choreId(desk.id, chore.name))
+        }
+      }}>
       <span class="chip-cell">${ui.tab === 'all' ? html`<${Chip} desk=${desk.id} />` : null}</span>
       <strong class="c-name">${chore.name}</strong>
       <span class="c-model"><${ModelTag} info=${desk.choreInfo?.[chore.name]} /></span>
@@ -547,31 +500,6 @@ function Chores() {
           : html`<${ChoreControls} desk=${desk} chore=${chore} />`}
         <${ScheduleControls} desk=${desk} chore=${chore} /></span></span>
     </div>`)}
-  </section>`
-}
-
-/**
- * Each place the desk touches GitHub and how it last went, in the notice rows' tones: the shown projects' main and
- * agent branches, then the backup once. It sits under the work, so it never pushes an issue down, and its heading counts
- * the rows that fail.
- */
-function GitHub() {
-  const rows = githubRows(shownDesks().filter(ready))
-  if (rows.length === 0) {
-    return null
-  }
-  const folded = shut('github')
-  const failing = rows.filter(({ row }) => row.notice === 'warning').length
-  return html`<section class="box github" style=${{ '--chip-col': ui.tab === 'all' ? `${chipWidth()}ch` : '0px' }}>
-    <button type="button" class="box-head" aria-expanded=${String(!folded)} data-key="group:github"
-      onClick=${() => toggleGroup('github')}>
-      <span class="caret">${folded ? '▸' : '▾'}</span><span style=${{ color: 'var(--github)' }}>GitHub</span>
-      ${failing > 0 ? html`<span class="counter warning">${failing} failing</span>` : null}
-    </button>
-    ${folded ? null : rows.map(({ desk, row }) => html`<div class="github-row" key=${`${desk?.id ?? ''}:${row.key}`}>
-      <span class="chip-cell">${ui.tab === 'all' && desk ? html`<${Chip} desk=${desk.id} />` : null}</span>
-      <strong class="g-name">${row.title}</strong>
-      <span class=${`g-note ${row.notice ?? 'muted'}`} title=${row.note}>${row.note}</span></div>`)}
   </section>`
 }
 
@@ -613,6 +541,7 @@ function Search() {
           stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg></button>`}
     </div>
     <kbd>/</kbd>
+    <${DetailedToggle} />
   </div>`
 }
 
@@ -629,28 +558,31 @@ function App() {
   const shown = new Set(groups().flatMap(group => group.cards.map(one => one.id)))
   return html`<${Header} selected=${current()?.desk} />
     <main class=${ui.side ? 'split with-side' : 'split'}>
-      <div class="list" role="listbox" aria-label="Work"
+      <div class=${ui.detailed ? 'list detailed' : 'list'} role="listbox" aria-label="Work"
         style=${{ '--chip-width': `${chipWidth()}ch`, '--note-width': `${noteWidth()}ch` }}>
         <${Search} />
         ${groups().map(group => html`<${Group} key=${group.stage} group=${group} selected=${card?.id} />`)}
         ${ui.query.trim() !== '' && groups().every(group => group.cards.length === 0)
           ? html`<p class="muted no-match">Nothing matches “${ui.query.trim()}”.</p>` : null}
         <${Chores} />
-        <${GitHub} />
       </div>
       <div class="detail" onScroll=${event => onDetailScroll(event.currentTarget)}>${ui.newIssue.open
         ? html`<${NewIssue} />` : ui.resources.open ? html`<${Resources} />`
           : card ? html`<${Detail} key=${card.id} card=${card} visible=${shown} />` : null}
       </div>
       ${ui.side === 'runners' ? html`<${Runners} shown=${shown} />`
-        : ui.side === 'history' ? html`<${History} />` : ui.side === 'chat' ? html`<${Chat} card=${card} />` : null}
+        : ui.side === 'history' ? html`<${History} />` : ui.side === 'chat' ? html`<${Chat} card=${card} />`
+          : ui.side === 'github' ? html`<${GitHub} />` : null}
     </main>
     <div class="toasts" aria-live="polite">${ui.toasts.map(one => html`<div class="toast" key=${one.id}>
       ${one.text}</div>`)}</div>
     ${ui.help ? html`<${Help} />` : null}`
 }
 
-/** The keys: j and k step through the cards, a card's action keys press its buttons, and digits pick a tab. */
+/**
+ * The keys: j and k step through the cards, `-` and `+` fold and open every group, a card's action keys press its
+ * buttons, and digits pick a tab.
+ */
 function onKey(event) {
   const key = hotkeyOf(event)
   if (key === null) {
@@ -693,6 +625,12 @@ function onKey(event) {
     toggleSide('runners')
   } else if (key === '`') {
     toggleSide('chat')
+  } else if (key === 'g') {
+    toggleSide('github')
+  } else if (key === '-' || key === '+' || key === '=') {
+    // `=` is `+` without Shift on a US layout, and the numpad's keys send `+` and `-` themselves.
+    foldAll(key === '-')
+    listTop = key === '-'
   } else if (key === 'i') {
     openNewIssue(current()?.desk)
     event.preventDefault()
@@ -828,7 +766,7 @@ document.addEventListener('mousedown', event => {
     hideHovercard()
   }
 })
-// The header's usage limit popover closes on a press outside it.
+// The header's account popover closes on a press outside it.
 document.addEventListener('mousedown', onUsageOutside)
 document.addEventListener('keydown', hideHovercard)
 // A plain click on a link to an item on the page, such as `#123` in a body, shows the item in the detail view; a click

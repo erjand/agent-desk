@@ -78,6 +78,25 @@ class FixTest(Desk):
         git("merge-base", "--is-ancestor", "main", BRANCH, cwd=self.main)
         self.assertEqual(self.gh_log.read_text().strip(), "")
 
+    def test_a_conflicting_review_uses_codex_to_finish_the_merge(self):
+        review = self.review_of()
+        env = self.codex_fake()
+        result = self.run_lib("fix.sh", str(review), FAKE_AGENT=RESOLVE, AGENT_DESK_ISSUE_RUNNER="codex", **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("A merge of main into it is in progress here", self.codex_log.read_text())
+        self.assertIn("Codex session ID is in the run log", self.notes(review)[0][1])
+        git("merge-base", "--is-ancestor", "main", BRANCH, cwd=self.main)
+        self.assertEqual(self.claude_args(), [])
+
+    def test_a_fix_bills_its_account(self):
+        for account in ("subscription", "api"):
+            with self.subTest(account):
+                review = self.review_of(branch=f"{BRANCH}-{account}")
+                result = self.run_lib("fix.sh", str(review), **self.billing(account, RESOLVE))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_billed(account, result)
+                git("checkout", "-q", "main", cwd=self.main)
+
     def test_a_conflict_beside_a_folder_both_sides_changed_gets_an_agent(self):
         # git 2.56's `merge-tree --write-tree --quiet` exits 0 on this pair, though the full merge conflicts in notes.txt.
         (self.main / "t").mkdir()
@@ -162,6 +181,27 @@ class FixTest(Desk):
         self.assertEqual(self.notes(review)[-1],
                          ("desk", f"The agent adapted `{BRANCH}` to main and committed, which runs its checks again"
                                   f"{LOG}.{SIGNED}"))
+
+    def test_checks_that_fail_after_a_conflict_fix_tell_the_agent_the_conflict_is_resolved(self):
+        review = self.review_of(conflicting=False)
+        head = git("rev-parse", BRANCH, cwd=self.main)
+        log = self.root / "check.log"
+        log.write_text(FAILED_LOG)
+        check = self.store.check_queue(REPO, BRANCH, head)
+        self.store.check_started(check, log)
+        self.store.check_ended(check, "failed")
+        # The merge queue holds the review for a fix of what main broke, after a fix resolved its conflicts.
+        queue = self.root / "state" / "agent-desk" / "merges" / f"{REPO.replace('/', '__')}.json"
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        queue.write_text(json.dumps({"queue": [{"pr": review, "brokenHead": head, "passed": True, "conflicted": True}],
+                                     "dropped": []}))
+        result = self.fix(review, "echo fixed >notes.txt && git commit -q -am adapt")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.prompt()
+        self.assertIn("an earlier fix resolved the conflicts by merging main into it.\nThe conflict is resolved, and "
+                      "the branch's checks, which passed before, fail since", prompt)
+        self.assertIn(f"test failed: {log}\n\nFAILED test_parse - AssertionError: 1 != 2\n", prompt)
+        self.assertNotIn("passed its checks until", prompt)
 
     def test_a_merged_review_needs_no_fix(self):
         review = self.review_of()

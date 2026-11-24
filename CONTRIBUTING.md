@@ -45,12 +45,24 @@ Run every suite from a checkout:
 just test
 ```
 
-The `test` recipe runs the Python tests in `tests/` through `python3 -B -m unittest discover -s tests`, the pane's tests
+The `test` recipe runs the Python tests in `tests/` through `python3 -B scripts/run_tests.py`, the pane's tests
 through `claude plugin test inbox`, and the web page's through `node --test web/*.test.ts`. It then runs
 `just shellcheck`, which checks `bin/agent-desk` and `lib/*.sh` with `shellcheck`, and `just gitleaks`, which fails on
 a secret that `gitleaks git` finds in the history or `gitleaks dir` finds in the tree, printing each finding with its
 value redacted. You need `shellcheck` installed. Where `gitleaks` isn't installed, `just gitleaks` says so and skips
 the scan. `.gitleaks.toml` and `.gitleaksignore`, when they exist, allowlist false positives.
+
+`scripts/run_tests.py` splits the Python tests into one part for each test class, with a large class split further,
+and runs the parts in worker processes, as many as the CPU count up to 8, or `--jobs N`. A passing module prints one
+line; a failing part prints unittest's whole output. The run ends with the count of tests run and the wall time. Each
+test runs in its own process beside others, so give it its own temporary folder and port instead of a fixed path under
+`/tmp` or a fixed port. Run one or more modules, or one test, by hand:
+
+```bash
+python3 -B scripts/run_tests.py test_store test_board
+python3 -B -m unittest discover -s tests -p test_store.py
+python3 -B -m unittest discover -s tests -p test_serial.py -k test_a_closed_issue_stays_closed
+```
 
 Add tests beside the ones for the module you change:
 

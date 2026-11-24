@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Merges a review's base, main or the branch it targets, into a review of an agent/<slug> branch that conflicts with
-# it, such as an issue's, a chore's, or an interactive session's, and has a headless Claude Code agent resolve the
+# it, such as an issue's, a chore's, or an interactive session's, and has a headless agent resolve the
 # conflicts:
 #   agent-desk fix 537
 # The dispatcher runs it for a `fix <n>` request, which the project's fix workflow makes when agent-desk fixes tick
@@ -11,7 +11,8 @@
 # review's own worktree, which it makes again from the branch when it's gone, and leaves it as it found it when it can't
 # resolve them: the merge aborted, and a comment on the review saying why. A review that merges cleanly but fails checks
 # on its head, as when the merge queue found that the base's changes broke them, gets an agent that learns the failed
-# checks' errors from lib/failures.py and adapts the branch to the base instead; the run counts only when the agent
+# checks' errors from lib/failures.py and adapts the branch to the base instead, told whether the checks fail since the
+# queue merged the base in or since an earlier fix resolved conflicts with it; the run counts only when the agent
 # commits. A run whose agent ended its turn while a task it started still ran stopped early, whatever the branch holds:
 # it says so on the review, naming the task, and exits with desk_stopped.
 set -euo pipefail
@@ -33,6 +34,7 @@ fix_main() {
     issue=
     [[ $slug =~ ^issue-([0-9]+)$ ]] && issue=${BASH_REMATCH[1]}
     [[ $state == OPEN ]] || { echo "Review #$pr is ${state,,}."; exit 0; }
+    repo=${GH_REPO:-$(cd "$main" && desk_repo_here || true)}
     # A trial merge in the main checkout writes only objects, so it tells whether the branch conflicts with its base
     # without touching a worktree. git merge-tree exits 1 for conflicts and above 1 when it can't merge at all. It runs
     # the full merge, since git 2.56 exits 0 with --quiet on some merges that conflict.
@@ -72,10 +74,9 @@ fix_main() {
         fi
     fi
 
-    repo=${GH_REPO:-$(cd "$main" && desk_repo_here || true)}
     # The run waits here, holding its slot, until the machine has the memory a fix needs.
     desk_memory_start fix
-    desk_model_flags fix
+    desk_runner_flags fix || return 1
     if [[ -d $dest ]]; then
         git -C "$dest" checkout -q "$branch"
     else
@@ -90,9 +91,18 @@ fix_main() {
     if [[ -n $checks ]]; then
         merged=$before
         work="adapting \`$branch\` to $base, whose changes broke its checks"
+        # The merge queue notes whether the checks broke when it merged the base in, or when a fix resolved conflicts.
+        cause=$(GH_REPO=$repo python3 -B "$desk_lib/merges.py" cause "$main" "$pr" 2>/dev/null || true)
+        if [[ $cause == conflict ]]; then
+            broke="conflicted with its base, $base, and an earlier fix resolved the conflicts by merging $base into it.
+The conflict is resolved, and the branch's checks, which passed before, fail since, so a change on $base most likely
+broke it"
+        else
+            broke="passed its checks until its base, $base, merged into it, and fails them since, so a change on $base
+most likely broke it"
+        fi
         prompt="You run unattended, so nobody can answer a question. Review #$pr, of the branch $branch checked out in
-this directory, passed its checks until its base, $base, merged into it, and fails them since, so a change on $base
-most likely broke it. These checks failed on its head:
+this directory, $broke. These checks failed on its head:
 
 $checks
 
@@ -139,14 +149,13 @@ When a conflict needs a decision neither side settles, or the tests fail in a wa
 run git merge --abort and comment on the review which files and why, with
 \`agent-desk review comment $pr --body <text>\`."
     fi
-    desk_note review "$pr" "An agent started $work$run_link. To take over, run \`claude --resume $session\` in \
-\`$dest\`."
+    desk_note review "$pr" "An agent started $work$run_link. $(desk_takeover_note "$dest" "$session")"
     # The store records the agent as the author of the comments it posts, so they need no footer.
 
     status=0
     stream=$(mktemp)
     # The run's stream-json goes to a file too, for its length and turns in the run log.
-    desk_claude_run "$dest" "$stream" "$prompt" --session-id "$session" 8>&- || status=$?
+    desk_run "$dest" "$stream" "$prompt" "$session" 8>&- || status=$?
     # A run that stopped early says so whether or not the branch moved, so it never reads as a failed fix.
     left=$(desk_left_task "$stream" "$status")
 

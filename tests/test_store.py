@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 import store  # noqa: E402
 import store_cli  # noqa: E402
-import store_schema  # noqa: E402
 
 REPO = "org/game"
 
@@ -157,14 +156,23 @@ class SchemaTest(StoreCase):
 
 
 def older_database(path):
-    """Writes a database one schema behind this code's, in rollback-journal mode, holding issue 1 and review 2."""
+    """
+    Writes a database one schema behind this code's, in rollback-journal mode, holding issue 1 and review 2. It writes
+    their rows itself, since this code's writes may use a column the older schema lacks.
+    """
     with mock.patch.object(store, "SCHEMA_VERSION", store.SCHEMA_VERSION - 1):
-        old = store.Store(path)
-        old.create(REPO, "issue", "Old issue")
-        old.create(REPO, "review", "Old review", branch="agent/issue-1")
-        old.close()
+        store.Store(path).close()
     db = sqlite3.connect(path)
     db.execute("PRAGMA journal_mode = DELETE")
+    stamp = store.now()
+    db.execute("INSERT INTO projects (slug, next_number) VALUES (?, 3)", (REPO,))
+    for number, kind, title in ((1, "issue", "Old issue"), (2, "review", "Old review")):
+        db.execute("INSERT INTO items (project, number, kind, title, author, created_at, updated_at)"
+                   " VALUES (?, ?, ?, ?, 'you', ?, ?)", (REPO, number, kind, title, stamp, stamp))
+        db.execute("INSERT INTO events (project, number, type, payload, author, at) VALUES (?, ?, 'item-created', ?,"
+                   " 'you', ?)", (REPO, number, json.dumps({"kind": kind, "title": title}), stamp))
+    db.execute("INSERT INTO reviews (project, number, branch, base) VALUES (?, 2, 'agent/issue-1', 'main')", (REPO,))
+    db.commit()
     db.close()
     return path
 
@@ -285,7 +293,8 @@ class ReadOnlyTest(StoreCase):
         store.PROJECTS.write_text(f"{REPO} {folder / 'checkout'}\n")
         commands = [(store_cli.main, ["issue", "view", "1"]), (store_cli.main, ["issue", "list"]),
                     (store_cli.main, ["review", "view", "2"]), (store_cli.main, ["review", "list"]),
-                    (store_cli.main, ["review", "checks", "2"]), (board.main, []), (dispatch.main, ["runs"]),
+                    (store_cli.main, ["review", "checks", "2"]), (store_cli.main, ["list", "order"]),
+                    (store_cli.main, ["queue", "order"]), (board.main, []), (dispatch.main, ["runs"]),
                     (dispatch.main, ["chore-runs"]), (dispatch.main, ["stop", "agent", "1", "--dry-run"])]
         # `review checks` reads the project's test command from a folder with no config, not the live checkout's.
         with mock.patch.object(store, "DATABASE", old), mock.patch.object(store, "STATE", folder / "old"), \
@@ -586,6 +595,33 @@ class ReviewsTest(StoreCase):
         self.assertEqual(numbers(state="all", head="agent/other"), [other])
         self.assertEqual(numbers(), [])
 
+    def test_merged_since_keeps_the_reviews_merged_at_or_after_a_time_whenever_they_were_created(self):
+        """A review opened a month ago that merged today counts, and one closed without merging never does."""
+        with mock.patch.object(store, "now", return_value="2026-10-01T09:00:00Z"):
+            old = self.store.create(REPO, "review", "Old", branch="agent/old")
+        late = self.store.create(REPO, "review", "Late", branch="agent/late")
+        closed = self.store.create(REPO, "review", "Closed", branch="agent/closed")
+        with mock.patch.object(store, "now", return_value="2026-11-12T23:59:59Z"):
+            self.store.merge(REPO, self.review, "f00d")
+        with mock.patch.object(store, "now", return_value="2026-11-13T00:00:00Z"):
+            self.store.merge(REPO, old, "beef")
+            self.store.set_state(REPO, closed, "closed")
+        with mock.patch.object(store, "now", return_value="2026-11-19T10:00:00Z"):
+            self.store.merge(REPO, late, "cafe")
+
+        def merged(**filters):
+            return [(item["number"], item["mergedAt"]) for item in self.store.items(REPO, "review", **filters)]
+
+        self.assertEqual(merged(state="merged", merged_since="2026-11-13T00:00:00Z"),
+                         [(late, "2026-11-19T10:00:00Z"), (old, "2026-11-13T00:00:00Z")])
+        self.assertEqual(merged(state="all", merged_since="2026-11-13"), merged(state="merged",
+                                                                                 merged_since="2026-11-13"))
+        self.assertEqual(merged(state="merged", since="2026-11-01"), [(late, "2026-11-19T10:00:00Z"),
+                                                                     (self.review, "2026-11-12T23:59:59Z")])
+        self.assertIsNone(self.store.item(REPO, closed)["mergedAt"])
+        self.assertEqual(self.store.review(REPO, late)["merged_sha"], "cafe")
+        self.assertIsNone(self.store.review(REPO, self.issue))
+
     def test_a_line_comment_keeps_its_place(self):
         self.store.comment(REPO, self.review, "Rename this", to_agent=True, path="lib/store.py", line=12,
                            head_sha="abc")
@@ -714,178 +750,6 @@ class RepoHereTest(StoreCase):
                 self.repo_in(folder)
 
 
-class BoardTest(StoreCase):
-    def test_the_board_lists_open_issues_with_their_states_labels_blockers_and_sub_issues(self):
-        blocker = self.store.create(REPO, "issue", "Blocker")
-        blocked = self.store.create(REPO, "issue", "Blocked", labels=["waiting", "serial:web"])
-        self.store.link(REPO, blocker, blocked, "blocks")
-        done = self.store.create(REPO, "issue", "Done")
-        self.store.link(REPO, done, blocked, "blocks")
-        self.store.set_state(REPO, done, "closed", "completed")
-        parent = self.store.create(REPO, "issue", "Parent", labels=["on-hold", "idea"])
-        for title in ("First", "Second"):
-            self.store.link(REPO, self.store.create(REPO, "issue", title), parent, "parent")
-        self.store.set_state(REPO, parent + 1, "closed", "completed")
-        board = self.store.board(REPO)
-        self.assertEqual(board["repo"], REPO)
-        issues = {one["number"]: one for one in board["issues"]}
-        self.assertEqual(sorted(issues), [blocker, blocked, parent, parent + 2])
-        self.assertEqual((issues[blocked]["status"], issues[blocked]["labels"]), ("waiting", ["serial:web"]))
-        self.assertEqual(issues[blocked]["blockedBy"], [{"number": blocker, "state": "OPEN"},
-                                                        {"number": done, "state": "CLOSED"}])
-        self.assertEqual((issues[parent]["status"], issues[parent]["labels"]), ("on-hold", ["idea"]))
-        self.assertEqual(issues[parent]["subIssues"], {"total": 2, "completed": 1})
-        self.assertNotIn("subIssues", issues[blocker])
-        self.assertNotIn("comments", issues[blocker])
-
-    def test_an_issue_in_progress_carries_its_comments_and_where_its_branch_merged(self):
-        working = self.store.create(REPO, "issue", "Stacked", labels=["in-progress"])
-        fresh = self.store.create(REPO, "issue", "Fresh", labels=["in-progress"])
-        queued = self.store.create(REPO, "issue", "Queued", labels=["agent-ready"])
-        self.store.comment(REPO, working, "An agent started on `agent/issue-1`.")
-        self.store.comment(REPO, queued, "Not read for the board")
-        base = self.store.create(REPO, "review", "The base", branch="agent/issue-40")
-        stacked = self.store.create(REPO, "review", "Stacked", branch=f"agent/issue-{working}", base="agent/issue-40")
-        self.store.merge(REPO, stacked, "f00d")
-        issues = {one["number"]: one for one in self.store.board(REPO)["issues"]}
-        self.assertEqual([one["body"] for one in issues[working]["comments"]], ["An agent started on `agent/issue-1`."])
-        self.assertEqual(issues[working]["landed"], {"base": "agent/issue-40",
-                                                     "basePr": {"number": base, "state": "OPEN"}})
-        self.assertEqual((issues[fresh]["comments"], issues[fresh]["landed"]), ([], None))
-        self.assertNotIn("comments", issues[queued])
-
-        self.store.merge(REPO, base, "beef")
-        landed = {one["number"]: one for one in self.store.board(REPO)["issues"]}[working]["landed"]
-        self.assertEqual(landed["basePr"], {"number": base, "state": "MERGED"})
-
-    def test_a_review_carries_its_heads_newest_check_and_whether_it_merges_with_main(self):
-        review = self.store.create(REPO, "review", "Checked", branch="agent/issue-9", head_sha="abc")
-        conflicting = self.store.create(REPO, "review", "Conflicts", branch="agent/other", head_sha="c1")
-
-        def shown():
-            reviews = {one["number"]: one for one in self.store.board(REPO)["reviews"]}
-            return reviews[review]["head"], reviews[review]["checks"], reviews[review]["mergeable"]
-
-        self.assertEqual(shown(), ("abc", [], "UNKNOWN"))
-        old = self.store.check_queue(REPO, "agent/issue-9", "abc")
-        self.store.check_ended(old, "passed")
-        self.assertEqual([(one["status"], one["attempt"]) for one in shown()[1]], [("passed", 1)])
-        # The branch moved on, so the check of its old head no longer counts.
-        self.store.branch_moved(REPO, "agent/issue-9", "def", "abc")
-        self.assertEqual(shown(), ("def", [], "UNKNOWN"))
-        first = self.store.check_queue(REPO, "agent/issue-9", "def")
-        self.assertEqual(shown()[1][0]["status"], "queued")
-        # A failed first attempt queues a second, and the failure shows while the second waits and runs.
-        self.store.check_started(first, "/logs/first.log")
-        self.store.check_ended(first, "failed", rerun=True)
-        [second] = self.store.checks(("queued",), REPO, "agent/issue-9")
-        for step in ("queued", "running"):
-            if step == "running":
-                self.store.check_started(second["id"], "/logs/second.log")
-            head, checks, mergeable = shown()
-            self.assertEqual(([(one["name"], one["status"], one["attempt"], one["log"]) for one in checks], mergeable),
-                             ([("test", "failed", 1, "/logs/first.log")], "MERGEABLE"))
-        self.store.check_ended(second["id"], "passed")
-        self.assertEqual([(one["status"], one["attempt"]) for one in shown()[1]], [("passed", 2)])
-        self.assertEqual(shown()[2], "MERGEABLE")
-
-        merge = self.store.check_queue(REPO, "agent/other", "c1")
-        self.store.check_started(merge, "/logs/1.log")
-        self.store.check_ended(merge, "failed", name="merge")
-        reviews = {one["number"]: one for one in self.store.board(REPO)["reviews"]}
-        self.assertEqual((reviews[conflicting]["mergeable"], reviews[conflicting]["checks"][0]["log"]),
-                         ("CONFLICTING", "/logs/1.log"))
-        status, out, _ = self.cli("review", "view", str(conflicting), "--json", "mergeable,checks")
-        self.assertEqual((status, json.loads(out)["mergeable"]), (0, "CONFLICTING"))
-
-    def test_a_tried_merge_says_whether_the_head_merges_with_its_base_until_the_branch_moves(self):
-        review = self.store.create(REPO, "review", "Tried", branch="agent/issue-9", base="local-desk", head_sha="abc")
-
-        def shown():
-            return {one["number"]: one for one in self.store.board(REPO)["reviews"]}[review]["mergeable"]
-
-        self.store.branch_moved(REPO, "agent/issue-9", "def", "abc")
-        self.assertEqual(self.store.branch_heads(REPO), {"agent/issue-9": "def"})
-        self.assertEqual(self.store.merge_targets(REPO), [{"branch": "agent/issue-9", "review_base": "local-desk",
-                                                           "head_sha": "def", "base": None, "base_sha": None,
-                                                           "mergeable": None}])
-        # A try of a head the branch left records nothing.
-        self.assertFalse(self.store.merge_tried(REPO, "agent/issue-9", "abc", "local-desk", "b1", "CONFLICTING"))
-        self.assertEqual(shown(), "UNKNOWN")
-        # Without any check, the try alone says the head conflicts.
-        last = self.store.last_event()
-        self.assertTrue(self.store.merge_tried(REPO, "agent/issue-9", "def", "local-desk", "b1", "CONFLICTING"))
-        self.assertEqual(shown(), "CONFLICTING")
-        self.assertEqual(self.store.item(REPO, review, "review")["mergeable"], "CONFLICTING")
-        # The base moved and the answer stayed, so no event tells the board to read again.
-        self.store.merge_tried(REPO, "agent/issue-9", "def", "local-desk", "b2", "CONFLICTING")
-        self.assertEqual(self.events(last), [(None, "branch-merges")])
-        self.assertEqual(self.store.branch(REPO, "agent/issue-9")["base_sha"], "b2")
-        # A try against another base, as before the review's base changed, doesn't count.
-        self.store.merge_tried(REPO, "agent/issue-9", "def", "main", "m1", "MERGEABLE")
-        self.assertEqual(shown(), "UNKNOWN")
-        # A new head waits for its own try; a deleted branch leaves `branches`.
-        self.store.branch_moved(REPO, "agent/issue-9", "ghi", "def")
-        self.assertIsNone(self.store.branch(REPO, "agent/issue-9")["mergeable"])
-        self.store.branch_moved(REPO, "agent/issue-9", None, "ghi")
-        self.assertEqual((self.store.branch_heads(REPO), self.store.branch(REPO, "agent/issue-9")), ({}, None))
-
-    def test_the_migration_takes_each_branchs_newest_head_from_its_events(self):
-        # A database at schema 3, before `branches`, holding the moves the migration reads.
-        self.store.close()
-        older = sqlite3.connect(Path(self.folder.name) / "older.sqlite")
-        for statement in [one for migration in store.MIGRATIONS[:3] for one in migration]:
-            older.execute(statement)
-        for branch, head in (("agent/a", "a1"), ("agent/b", "b1"), ("agent/a", "a2"), ("agent/b", None)):
-            older.execute("INSERT INTO events (project, type, payload, at) VALUES (?, 'branch-moved', ?, 'now')",
-                          (REPO, json.dumps({"branch": branch, "head": head, "before": None})))
-        older.execute("PRAGMA user_version = 3")
-        older.commit()
-        older.close()
-        self.store = store.Store(Path(self.folder.name) / "older.sqlite")
-        self.addCleanup(self.store.close)
-        self.assertEqual(self.store.branch_heads(REPO), {"agent/a": "a2"})
-
-    def test_the_migration_marks_line_comments_sent_by_a_send_that_quoted_line_comments_or_on_the_host(self):
-        # A database at schema 7, before `sent_in`, where an @agent note came after one line comment and a send that
-        # quoted line comments after another, and a third came from the host.
-        self.store.close()
-        older = sqlite3.connect(Path(self.folder.name) / "older.sqlite")
-        for statement in [one for migration in store.MIGRATIONS[:7] for one in migration]:
-            older.execute(statement)
-        rows = [("Rename this", "a.py", 0, None), ("@agent look", None, 1, None), ("And this", "a.py", 0, None),
-                ("Go\n\n**Line comments**\n\n- `a.py` line 3", None, 1, None), ("Later", "a.py", 0, None),
-                ("From the host", "a.py", 0, "PRRC_1")]
-        for body, path, to_agent, remote in rows:
-            older.execute("INSERT INTO comments (project, number, body, path, line, to_agent, created_at, remote_id)"
-                          " VALUES (?, 2, ?, ?, ?, ?, 'now', ?)", (REPO, body, path, 3 if path else None, to_agent,
-                                                                    remote))
-        older.execute("PRAGMA user_version = 7")
-        older.commit()
-        older.close()
-        self.store = store.Store(Path(self.folder.name) / "older.sqlite")
-        self.addCleanup(self.store.close)
-        found = self.store.db.execute("SELECT body, sent_in FROM comments WHERE path IS NOT NULL ORDER BY id")
-        self.assertEqual([tuple(row) for row in found],
-                         [("Rename this", 4), ("And this", 4), ("Later", None), ("From the host", 0)])
-
-    def test_the_board_lists_the_three_newest_merges_and_the_live_runs(self):
-        merged = []
-        for index in range(4):
-            number = self.store.create(REPO, "review", f"Merged {index}", branch=f"agent/issue-{index + 20}")
-            self.store.merge(REPO, number, "f00d")
-            self.store.db.execute("UPDATE items SET closed_at = ? WHERE project = ? AND number = ?",
-                                  (f"2026-10-29T0{index}:00:00Z", REPO, number))
-            merged.append(number)
-        run = self.store.request_run(REPO, "agent", "7")
-        board = self.store.board(REPO)
-        self.assertEqual([(one["number"], one["mergedAt"]) for one in board["merged"]],
-                         [(merged[3], "2026-10-29T03:00:00Z"), (merged[2], "2026-10-29T02:00:00Z"),
-                          (merged[1], "2026-10-29T01:00:00Z")])
-        self.assertEqual(board["reviews"], [])
-        self.assertEqual([(one["id"], one["status"]) for one in board["runs"]], [(run, "requested")])
-
-
 class CommentEditTest(StoreCase):
     def setUp(self):
         super().setUp()
@@ -985,139 +849,6 @@ class CommentEditTest(StoreCase):
         self.assertEqual((comment["body"], comment["lastEditedAt"]), ("Hi", None))
         self.store.edit_comment(REPO, comment["id"], "Hello")
         self.assertIsNotNone(self.store.item(REPO, 1)["comments"][0]["lastEditedAt"])
-
-
-class StartOrderTest(StoreCase):
-    """Each project's queued and waiting issues keep one start order."""
-
-    def order(self, project=REPO):
-        return [one["number"] for one in self.store.order(project)]
-
-    def test_an_issue_joins_the_end_keeps_its_place_between_queued_and_waiting_and_leaves_on_any_other_state(self):
-        for title in ("One", "Two", "Three", "Four"):
-            self.store.create(REPO, "issue", title)
-        self.store.edit(REPO, 3, add_labels=["agent-ready"])
-        self.store.set_state(REPO, 1, "waiting")
-        self.store.edit(REPO, 2, add_labels=["agent-ready"])
-        self.assertEqual(self.order(), [3, 1, 2])
-        # Moving between queued and waiting keeps the place.
-        self.store.set_state(REPO, 3, "waiting")
-        self.store.set_state(REPO, 1, "queued")
-        self.assertEqual(self.order(), [3, 1, 2])
-        self.assertEqual([self.store.item(REPO, number)["position"] for number in (1, 2, 3, 4)], [2, 3, 1, None])
-        # Starting, closing, and going back to open each leave the order.
-        self.store.set_state(REPO, 3, "in-progress")
-        self.store.set_state(REPO, 1, "closed", "completed")
-        self.store.edit(REPO, 2, remove_labels=["agent-ready"])
-        self.assertEqual(self.order(), [])
-        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM items WHERE rank IS NOT NULL").fetchone()[0], 0)
-        # Queued again, an issue joins the end.
-        self.store.edit(REPO, 4, add_labels=["agent-ready"])
-        self.store.edit(REPO, 3, status="queued")
-        self.store.edit(REPO, 2, add_labels=["agent-ready"])
-        self.assertEqual(self.order(), [4, 3, 2])
-
-    def test_each_project_keeps_its_own_order(self):
-        self.store.create(REPO, "issue", "Here", labels=["agent-ready"])
-        self.store.create("org/other", "issue", "There", labels=["agent-ready"])
-        self.store.create(REPO, "issue", "Here too", labels=["agent-ready"])
-        self.assertEqual((self.order(), self.order("org/other")), ([1, 2], [1]))
-        self.assertEqual(self.store.move("org/other", 1, "top"), 1)
-        self.assertEqual(self.order(), [1, 2])
-
-    def test_a_move_goes_up_down_or_to_the_top_with_an_event_and_stops_at_either_end(self):
-        for title in ("One", "Two", "Three", "Four"):
-            self.store.create(REPO, "issue", title, labels=["agent-ready"])
-        last = self.store.last_event()
-        self.assertEqual(self.store.move(REPO, 4, "top"), 1)
-        self.assertEqual(self.order(), [4, 1, 2, 3])
-        self.assertEqual(self.store.move(REPO, 1, "down"), 3)
-        self.assertEqual(self.store.move(REPO, 3, "up"), 3)
-        self.assertEqual(self.order(), [4, 2, 3, 1])
-        self.assertEqual(self.events(last), [(4, "queue-moved"), (1, "queue-moved"), (3, "queue-moved")])
-        self.assertEqual(self.store.events_since(last)[0]["payload"], {"to": 1, "was": 4})
-        # Past either end, nothing moves and nothing is written.
-        last = self.store.last_event()
-        self.assertEqual((self.store.move(REPO, 4, "up"), self.store.move(REPO, 4, "top"),
-                          self.store.move(REPO, 1, "down")), (1, 1, 4))
-        self.assertEqual((self.order(), self.store.last_event()), ([4, 2, 3, 1], last))
-        # A later issue still joins after every moved one.
-        self.store.create(REPO, "issue", "Five", labels=["agent-ready"])
-        self.assertEqual(self.order(), [4, 2, 3, 1, 5])
-
-    def test_a_move_to_a_place_puts_the_issue_there_and_one_past_the_end_puts_it_last(self):
-        for title in ("One", "Two", "Three", "Four"):
-            self.store.create(REPO, "issue", title, labels=["agent-ready"])
-        last = self.store.last_event()
-        self.assertEqual(self.store.move(REPO, 1, 3), 3)
-        self.assertEqual(self.order(), [2, 3, 1, 4])
-        self.assertEqual(self.store.move(REPO, 4, 2), 2)
-        self.assertEqual(self.order(), [2, 4, 3, 1])
-        self.assertEqual(self.store.events_since(last)[0]["payload"], {"to": 3, "was": 1})
-        self.assertEqual(self.store.move(REPO, 2, 99), 4)
-        self.assertEqual(self.order(), [4, 3, 1, 2])
-        # A move to the place the issue holds writes nothing, and a place below 1 is refused.
-        last = self.store.last_event()
-        self.assertEqual(self.store.move(REPO, 3, 2), 2)
-        self.assertEqual(self.store.last_event(), last)
-        for place in (0, -1):
-            with self.subTest(place=place), self.assertRaisesRegex(store.StoreError, f"{place} isn't a place"):
-                self.store.move(REPO, 3, place)
-        self.assertEqual(self.order(), [4, 3, 1, 2])
-
-    def test_a_move_refuses_an_issue_outside_the_order_and_a_move_it_doesnt_know(self):
-        self.store.create(REPO, "issue", "Open")
-        self.store.create(REPO, "issue", "Queued", labels=["agent-ready"])
-        with self.assertRaisesRegex(store.StoreError, "#1 is open, and only a queued or waiting issue"):
-            self.store.move(REPO, 1, "top")
-        with self.assertRaisesRegex(store.StoreError, "sideways isn't a move"):
-            self.store.move(REPO, 2, "sideways")
-        with self.assertRaises(store.StoreError):
-            self.store.move(REPO, 9, "up")
-
-    def test_an_issue_without_a_rank_follows_the_ranked_ones_and_a_move_or_an_import_settles_it(self):
-        for title in ("One", "Two", "Three"):
-            self.store.create(REPO, "issue", title, labels=["agent-ready"])
-        # A restore writes states without ranks, and leaves a stale rank on an issue that left the order.
-        self.store.db.execute("UPDATE items SET rank = NULL WHERE number IN (1, 2)")
-        self.store.db.execute("UPDATE items SET rank = 7 WHERE number = 3")
-        self.store.db.execute("UPDATE items SET state = 'open' WHERE number = 3")
-        self.assertEqual(self.order(), [1, 2])
-        self.store.create(REPO, "issue", "Four", labels=["agent-ready"])
-        self.assertEqual(self.order(), [4, 1, 2])
-        self.assertEqual(self.store.move(REPO, 2, "up"), 2)
-        self.assertEqual(self.order(), [4, 2, 1])
-        self.assertIsNone(self.store.db.execute("SELECT rank FROM items WHERE number = 3").fetchone()[0])
-        # An import that queues an issue by its state gives it a place at the end.
-        item = {key: None for key in store_schema.IMPORTED_ITEM}
-        item.update(number=5, kind="issue", title="Imported", body="", state="queued", created_at="then",
-                    updated_at="then", labels=[])
-        self.store.import_items(REPO, [item])
-        self.assertEqual(self.order(), [4, 2, 1, 5])
-
-    def test_the_migration_ranks_queued_and_waiting_issues_by_when_they_last_entered_the_order(self):
-        # A database at the schema before `rank`: #1 queued first, #3 entered waiting from open next, #2 queued last
-        # and moved to waiting since, and #4 queued with no event, as an import leaves it.
-        self.store.close()
-        older = sqlite3.connect(Path(self.folder.name) / "older.sqlite")
-        before = store.RANK_SCHEMA - 1
-        for statement in [one for migration in store.MIGRATIONS[:before] for one in migration]:
-            older.execute(statement)
-        for number, state in ((1, "queued"), (2, "waiting"), (3, "waiting"), (4, "queued"), (5, "open")):
-            older.execute("INSERT INTO items (project, number, kind, title, state, created_at, updated_at)"
-                          " VALUES (?, ?, 'issue', 'Old', ?, 'then', 'then')", (REPO, number, state))
-        for number, state, was in ((1, "queued", "open"), (3, "waiting", "open"), (2, "queued", "open"),
-                                   (2, "waiting", "queued"), (5, "queued", "open"), (5, "open", "queued")):
-            older.execute("INSERT INTO events (project, number, type, payload, at) VALUES (?, ?, 'state-changed', ?,"
-                          " 'then')", (REPO, number, json.dumps({"state": state, "was": was})))
-        older.execute(f"PRAGMA user_version = {before}")
-        older.commit()
-        older.close()
-        self.store = store.Store(Path(self.folder.name) / "older.sqlite")
-        self.addCleanup(self.store.close)
-        self.assertEqual(self.order(), [4, 1, 3, 2])
-        ranks = self.store.db.execute("SELECT number, rank FROM items ORDER BY number")
-        self.assertEqual([tuple(row) for row in ranks], [(1, 2), (2, 4), (3, 3), (4, 1), (5, None)])
 
 
 class RawDatabaseTest(StoreCase):

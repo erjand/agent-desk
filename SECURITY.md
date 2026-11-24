@@ -67,6 +67,16 @@ each project and its checkout, keeps the umask's mode.
 Keep secrets out of the repository and out of `env` in `.agent-desk.json`, which the dispatcher passes to
 each run.
 
+## The Anthropic API key
+
+`agent-desk account key` saves the API key the desk's runs bill on the `api` account in
+`~/.config/agent-desk/anthropic-api-key`, with mode 0600, outside the store, the backup, and the state the web page
+reads. Runs and the web page's Chat read it through Claude Code's `apiKeyHelper`, so it stays out of their arguments,
+environment, and unit properties. An agent the desk runs works as your account, so it can still read the file, as it
+can read the rest of your home folder. Clear the key with `agent-desk account key --clear` when you stop using it. The
+web page's Set Key sends the key once to the server, which takes it only from a loopback address, hands it to the same
+command on standard input, and never sends it back or logs it; the page shows only its last four characters.
+
 ## What agent-desk does as you on GitHub
 
 agent-desk's daily work stays on your machine, and nothing it writes to the store reaches GitHub. Git pushes to

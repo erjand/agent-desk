@@ -26,6 +26,10 @@ export type Card = {
    */
   state?: string
   note?: string
+  /** Whether its run stalls on a command that left the CPU idle, whose stall leads the note. */
+  stalled?: boolean
+  /** What Stop Command asks before it stops the stalled run's command. */
+  stopAsk?: string
   /** What the card opens on GitHub: its PR, its issue, or a failed run's log. */
   url?: string
   /** When it began, in ISO 8601, which orders Needs You and Recently Merged. */
@@ -74,7 +78,7 @@ function cardOf(desk: string, stage: Stage, row: Row): Card {
     title: row.title ?? row.text, key: row.key, actions: row.actions,
     ...Object.fromEntries(Object.entries({ state: row.state, note: row.note, url: row.url, since: row.since,
       time: row.time, resume: row.resume, log: row.log, run: row.run, continues: row.continues, request: row.request,
-      labels: row.labels, subs: row.subs })
+      labels: row.labels, subs: row.subs, stalled: row.stalled, stopAsk: row.stopAsk })
       .filter(([, value]) => value !== undefined)),
   }
 }

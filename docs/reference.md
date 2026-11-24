@@ -10,7 +10,8 @@ This document describes how each part of agent-desk works, for when you need mor
 - [The config](#the-config)
 - [Installing and upgrading](#installing-and-upgrading)
 - [Issue lifecycle](#issue-lifecycle)
-- [Auto, Manual, and Hold](#auto-manual-and-hold), with [the weekly usage limit](#the-weekly-usage-limit)
+- [Auto, Manual, and Hold](#auto-manual-and-hold), with [the weekly usage limit](#the-weekly-usage-limit) and
+  [the account](#the-account)
 - [Merge queue](#merge-queue), with [pushing main](#pushing-main)
 - [Conflict fixes](#conflict-fixes)
 - [Chores](#chores) and [chore history](#chore-history)
@@ -42,6 +43,7 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
 | `serial claim <n>`, `serial release` | Takes or hands on the slot that `serial` issues share |
 | `worktree <slug> [base]` | Creates `../<repo>-<slug>` on `agent/<slug>` from the local `<base>` branch, or `main`, seeded and set up |
 | `clean <agent/slug> <merged>` | Cleans up after an agent review merges or closes, as the dispatcher does |
+| `sweep` | Removes the finished agent worktrees and the local `agent/*` branches no run, review, or person still needs, as the dispatcher does each hour |
 | `release <n> <cancelled\|failure> [--discussion]` | Hands issue n back after its run ended without a report, as the dispatcher's exit handler does; with `--discussion`, for a discussion of an idea, only says how the run ended |
 | `chores [status]`, `chores tick` | Shows the project's chores, or starts the most overdue one |
 | `chores on`, `chores off`, `chores tick-all`, `chores merges-all` | Turns the chore and merge timers on or off, or ticks every project's chores, or its merge and push queues |
@@ -54,9 +56,12 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
 | `auto`, `manual`, `hold` [`<owner/repo>`] | Starts every new run, starts agent, fix, and chore runs only when you press Start, or starts no new agent or chore run, in every project or in the one named |
 | `unpick <n> [<owner/repo>]`, `unpick --all [<owner/repo>]` | Drops issue n's Manual pick, in the current project or the one named, so its run waits for Start again, and exits 1 when the issue has no pick; with `--all`, drops every project's picks, or the one named, as [Auto, Manual, and Hold](#auto-manual-and-hold) describes |
 | `pause <n>`, `unpause <n>` [`-R <owner/repo>`] | Stops the agent run on issue n and puts the issue on hold, or queues an issue on hold again at the top of the start order, as [the dispatcher](#the-dispatcher) describes |
+| `stop-command <n>` [`-R <owner/repo>`] | Ends the command the agent run on issue n waits on and leaves the run going, as [Issue lifecycle](#issue-lifecycle) describes after the stall mark; exits 1, changing nothing, when the run waits on no command |
 | `resume` | Goes back to Auto or Manual, whichever the desk was in before Hold |
 | `slots [<owner/repo>] [<kind>=<n>... \| --reset [<kind>...]]` | Prints each project's [slots](#the-config), or the one named, with each kind's count, its config's, and whether an override sets it; with `<kind>=<n>`, overrides the current project's or the named one's slots of each kind; with `--reset`, drops its overrides, or those of the kinds named |
 | `usage-limit [<0-100> \| on \| off]` | Shows the [weekly usage limit](#the-weekly-usage-limit) and the last reading of the plan's usage, sets the limit's percentage and turns it on, or turns it on or off, for every project on the machine |
+| `account [subscription \| api]` | Prints what every Claude process the desk starts bills and whether an API key is set, showing only its last four characters, or switches between the Claude plan and the key, for every project on the machine, as [the account](#the-account) describes; `api` refuses while no key is set |
+| `account key [--clear]` | Saves the desk's Anthropic API key, read from a prompt that doesn't echo, or from standard input when it isn't a terminal, and refuses an empty one; `--clear` removes it, and moves an `api` account back to `subscription` |
 | `shots [--comment] <review> <picture>...` | Saves screenshots for a review in the state folder and prints the Markdown that shows them on the web page; with `--comment`, adds it to the review as a comment |
 | `gpu [--exclusive] -- <command> [args...]` | Runs a command while it holds one of the machine's [GPU slots](#gpu-slots), or with `--exclusive` all of them, and exits with its status |
 | `gpu slots [<n>] [--min-free-vram <GB>]` | Prints the machine's [GPU slot](#gpu-slots) count, the free VRAM a slot past the first needs, and who holds each slot, or sets the count or the VRAM for every later `gpu` call |
@@ -64,9 +69,11 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
 | `issue create`, `view`, `list`, `comment`, `edit`, `close`, `reopen`, `delete` | Files and changes issues in the [local store](#the-local-store), with the flags `gh issue` takes; `comment <n> --edit <comment> --body-file <file> [--note <text>]` replaces the body of a comment you wrote, by the id `view` prints, adding the note on what changed, which an agent's edit needs; `delete <n>` prints what [deleting](#the-local-store) an issue filed by mistake removes, and `delete <n> --yes` deletes it |
 | `review create`, `view`, `list`, `comment`, `edit`, `checks`, `ready`, `close`, `reopen`, `merge` | Opens and changes reviews of a branch in the local store, with the flags `gh pr` takes; `comment <n> --edit <comment>` edits a comment you wrote, as on `issue`; `checks --watch` waits for the local checks of the branch's newest commit |
 | `label edit <name> --color <hex>`, `label list` | Gives a label in the local store the color the pane and the page draw it in, or lists the colors; `label create` is the same as `edit`, as `gh label create` names it |
+| `list order [<n> --before <m> \| --after <m> \| --top \| --bottom \| --reset <n>...]` | Prints the [list order](#the-local-store) the board lists Open, Blocked, Needs Design, Backlog, and Ideas in, one issue a line with its place, number, status, and title; moves issue n right above or below issue m, or first or last; or with `--reset` deals the places of the issues named back out among them, the highest number first |
 | `board [--json]` | Prints what the inbox's board shows of the project without asking GitHub: its open issues and reviews, or with `--json` everything the pane and the page build their rows from |
 | `cutover [--dry-run] [--issues-off] <owner/repo>`, `cutover --all` | Makes the local store the tracker of a project, or of every project, imports it one last time, and disables its workflows and closes its PRs on GitHub, leaving its Issues on unless you pass `--issues-off`; see [Cutover](#cutover) |
 | `cutover --undo [--dry-run] <owner/repo>` | Turns a project's Issues, workflows, and PRs back on, and lists what was filed in the store since its cutover |
+| `project list [--json]` | Prints each project in the projects file with its main checkout, `<owner/repo> <checkout>` a line, in the file's order, or with `--json` a list of objects with `repo` and `checkout`; a missing or empty file prints nothing, or `[]` with `--json` |
 | `project rename [--dry-run] <owner/repo> <new owner/repo>` | Moves a project held on Hold to a new name in the store, the state folder, the projects file, its checkout's `origin`, and the backup repository; see [Renaming a project](#renaming-a-project) |
 | `project remove [--dry-run] <owner/repo>` | Takes a project held on Hold off this machine's desk: its rows in the store, its files in the state folder, its mode, its line in the projects file, and its backup folder, leaving its checkout and worktrees; see [Removing a project](#removing-a-project) |
 | `import <owner/repo>` | Copies a GitHub project's issues, PRs, comments, labels and their colors, sub-issues, and blockers into the [local store](#the-local-store) with their numbers, and on a rerun copies only what changed |
@@ -90,7 +97,8 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
   "env": { "GODOT": "~/bin/godot" },
   "worktree": {
     "seeds": [".godot/imported", "art/audio"],
-    "setup": "just build && { just import || just import; }"
+    "setup": "just build && { just import || just import; }",
+    "teardown": "just drop-db"
   },
   "sync": { "run": "just build && just import >/dev/null 2>&1", "skipWhile": ["godot"] },
   "chores": {
@@ -103,6 +111,7 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
     "reserveGB": 8,
     "needGB": { "agent": 6, "chore": 3, "fix": 3 },
     "labelGB": { "assets": 14 },
+    "labelCapGB": { "documentation": 3 },
     "maxMemoryPressure": 5,
     "fixMemoryPressure": 15,
     "maxWaitMinutes": 120,
@@ -123,6 +132,10 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
   so one line can chain steps with `&&`.
 - `testMinutes` is a check's time limit in whole minutes, by default 15. It covers the whole check: copying
   `worktree.seeds`, `worktree.setup`, and `test`.
+- `testOnBaseMove`, by default `false`, has the [branch checks](#branch-checks) check a ready review again when its
+  base moves, so a review that another merge broke shows failing before you press Merge. Each re-check costs a run of
+  `test`, so a project with slow checks may leave it off. `agent-desk doctor` reports a value that isn't `true` or
+  `false`.
 - `limitMinutes` sets the time limit of each kind of run in whole minutes, the `RuntimeMaxSec` of its unit. Its keys
   are `agent`, by default 180, `benchmark`, by default 300, for an agent run of an issue labelled `benchmark`, `chore`,
   by default 120, and `fix`, by default 90. A key left out keeps its default. A discussion of an idea keeps its own 30
@@ -132,7 +145,10 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
   `runners`, and says to move `runners.env` here.
 - `slots` caps how many runs of each kind the [dispatcher](#the-dispatcher) runs at once in the project, such as
   `{"agent": 3, "chore": 1, "fix": 1, "check": 2}`, which are also the defaults. `benchmark`, by default 2, caps how
-  many of the agent runs may be on `benchmark` issues. A count of 0 starts none of that kind.
+  many of the agent runs may be on `benchmark` issues, and `gpu` how many may be on issues labelled `gpu`, such as
+  those whose Done When needs the game on the GPU. Left unset, `gpu` caps nothing beyond `agent`; set to match the
+  machine's [GPU slots](#gpu-slots), it keeps runs that would queue for the GPU from holding agent slots while issues
+  without the label wait. A count of 0 starts none of that kind.
   `agent-desk slots <owner/repo> agent=1` overrides a kind's count on this machine without editing the config, above
   or below it, and `lib/hold.py` keeps the override in `hold.json` under `slots`, where mode changes and Resume leave
   it. The dispatcher, the [branch checks](#branch-checks), and the board read the override at the next pass. A lower
@@ -140,7 +156,24 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
   count. A count equal to the config's drops that kind's override, and `agent-desk slots --reset` drops them all. The
   memory gate still holds a run the machine lacks memory for.
 - `worktree.seeds` lists paths copied from the main checkout into each new worktree, such as caches and generated or
-  downloaded folders git ignores. `worktree.setup` runs in the new worktree.
+  downloaded folders git ignores. `worktree.setup` runs in the new worktree. A build in the main checkout can delete
+  files from a seed while `lib/seed.sh` copies it, so a pass whose only errors name a vanished file copies again over
+  the first, up to three passes. A seed copy or setup that still fails removes the new worktree and the branch the run
+  made, so the next run seeds and sets up again, and the run's comment names the step that failed: the seed with its
+  path and the copy's last error, or the setup command.
+- `worktree.teardown` runs with `bash -c` in a worktree just before agent-desk removes it, so what the setup or the
+  project's tools made outside it, such as a local database named after the checkout, goes with it. It runs when an
+  issue run, a chore, or the cleanup after a review ends removes an agent worktree, which happens only when no process
+  works in it and it holds no uncommitted changes or unpushed commits. When a process keeps the worktree, the run's
+  log names the first one found, with its PID, command line, and the last part of its cgroup path, such as
+  `Kept /path: a process is working in it: 123 git status (app-dev.zed.Zed@1.service).` Before a run removes or reuses
+  its worktree, it ends the processes its own unit left there, such as a compiler server a build started, with TERM
+  and then KILL 3 seconds later, or `AGENT_DESK_LEFTOVER_GRACE` seconds when that is set, for tests. The teardown also
+  runs when a failed `worktree.setup` removes the worktree it made, before a [branch check](#branch-checks) removes its
+  scratch worktree, and when a failed chore schedule change on the [web page](#the-web-page) removes the
+  `chore-schedule` worktree. A teardown that fails, or runs past 60 seconds and is stopped, prints its output and why,
+  and the worktree is removed anyway. A worktree you remove by hand with `git worktree remove` skips it;
+  `agent-desk worktree --teardown <slug>` runs the teardown in `../<repo>-<slug>` first.
 - `sync.run` runs in the main checkout after the merge queue fast-forwards it, unless a program in `sync.skipWhile`
   runs there.
 - `chores.every` maps each chore skill, one you install as [Chores](#chores) describes, to the days between its runs. At most one chore starts in `gapHours`, a
@@ -169,6 +202,20 @@ which `./install.sh` links to this checkout's `bin/agent-desk` (see [Install](..
   `"always"` starts them whether or not anyone is at the machine, as on a headless server. The chore timer is a
   systemd user timer, so on a machine you don't stay logged in to it runs only with lingering enabled:
   `sudo loginctl enable-linger $USER`. `agent-desk doctor` warns when it isn't.
+- `issueRunner` chooses the CLI for headless issue work, review follow-ups, conflict fixes, chores, discussions,
+  and parent checks. The default is `"claude"`. With `"codex"`, install Codex CLI on the dispatcher's PATH and sign
+  it in as the Linux user that runs the desk. Use `codex login` for a ChatGPT account or `codex login --with-api-key`
+  to read an OpenAI API key from standard input. Codex uses its own sign-in and model settings. Agent Desk starts
+  it with `codex exec --approve-for-me`, and Claude's usage limit and API budget do not apply. Web Chat uses
+  its own Claude session and account settings. The [account control](#the-account-control) can override the
+  project setting for future runs.
+- Set `issueRunner` to `"local"` to use Codex CLI with a local model. Set `localRunner.provider` to `"ollama"` or
+  `"lmstudio"` and `localRunner.model` to the name of a model installed in that provider. The **Local** choice in the
+  [account control](#the-account-control) uses the same settings. Start the provider before Agent Desk runs the issue.
+  Fresh runs and resumed sessions both use the project's provider and model. Local runs are outside Claude's usage
+  limits and API budget. Codex uses the `workspace-write` sandbox and declines approval requests. If the worktree's
+  shared Git metadata or the Agent Desk store needs writes outside the worktree, grant those paths in Codex's
+  `[sandbox_workspace_write]` `writable_roots`. The run log shows provider errors and the command for taking over.
 - `models` picks the Claude model and effort each run uses, through `lib/models.py`. A run starts from its kind's
   setting, `agent`, `chore`, or `fix`; a chore's own entry under `chores`, by its skill's name, overrides it, and so
   does each of an agent issue's labels under `labels`. Efforts are `low`, `medium`, `high`, `xhigh`, and `max`. agent-desk's own defaults run agents on Opus at high effort, chores on Opus at medium, the
@@ -248,22 +295,35 @@ the failure write-ups' ledger, which `agent-desk doctor` lists with the `rm -r` 
    that wait for the issue, sets it `open`, and drops its Manual pick, so nothing starts it until you label it again.
    The project's queued and waiting issues keep one start order: an issue joins its end when it enters Queued, and
    when a free agent slot or serial slot can go to several, the dispatcher gives it to the first in that order whose
-   gates are clear. Move Up, Move Down, and Move to Top on its row, dragging its card on the web page, or
-   `agent-desk queue order <n> --up | --down | --top | --to <place>`, change its place, and `agent-desk queue order`
-   prints the order.
+   gates are clear. Move Up, Move Down, Move to Top, and Move to Bottom on its row, dragging its card on the web page,
+   or `agent-desk queue order <n> --up | --down | --top | --bottom | --to <place>`, change its place, `agent-desk queue order --sort`
+   sorts the whole order as the [start order](#the-local-store) describes, and `agent-desk queue order` prints it.
 2. The run moves the issue to `in-progress` in the local store, and the agent works in `../<repo>-issue-<n>` on `agent/issue-<n>` with
    the `/agent-desk:work-issue` skill and opens a review whose description starts with a plain-language summary of
-   what it changes for you and why. `agent-desk work-issue` reads the issue, its labels, its comments, and its review
-   from the [local store](#the-local-store), and writes its notes and state changes there: a note when the agent
-   starts, with the command that resumes its session, and one when it finishes, which names the review on both the
-   issue and the review.
+   what it changes for you and why. The agent runs the tests that cover any code it changed and leaves the full suite
+   to the [branch check](#branch-checks) of its commit, unless it can't tell which tests cover the change; in a project
+   without a `test` command, it runs the project's tests. Before it opens the review, and before each wait for a
+   check, it merges the local base into its branch when the base has commits the branch lacks, resolves any conflict,
+   and runs the tests that cover the files both sides changed, so no check spends its turn on a conflict. It merges
+   and never rebases or force-pushes, and fetches nothing. When it first edits a file the project's Agent desk
+   section lists as serial and the issue lacks that serial label, it adds the label at once, so another issue of the
+   group waits from then on. `agent-desk work-issue` reads the issue, its labels, its comments, and its review from
+   the [local store](#the-local-store), and writes its notes and state changes there: a note when the agent starts,
+   with the command that resumes its session, and one when it finishes, which names the review on both the issue and
+   the review.
 3. A comment on the review that mentions `@agent` sends the agent back to the same branch, and the run's notes go on
    the review as well as the issue.
 4. When the review merges or closes, the dispatcher sees its event in the store and runs `agent-desk clean` in a
-   unit of its own. The cleanup stops the issue's
-   unfinished agent runs, each after a note on the issue that the agent stopped, and removes the worktree and branch.
-   It keeps a branch whose commits neither `origin` nor the review's base holds, such as one never pushed, since it
-   holds the only copy of the work.
+   unit of its own. The cleanup works in this order:
+   1. It stops the issue's unfinished agent runs, each after a note on the issue that the agent stopped, and waits up
+      to two minutes for them to leave the worktree.
+   2. For a review closed without merging, it pushes the branch to `origin` the way the
+      [push queue](#pushing-main) would, so commits made since the queue's last tick count as saved. A merged branch
+      skips the push, since the cleanup deletes it on `origin`.
+   3. It removes the worktree, unless a process works in it or it holds uncommitted changes, and then the local
+      branch. It keeps the local branch when its commits are on neither `origin` nor the review's base, as when
+      `origin` was out of reach for the push, since it holds the only copy of the work.
+
    A merge into `main` closes the issue with a "Landed on main" note and closes the issues of reviews stacked on it;
    the [merge queue](#merge-queue) moved the main checkout and ran the project's sync command when it merged the
    review. Any other merge or close moves the issue
@@ -286,8 +346,12 @@ An agent that needs a decision labels the issue `needs-design` and asks on the i
 heading that the `/agent-desk:work-issue` and `/agent-desk:create-issue` skills also put on any issue, PR, or comment
 awaiting your answer. Each decision is a numbered question heading, such as `### 1. Should the banner pause combat?`,
 over lettered options with the agent's pick marked ✅, so you can answer with a short reply such as `1B`, `1: B`, or
-`1 B, 2 A`, or in words. The agent records each answer in the issue's Notes and removes that decision, keeping the
-others' numbers. Once you settle them, Designed on
+`1 B, 2 A`, or in words. A decision in a review's description ends with an `**On this branch:**` line naming the
+option the branch implements, or `none`, so you can tell whether your answer needs another run. The agent records
+each answer in the issue's Notes and removes that decision, keeping the others' numbers. A run that stops for a decision without opening a review removes its worktree,
+unless it holds uncommitted changes, and its local branch, unless the branch holds commits that aren't on origin, and
+the branch's copy on `origin` as [Pushing main](#pushing-main) describes. The run after your answer makes the
+worktree again from the branch it kept, or a new one. Once you settle them, Designed on
 the issue's Needs Design card, in the pane or on the page, takes the label off and moves the issue to Open. A run
 that claims the issue also takes `needs-design` off, so answering with an `@agent` comment, or labelling the issue
 `agent-ready` without pressing Designed, lets the run end like any other. Labelling a parent issue that has
@@ -311,8 +375,12 @@ When the dispatcher or `agent-desk serial release` picks which waiting issues st
 too, since it is on its way to the slot, unless the project is in Manual and nobody picked it, as
 [Manual](#auto-manual-and-hold) describes.
 Closing a blocker, or a serial holder leaving `in-progress`, writes a `state-changed` event, and the dispatcher tries
-its waiting requests again from that event, with no timer: the fresh starts of queued and waiting issues in the
-project's start order, and every other request by request time. A serial group's slot goes to the group's first issue
+its waiting requests again from that event, with no timer: the merge queue's fixes first, then the follow-ups, the
+runs a comment sent to the agent asked for on an issue or review an agent already worked, together with any request
+for an `in-progress` issue, such as the resume of a run that timed out, oldest request first, then the fresh starts of
+queued and waiting issues in the project's start order, and every other request by request time. A review you send
+back to its agent, or a timed-out run's resume, thus takes the next free agent slot ahead of new issues, and still
+waits on every other gate, its slot limit included. A serial group's slot goes to the group's first issue
 in the start order whose run can go, not to its lowest number. An issue that waits with no request
 behind it, such as one `agent-desk start` found blocked or one whose parked request the dispatcher couldn't start, gets
 one from the dispatcher on that same event, an agent run's end, or its 30-second reconcile, once its blockers have
@@ -338,9 +406,23 @@ back to a review, a parent check, or a discussion that stopped early says so the
 a chore that stopped early asks for no queued next run. Runs forbid scheduled wakeups, cron jobs, and Monitors, which
 would keep the agent waiting past its last turn the same way.
 
-A run's journal shows what a quiet run waits on. While `claude -p` writes no stream event for 5 minutes, as when the
-agent waits on a long foreground command, `lib/agent_run.py` logs a beat line, and another every 5 minutes the silence
-lasts:
+A run's journal and an issue's Agent Log tab give each message and tool call one line, through `lib/agent_log.py`. A
+tool call's line names its tool and what it does: a command its description, when it has one, and its first line, or
+for a command that opens with a heredoc and has no description, the first line after the heredoc that runs a program.
+A call that ran 10 seconds or longer, or failed, logs a second line when its result arrives, with how long it took
+and, for a failure, the first line of its error: the first line of a command's output that starts `error:` or
+`fatal:`, or else its last line. A quick call that succeeds logs no second line.
+
+```text
+14:02:11 → Bash: Run the GPU tests · cargo test -p gpu --lib
+14:16:40 ← Bash 14 min, failed: error: test failed, to rerun pass `-p gpu --lib`
+```
+
+A run's journal shows what a quiet run waits on. While `claude -p` writes no stream event but its heartbeats for 5
+minutes, as when the agent waits on a long foreground command, `lib/agent_run.py` logs a beat line, and another every 5
+minutes the silence lasts. `claude -p` writes a heartbeat, a `tool_progress` event marked `heartbeat`, every 30 seconds
+a tool call runs, so the beat counts it as silence; any other event, such as an assistant message, a tool result, or a
+background task starting or ending, ends the silence:
 
 ```text
 Still in Bash for 12 min: timeout 7000 bash -c 'until grep -q … · background: just bank-fill algebra-1 … · busy: claude -p ×3 (85% CPU), python -m quiz.bank_fill (4%)
@@ -352,6 +434,51 @@ running, and the three commands under the run that used the most CPU since the l
 tool call is waiting. Each beat also goes, as a JSON line of `type` `beat`, a UTC `timestamp`, and its `text`, to
 `~/.local/state/agent-desk/beats/<session id>`, which stays with the session. `AGENT_DESK_BEAT` sets the interval in
 seconds.
+
+A process under the run that dumps core logs one line in the run's journal, `A process under the run crashed:
+gpu-aa4bea58f34 (SIGSEGV)`, which `lib/agent_run.py` reads from the journal entry systemd-coredump writes for the
+run's unit, and adds to the session's beats file as type `crash`. The run's soft limit on core files is 0, so
+systemd-coredump keeps no core and puts no stack trace in the journal, only its own one-line notice. A command that
+needs the core, to debug the crash, raises the limit first with `ulimit -c unlimited`.
+
+The board marks a run stalled once the newest tool call it waits on has waited 5 minutes and the processes under the
+run used under 1% of one CPU over the last 2 minutes, as on a test binary deadlocked in a futex wait. The working card
+in the pane and on the web page leads its note with `stalled 12 min in Bash: cargo test …`, counting from when the call
+started, and the web page draws that note in the warning tone. The run's journal logs a `Stalled:` line, and a desktop
+notification goes out through `notify-send` the first time each call stalls. `lib/run_stall.py` samples the processes
+every 12 seconds and holds the rule:
+
+- `claude -p`'s own process counts for none of the CPU, and a process counts the CPU of the children it reaped.
+- A call to the Agent tool waits on a subagent and never stalls.
+- A run with an `agent-desk` command among its processes waits on the desk and never stalls: `agent-desk gpu` waiting
+  on the GPU lock or holding a slot for a game or a render that leaves the CPU idle, or `agent-desk review checks
+  --watch` waiting on a branch check. A run waiting for a slot has no unit yet, so it never stalls either.
+- While the run stalls, the watch keeps the stall in `~/.local/state/agent-desk/stalls/<run id>.json`, which
+  `agent-desk board --json` adds to the running run as `stalled`. The watch removes the file once the call returns,
+  the commands use the CPU again, or the run ends.
+
+`agent-desk stop-command <n>`, which runs `lib/dispatch.py stop-command <n>`, and Stop Command on a stalled agent's
+card in Working end the one command the agent run on issue n waits on, and leave the run going. The button asks to
+confirm with the command and how long it has run, such as `Stop Bash: cargo test … after 14 min?`, in the pane's
+header note or above the web page's buttons, and `!` presses it on the web page. `lib/run_stop.py` holds the steps:
+
+1. The command writes an ask to `~/.local/state/agent-desk/stops/<run id>-<token>.ask`. The run's `agent_run.py`
+   checks for one every half second and answers in a `.json` beside it within 20 seconds, or the command gives up and
+   takes the ask back, as for a run that started before agent-desk could stop a command.
+2. The run finds the session Claude Code started for the newest tool call still waiting: the session leader whose
+   arguments hold the Bash command, or the newest session that started since the call when none does. A background
+   task an earlier call started runs in an older session, so it keeps running, as does `claude -p`. For Codex,
+   the run requires one recent process under the Codex CLI that matches the waiting shell or the simple command
+   that replaced it. The CLI and unrelated commands keep running.
+3. It appends `agent-desk: the user stopped this command after 14 min, …` to the command's output file, sends TERM
+   to the matching shell and its processes, and sends KILL to any left after 5 seconds.
+   `AGENT_DESK_TERM_GRACE` sets the wait.
+4. The CLI hands the agent the command's output with its failed status, and the agent goes on. The run's journal
+   gets a line saying the user stopped the command and naming the processes it ended, and the session's beats file
+   gets the same line as type `stop`, which the Agent Log tab shows.
+
+The command prints that line and exits 0. It exits 1 with a message, changing nothing, when no agent run works the
+issue, the run waits on no command, or the Codex shell cannot be identified. `agent-desk pause` stops the whole run.
 
 An agent can wait on one command in the foreground for up to 2 hours, such as a long benchmark or a full test suite.
 Claude Code moves a command to the background when it reaches its timeout, and caps that timeout at 10 minutes unless
@@ -367,7 +494,8 @@ for the GPU to themselves. A project changes these limits, and those of chores a
 issues at once, so their long runs leave the other slots free for short issues. Agents open a draft review at their
 first commit, and each commit after reaches it through the repository every worktree shares, so work survives the limit.
 When a run is cut off or stops early, the next run on the issue, from Continue, Agent-ready, or `@agent`, takes
-up the same Claude Code session with everything it knew, as the notes on the issue and its review show. Every run that continues a
+up the previous session when the project still uses the same runner. Claude Code session IDs appear in the notes on the
+issue and its review. The Codex run's journal gives the `codex resume` command. Every run that continues a
 worktree an earlier run left merges the local `main`, or its base, into it first, so the agent goes on from what landed
 since; it leaves a worktree with uncommitted changes or conflicts unmerged and says so. A project that keeps its ideas
 in issues labels them `idea`, which keeps them out of agent runs until you press Move to Open on one. That button takes
@@ -407,9 +535,9 @@ set every project to one mode and drop the projects' own; while the modes differ
 pressed button takes its mode's color, the one the project tabs name it in: green for Auto, blue for Manual, and amber
 for Hold. Each project's tab names its mode at all times. The dispatcher, the chore timer, and the merge queue's
 conflict fixes each follow their project's mode. Hold on All keeps the projects' own modes, and Resume, beside it, or
-`agent-desk resume`, gives them back. Beside the mode buttons, the header shows the
-[weekly usage limit](#the-weekly-usage-limit), one more reason to hold new runs, which reads and acts the same on
-every tab.
+`agent-desk resume`, gives them back. Beside the mode buttons, the header shows
+[the account control](#the-account-control), with the weekly usage limit and the API budget, more reasons to hold new
+runs, which reads and acts the same on every tab.
 
 Manual starts an agent, fix, or chore run only after you press Start, or `s` on the page, on its row in Queued,
 whatever asked for it. Agent-ready on an Open or Blocked issue, Retry, Continue on a stopped issue, a comment sent to
@@ -417,8 +545,8 @@ the agent, the Fix button, a chore's Start Now, and the merge queue's conflict f
 nothing. The dispatcher holds every request nobody picked before it takes a slot or claims anything, including one made
 before you switched, and its row waits in Queued with a Start button and the note `waits for Start`: an issue's row for
 a fresh start, the review's row with `back to its PR; waits for Start` for a run that goes back to its review, the
-review's row with `fixing conflicts; waits for Start` for a fix, and `chore: <skill>` for a chore. Only branch checks
-and cleanups go on, since they take no agent slot and spend no Claude tokens, and the chore timer starts nothing.
+review's row with `fixing conflicts; waits for Start` for a fix, and `chore: <skill>` for a chore. Only branch checks,
+cleanups, and sweeps go on, since they take no agent slot and spend no Claude tokens, and the chore timer starts nothing.
 
 Start picks what its row shows, and only Start picks. On an issue's row, it picks the issue, which its fresh start
 needs, including one the dispatcher or `agent-desk serial release` makes later for a waiting issue. On any row, it
@@ -434,7 +562,7 @@ run waiting for Start.
 
 A picked queued or waiting issue says so first in its row's note, such as `picked; waits for a free agent slot`,
 `picked; waiting on #506`, or on Hold `picked; starts on Resume`, and its row shows Unpick, or `z` on the page, in
-place of Start. Unpick drops the issue's pick, and the picks of its agent requests that still wait, with no confirm.
+place of Start. Unpick, after a confirm, drops the issue's pick and the picks of its agent requests that still wait.
 The issue and its request stay in Queued, and the row shows Start and its `waits for Start` note at once. When the
 issue's run claimed it since the board's read, `lib/hold.py` refuses, the row goes back, and the read after shows
 where the issue went. `agent-desk unpick <n>` does the same from a shell, and `agent-desk unpick --all
@@ -477,20 +605,10 @@ agent-desk usage-limit 80     # hold new runs at 80% of the week's usage, and tu
 agent-desk usage-limit off    # turn it off, keeping 80% for `on`
 ```
 
-The web page's header shows the same setting beside the mode buttons. While the limit is on, it reads the week's
-usage from the last reading, rounded down, and the limit, such as `Week 41% / 80%`, and takes the Hold button's amber at
-or over the limit, with a tooltip that names the limit and when the week resets. While the reading doesn't count, as after a failed
-fetch, it reads `Week: can't read`, in the error tone, and its tooltip says why. While the limit is off, a small
-Usage Limit button takes its place. Either opens a popover with an on/off switch and the percentage, which waits while
-the limit is off and offers 80% before one was ever set. Changing either saves it at once through `lib/usage.py`, as
-the command does, so turning the limit on reads usage when the last reading is due. The popover refuses a percentage
-that isn't a whole number from 0 to 100 before it saves. Escape closes it and drops what you typed; a click outside
-saves a valid percentage you typed. One limit covers every project, so the control reads and acts the same on All
-and on a project's tab.
+The web page's [account control](#the-account-control) shows the week's reading and sets the limit too.
 
-While usage reads at or over the limit, the dispatcher holds each new agent, chore, and fix request the way Hold
-does, before it takes a slot or claims anything, and the chore timer starts nothing. The runs working go on, and the
-branch checks, which spend no Claude tokens, start as before. The limit is one more reason to hold a request: Auto,
+While usage reads at or over the limit, the dispatcher holds requests that use Claude before they take a slot or
+claim anything. The chore timer stops queuing Claude chores. Running jobs, Codex runs, and branch checks proceed. The limit is one more reason to hold a request: Auto,
 Manual, and Hold work as before, and Resume never lifts it. Once a reading falls under the limit, as after the
 weekly reset, the dispatcher starts the held requests on its own, in the order it starts waiting requests.
 
@@ -501,6 +619,121 @@ the chore timer, and the command share one fetch. `lib/hold.py` keeps the limit 
 `hold.py status` prints. The endpoint is undocumented, and a fetch also fails offline or on an expired sign-in. A
 failed fetch keeps the last reading, which holds runs for up to an hour, or until its window resets. After that the
 limit lets runs start, and the command, the dispatcher's log, and `agent-desk doctor` say it can't read usage.
+
+The limit holds runs only while [the account](#the-account) is `subscription`, since the plan's usage says nothing
+about what an API key spends. On `api` it waits for the subscription: it fetches nothing, holds no run, and the command
+and the doctor say so.
+
+### The account
+
+The account decides what every Claude process the desk starts bills: `subscription`, the Claude plan Claude Code is
+signed in to, or `api`, an Anthropic API key the desk keeps. It covers Claude issue runs, fixes, chores, discussions, and
+parent-check runs and the web page's Chat, in every project on the machine, and starts as `subscription`. Claude Code
+sessions you start yourself are untouched, and so is the `claude --resume` command Take Over prints.
+
+```bash
+agent-desk account                # both accounts' usage, the one in use, and whether a key is set
+agent-desk account key            # save the key, from a prompt that doesn't echo or from standard input
+agent-desk account api            # bill the key; refused while no key is set
+agent-desk account subscription   # bill the plan again
+agent-desk account key --clear    # remove the key; on api, this moves the account back to subscription
+```
+
+`lib/hold.py` keeps the setting in `hold.json` as `account`. The key lives in
+`~/.config/agent-desk/anthropic-api-key`, under `XDG_CONFIG_HOME` when it is set, with mode 0600, outside the
+repository, the store, the backup, and `hold.json`. The command takes the key only from the prompt or standard input,
+so it stays out of shell history and process lists.
+
+The dispatcher reads the setting when it starts a run's unit, records it in the run's `account` column, which
+`lib/dispatch.py runs` prints, and passes it as `AGENT_DESK_ACCOUNT`. A run keeps that account until it ends, and a
+switch changes only the runs and Chat turns that start after it. Runs from before the column read as `subscription`.
+On `api`, `desk_claude_run` in `lib/common.sh`, which starts every run's `claude -p`, and the Chat add `--settings`
+with an `apiKeyHelper` that prints the key's file. Claude Code runs the helper to read the key, so the key reaches no
+argument, environment variable, unit property, or log, and the agent's commands never inherit it. Both drop
+`ANTHROPIC_API_KEY` on either account, since Claude Code bills it ahead of a helper and of the plan. The helper reads
+the file whenever Claude Code asks for the key, so clearing the key cuts off the runs working on `api` too. A run that
+starts on `api` with no key fails before it starts `claude`, and says why in its log.
+
+`agent-desk doctor` reports the account, and on `api` fails when the key's file is missing, empty, or readable by
+anyone but its owner. A session started on one account resumes on the other, since Claude Code keeps sessions on this
+machine.
+
+`agent-desk account` prints both accounts, with `*` before the one in use: the subscription's week from the last
+reading [the weekly usage limit](#the-weekly-usage-limit) saved, such as `Week 41%, resets Wed 04:00`, and the API
+key's month, such as `API $63.20 of $200.00 this month`, or the spend alone while the budget is off.
+
+#### The account control
+
+The header shows billing for the selected project's issue runner. All groups readings by runner. Claude and Codex
+subscriptions show the percentage left in each available window, labeled Weekly or 5-hour. Codex uses the CLI's
+signed-in account and labels any other windows by duration. Each reading expires at its own reset. Claude API billing
+shows monthly spend and any active budget. Codex API-key and Local runs show their billing state. The Claude weekly
+quota or API spend takes the Hold button's amber when its limit or budget holds runs.
+
+The popover holds, under a heading for each:
+
+- **Agent runner.** A project tab sets the runner for that project's headless issue runs. The Runner dropdown on All
+  sets it for every project the page serves and shows **Mixed settings** when their saved choices differ. Choose
+  **Use project default** to clear the overrides on the selected tab and follow each project's `issueRunner` setting
+  again. Changes apply when queued runs start. Running jobs keep their runner.
+- **Runner billing.** The selected runners' billing states, with quota windows and reset times when available.
+- **Claude billing.** Subscription and API, the one in use pressed. Choosing the other asks to confirm, then switches
+  through the server, which runs `lib/account.py` as the command does. API stays disabled, with a line saying to set
+  a key first, while no key is set.
+- **The key's row.** `No key set` or `Key ending in 4f2a`, with Set Key and, once a key is set, Clear Key, which asks
+  to confirm. Set Key opens a password field outside any form, with autofill off and the common password
+  managers' ignore attributes set. Save, or Enter, sends the key once in a POST and empties the field; the page keeps
+  none of it.
+- **Claude subscription limit.** The weekly limit's switch and percentage, which waits while the limit is off and offers 80%
+  before one was set, and the last reading for a selected subscription runner.
+- **Claude API budget.** The budget's switch and dollars, which wait while the budget is off and offer $200 before one was set, and
+  the month's spend as of the server's last reading, such as `Last read $63.20 at Sun 14:02`.
+
+Each switch and field saves at once, as the command does. The popover refuses a percentage that isn't a whole number
+from 0 to 100, and a budget that isn't a positive number of dollars with at most two decimals, before it saves.
+Escape closes it and drops what you typed; a click outside saves the valid percentage or budget you typed and drops
+the key field.
+
+The server passes the key to `lib/account.py key` on standard input, and takes it only from a loopback address,
+refusing any other with `the server takes an API key only from this machine` before it reads the request's body. It
+logs no request's body. Its replies and the page's state carry the account, the month's spend, the budget, whether
+it holds runs, and the key as `{"set", "ending"}`, read through `lib/account.py json`, which the server runs at start,
+every 10 seconds while a page is open, whenever `hold.json` changes, and after each change from the popover.
+While the page is open and a project uses Claude with subscription billing, the server refreshes the quota windows
+through the usage cache it shares with the dispatcher. For projects using Codex, the server reads the CLI account and
+quota windows about once a minute, or after either window resets. The server holds the Codex readings in memory.
+
+#### The API budget
+
+The API budget holds new runs while the month's spend on the key is at or over an amount in dollars you set. One
+budget covers every project on the machine, and it holds runs only while the account is `api`.
+
+```bash
+agent-desk account budget         # whether the budget is on, its amount, and the month's spend
+agent-desk account budget 200     # hold new runs at $200 a month, and turn the budget on
+agent-desk account budget off     # turn it off, keeping $200 for `on`
+```
+
+The month's spend sums what Claude Code reported each run and Chat turn cost, from the start of the calendar month in
+local time. A run counts by its row's `cost` when its `account` is `api` and it started this month. Claude Code reports
+a resumed session's total so far, so each run's row records its session and the total its last `result` event
+reported, and `lib/run_log.py` records as its `cost` what that total grew by since the session's last report. A run
+that takes up the session of one that stopped early counts only its own spend, and one that takes up a session cut off
+at its time limit counts the cut-off run's spend too. The Chat records each turn's report in `chat-spend.jsonl` in the
+state folder and counts each turn the same way. `lib/budget.py` reads both and calls nothing at Anthropic, so the total
+leaves out what Claude Code never reported or the desk never ran:
+
+- a run cut off at its time limit that no later run takes up, and a Chat turn stopped before its reply ended, which
+  report no cost;
+- anything else that spends the key, such as your own sessions or another machine.
+
+While the spend is at or over the budget, the dispatcher holds requests that use Claude, and the chore timer
+stops queuing Claude chores. A held request's card in
+Queued says why, such as `waits for the API budget: $201.40 of $200.00 this month`. The runs working go on, and branch
+checks start as before. The Chat refuses a new turn and says why. The hold lifts on its own when the month turns, the
+budget rises or turns off, or the account moves to `subscription`. `lib/hold.py` keeps the budget in `hold.json` as
+`apiBudget`, and `agent-desk board --json` carries the account, the month's spend, and the budget as `account`.
+`agent-desk doctor` warns while the account is `api` with no budget on.
 
 ## Merge queue
 
@@ -539,6 +772,8 @@ Otherwise the tick works the oldest queued review alone:
   commit, and the tick goes on to the next review, which now needs main merged in too.
 - A project without a `test` command has no checks, so its reviews merge once they hold main, one at a time.
 - A head whose check failed, retry included, leaves the queue, unless main broke it as the next item describes.
+- A head whose [re-check](#branch-checks) after main moved failed, retry included, holds the queue while an auto-fix
+  adapts it to main, as a review whose checks main broke does below, and the queue merges no main into it meanwhile.
 - When the tick merges main into a review, it notes whether the review's checks had passed. A review from an
   `agent/<slug>` branch whose checks passed then and fail on the merge holds the queue while an auto-fix adapts it to
   what main changed, described under [Conflict fixes](#conflict-fixes). The review's check runs again on the head the
@@ -550,7 +785,13 @@ Otherwise the tick works the oldest queued review alone:
   conflicts, described under [Conflict fixes](#conflict-fixes), so main stays where the fix merged it. The review
   leaves the queue once a fix tries this head against main's current commit and fails, once `fixes.maxTries` fixes
   tried this head, or after an hour without one; a review from another branch, or a project with `fixes.auto` off,
-  leaves at once.
+  leaves at once. The tick notes whether the conflicting head's checks had passed. The fix merges main as the tick's
+  own merge would, so when its head fails a check that passed before the conflict, main broke it, and the review holds
+  the queue for a fix of what main broke as the item above describes.
+- A review that leaves for failed checks names what failed, from the newest failed check of its head: the first
+  failing tests, as `lib/failures.py` reads them from the check's log, and the check's number, such as `checks
+  failed: gameplay::reload a_session_reads_changed_data_again… and 1 more (check 2025)`. A log that names no test
+  gives its first line that says what failed.
 - A review that leaves the queue, as above or because it becomes a draft, closes, or loses its branch, gets a note
   from the tick that says why, and Needs You shows why for a day, or until its branch moves. Merge queues it again.
 
@@ -566,8 +807,10 @@ checkout`, and each review behind it notes that it waits, as `after #275`. The p
 with its Needs You cards. The warning lasts until a tick finds the queue can move. Before it decides anything for a review, the
 tick checks whether the review's base already holds its head, as after a tick that moved `main` and stopped before it
 saved the queue, or a store that couldn't record the merge. It then records the review merged with the commit already
-there, so no review merges twice. Once `main` moves in the main checkout, the
-tick restarts the dispatcher when the merge changed `lib/dispatch.py` or a `lib/` module it imports, directly or
+there, so no review merges twice. Once `main` moves in agent-desk's own main checkout, the tick writes current
+bytecode for each `lib/` module to `lib/__pycache__` with `python3 -m compileall`, since every script starts Python as
+`python3 -B`, which reads bytecode but never writes it. A failed compile logs one line and the tick goes on. Once `main`
+moves in the main checkout, the tick restarts the dispatcher when the merge changed `lib/dispatch.py` or a `lib/` module it imports, directly or
 through other `lib/` modules, in agent-desk's own checkout, and the web page's service when it changed anything
 under `web/` or `inbox/hooks/` there, each only while its service runs. It then runs the config's `sync.run` there, unless a program
 in `sync.skipWhile` runs there.
@@ -595,24 +838,31 @@ tick pushes; the queue never pulls or rebases. A push that brings a change of `V
 own main checkout publishes the release, as [Releasing](#releasing) describes.
 
 After `main`, the tick pushes each `agent/*` branch whose head differs from `origin`'s copy, in one push that never
-forces. A branch that fails stays in the notice and blocks nothing. While `main`'s push fails or waits to retry, the
+forces. It skips a branch whose head the local `main` holds, as a run's branch does until its agent commits, so only
+branches that hold work reach `origin`. A branch that fails stays in the notice and blocks nothing. A chore or issue
+run that ends without a review, after it removes the local branch, deletes the branch's copy on `origin` when
+`origin`'s `main` holds that copy's head. `origin` keeps the copy when it holds commits `main` lacks, when the branch
+has a review in any state, whose comments may point at the copy, and while `origin` is out of reach. While `main`'s push fails or waits to retry, the
 branches wait too. `agent-desk merges --json` and `agent-desk pushes --json` print `ahead`, how many commits `main`
 holds that `origin`'s `main` lacks, `push`, the push queue's state with when `main` last went to `origin`, and
 `agentBranches`, how many agent branches match `origin`'s copy and how many wait, with when a push last sent one and
 git's reason for the ones that failed. Merging in the pane and on the page shows `main is N commits ahead of origin`
-while N is above zero, with what holds the push back, and the GitHub group shows the same state at all times. The
+while N is above zero, with what holds the push back, and the web page's GitHub sidebar and the pane's GitHub group
+show the same state at all times. The
 state lives in `~/.local/state/agent-desk/pushes/<owner>__<repo>.json`.
 
 ## Conflict fixes
 
 Every chore timer tick, every 5 minutes, `agent-desk fixes tick` checks each project for ready reviews from
 `agent/<slug>` branches, an issue's, a chore's, or an interactive session's, that conflict with their base as the
-dispatcher last tried them, or whose head the [merge queue](#merge-queue) notes as one whose checks main broke. It
+dispatcher last tried them, or whose head the [merge queue](#merge-queue) notes as one whose checks main broke, or
+whose [re-check](#branch-checks) after its base moved failed. It
 reads the reviews and the runs from the [local store](#the-local-store) and each branch's head from git in the main
 checkout. Each merge moves main and can bring back the conflicts of a review fixed before it, so the tick asks for a
 fix, with `agent-desk request fix <n>`, only for the merge queue's oldest review, which holds the queue until its fix
-lands: each review gets fixed once, against the main it merges onto. A conflicting review outside the queue waits for
-Merge, and one behind others in the queue for its turn; Fix in Needs You resolves a review's conflicts sooner, as when
+lands: each review gets fixed once, against the main it merges onto. A review whose re-check failed gets its fix
+without waiting for Merge or its turn, so the fix starts before you press Merge. A conflicting review outside the queue
+waits for Merge, and one behind others in the queue for its turn; Fix in Needs You resolves a review's conflicts sooner, as when
 you want to review the resolution. Like the chores, fixes start only while the desk runs new work and your screen is
 unlocked, or, with the config's `presence` at `"always"`, whenever the desk runs new work. `lib/fixes.py` also holds
 the oldest review's fix back while:
@@ -646,21 +896,22 @@ A review that merges cleanly gets a fix only when local checks fail on its head.
 review from the local store, finds its head as `agent-desk review checks` does, and takes the newest check of each name
 on that head from the store. The run gives the agent the name, log path, and error lines of each one that failed, timed
 out, or was lost, quoted from its log as `lib/failures.py log` picks them, and says the checks passed until main merged
-in. A line says what failed when a word such as `error`, `FAIL`, or `Traceback` appears outside a path or file name,
-such as `Audio/error.wav`, and before any warning; the excerpt keeps the four lines after each, where a failed test
-prints its expected and actual values, up to 60 lines. A count of no errors or failures doesn't count. When no line says
-what failed, the line before ``error: recipe `ci` failed`` does, and a log without one gives its last lines. The agent
-reads the commits on main that changed the code the errors name, adapts the review's change to them, runs the project's
-tests, and commits, which moves the branch and runs the checks again. When it can't make them pass, it commits nothing
-and says why on the review, and its changes stay in the worktree. That run counts as a success only when the agent
-committed. The inbox shows a fix like an agent sent back to its review: in Queued while it waits and in Runners while it
-works.
+in, or, when the merge queue notes that they fail since an earlier fix resolved the review's conflicts with main, that
+the conflict is resolved and the tests fail. A line says what failed when a word such as `error`, `FAIL`, or `Traceback`
+appears outside a path or file name, such as `Audio/error.wav`, and before any warning; the excerpt keeps the four lines
+after each, where a failed test prints its expected and actual values, up to 60 lines. A count of no errors or failures
+doesn't count. When no line says what failed, the line before ``error: recipe `ci` failed`` does, and a log without one
+gives its last lines. The agent reads the commits on main that changed the code the errors name, adapts the review's
+change to them, runs the project's tests, and commits, which moves the branch and runs the checks again. When it can't
+make them pass, it commits nothing and says why on the review, and its changes stay in the worktree. That run counts as
+a success only when the agent committed. The inbox shows a fix like an agent sent back to its review: in Queued while it
+waits and in Runners while it works.
 
 ## Chores
 
-A chore is a skill or command that Claude Code runs as `/<name>`. `agent-desk run-chore <name>` starts a headless
-agent with that one line as its prompt, so any chore skill you install can run, and `chores.every` lists the ones a
-project runs. agent-desk ships no chore skills of its own.
+A chore is a skill or command listed in the project's `chores.every`. `agent-desk run-chore <name>` invokes
+`/<name>` with Claude Code. With Codex, the prompt points to the installed skill or command file when the desk
+finds one. Otherwise Codex looks for the skill among its available skills. Agent Desk ships no chore skills.
 
 The `refactor`, `add-tests`, and `trim-comments` skills that the examples use are optional chores kept in
 [erjand/agents](https://github.com/erjand/agents), forks of Jordan Byron's `singleshot-*` skills, published under the
@@ -710,7 +961,9 @@ state folder, imported GitHub text, and the text that reaches headless agents, a
 project that installs and lists those chores. `agent-desk chores status` warns on stderr about each chore in
 `chores.every` whose skill Claude Code can't find, through `lib/chore_skills.py`. It looks in the project's
 `.claude/skills/` and `.claude/commands/`, the same folders under `~/.claude` or `$CLAUDE_CONFIG_DIR`, and the
-plugins in `CLAUDE_CODE_PLUGIN_DIRS` or installed for you or the project.
+plugins in `CLAUDE_CODE_PLUGIN_DIRS` or installed for you or the project. A chore's row on the web page opens the file
+it finds there, with the project's `.agent-skills/<name>/PROFILE.md`, or the same warning, as
+[The web page](#the-web-page) describes.
 
 A chore starts only while you're at the machine, which the config's `presence` decides. At `"desktop"`, the default, a
 tick skips while your screen is locked or no Wayland or X11 session of yours is open, and says which. On a machine
@@ -722,7 +975,8 @@ your last session ends.
 `agent-desk chore <skill>` asks the [dispatcher](#the-dispatcher) for a `chore <skill>` run, and the dispatcher runs
 `agent-desk run-chore <skill>` in a unit of its own. The run tells the agent to open its review in the local store
 with `agent-desk review create` where the skill would open a PR, and afterwards finds the chore's open review with
-`agent-desk review list --head`. A run that opened none loses its worktree and local branch. A chore queued with a
+`agent-desk review list --head`. A run that opened none loses its worktree and local branch, and its copy on `origin`
+as [Pushing main](#pushing-main) describes. A chore queued with a
 count or `forever` asks the dispatcher for its next run as the run ends, unless the run failed, and the dispatcher
 starts it once the ending run lets go of the chore. The script writes that request as agent-desk's own, since the
 dispatcher ignores a request an agent wrote.
@@ -753,8 +1007,8 @@ settles it or it turns 30 days old. The ledger keeps a chore's newest 200 runs o
 most 40 files and 10 leads a list and 6,000 characters in all, about 1,500 tokens, however long the chore has run. The
 brief reads the chore's newest 100 reviews, those of an `agent/chore-<name>-` branch, from the [local
 store](#the-local-store), so a review you merge or close counts at once. It reads each review's changed files from git
-in the main checkout: a merged review's merge commit against its first parent, and any other review's branch since it
-left its base, or the head the review recorded once the branch is gone.
+in the main checkout, over the span `agent-desk review diff` reads, so a rebase-merged review lists the files of all
+its commits.
 
 The chores' stats on the web page and the History column's costs read the store's `runs` table, which began with the
 store. `python3 lib/run_log.py import [<path>]` copies the runs agent-desk logged before it, in
@@ -774,7 +1028,12 @@ Each agent, chore, and fix run checks the machine itself before its heavy work. 
 1. It estimates the run's need in GB. For a project's first runs it takes `resources.needGB` for the kind of run,
    `agent`, `chore`, or `fix`, raised by `resources.labelGB` for any of the issue's labels. Once the history holds five
    runs of the same kind in the project (an agent run, or a run of one chore skill), the need becomes the 90th
-   percentile of their peaks plus a fifth, raised by any label with three runs of its own.
+   percentile of the peaks of the kind's newest 30 runs plus a fifth, raised by any label with three runs of its own,
+   learned from that label's newest 30. A spike the project has since fixed stops setting the need once 30 lighter
+   runs follow it. Last, `resources.labelCapGB`, by default `{}`, lowers the need to the smallest cap among the issue's
+   labels, over every raise above, so a `documentation` issue capped at 3 GB waits for 3 GB however heavy the kind's
+   other runs are. Once a capped label has three runs of the kind, its cap becomes the 90th percentile of the peaks of
+   its newest 30 plus a fifth, never above the need without the cap.
 2. It waits, holding its slot, while either of two checks holds it, and says which in the run's log once a minute,
    such as `memory pressure is 12%, over 5%`. After `resources.maxWaitMinutes` it starts anyway, whatever held it.
    - **Pressure.** The memory pressure your apps feel is above `resources.maxMemoryPressure`, by default 5: in more
@@ -872,9 +1131,13 @@ when it renders.
 - Below the threshold, the call waits as if every slot were held: it takes slot 1 when it frees, or another slot once
   the VRAM frees, which it reads again every three seconds. Slot 1 never waits for VRAM, so the machine always makes
   progress, and `--exclusive` ignores VRAM. Without `nvidia-smi`, or when it fails or prints something unreadable,
-  shared calls use slot 1 only.
+  shared calls use slot 1 only. A shared call waiting while every open slot is held tries the next slot each second.
+  `AGENT_DESK_GPU_POLL` sets another number of seconds for both waits, for tests.
 - `agent-desk gpu slots` prints the count, where it came from, the VRAM threshold with the VRAM free now, and the
-  checkout holding each slot or `free`.
+  checkout holding each slot or `free`, with whether the hold is exclusive or shared and how long it has lasted, such
+  as `slot 1: game-issue-12, exclusive, 18m`. It marks an exclusive hold past 45 minutes, or a shared one past 30, as
+  long, such as `slot 1: game-issue-12, exclusive, 52m, long`. An exclusive call still taking its slots shows its
+  checkout alone.
 - The command waits for a free slot, runs, and frees the slot when it exits, and `agent-desk gpu` exits with its
   status.
 - `--exclusive` holds every slot, for a timed benchmark that must have the GPU alone: slots 1 to the count and every
@@ -886,7 +1149,12 @@ when it renders.
   holder runs in, such as `agent-desk gpu: waiting for the GPU slot, held by: game-issue-12`. A call that waits for
   VRAM says so with the VRAM free, such as `agent-desk gpu: waiting for VRAM, 6.3 GB free of the 7 GB a second slot
   needs, or for slot 1, held by: game-issue-12`.
-- The locks are the files `gpu.queue` and `gpu.slot<n>` in `$XDG_RUNTIME_DIR/agent-desk/`.
+- After 15 minutes of waiting, and every 15 minutes it still waits, it prints one more line naming each holder with its
+  hold time, such as `agent-desk gpu: still waiting for the GPU slot after 15m, held by: game-issue-12, exclusive,
+  52m, long`. `AGENT_DESK_GPU_LONG_WAIT` sets another number of seconds, for tests.
+- The locks are the files `gpu.queue` and `gpu.slot<n>` in `$XDG_RUNTIME_DIR/agent-desk/`. A call that holds its
+  slots writes when it took them and whether it is exclusive to `gpu.held.<pid>` beside them, and removes the file as
+  it exits; the next call to take a slot removes the file of a call killed outright.
 - The command runs without the locks' descriptors, so a daemon it leaves behind keeps no slot. Killing
   `agent-desk gpu` itself frees its slot while the command runs on, so stop the command rather than its wrapper.
 
@@ -935,16 +1203,21 @@ its kind, `agent`, `fix`, or `chore`. An issue a session on this machine started
 there as `local` while that session runs; once the session ends without a ready PR, it shows in Needs You as stopped,
 with Take Over and Continue buttons. Needs You lists PRs to review, marking one whose head doesn't merge with its base as
 `conflicts` and one whose check failed, timed out, or was lost as `failing`. A check's first failed attempt queues a
-second, and the PR shows failing while the second waits and runs, until it passes. Each from an agent branch has a Fix button that asks an agent, after a confirm and by a comment the store marks for
+second, and the PR shows failing while the second waits and runs, until it passes. A ready PR whose check passed
+merged with an older commit of its base notes how far its base moved since, such as `test passed, 2 merges behind`. Each from an agent branch has a Fix button that asks an agent, after a confirm and by a comment the store marks for
 the agent, to merge main and resolve the conflicts or make the checks pass; a failing PR has it in place of Merge, and a conflicting one beside
 Merge, since the merge queue has the conflicts fixed when its turn comes. The comment quotes the lines of the failed
-check's log that `lib/failures.py log` picks, and a failing PR's row shows the first, such as
-`test failed: Sprite.cs(12,5): error CS0103: ...`. A PR whose agent went back to it leaves Needs You for Queued while
+check's log that `lib/failures.py log` picks, and a failing PR's row shows the first after the base commit the check
+merged, such as `test failed merged with main at 01840f3: Sprite.cs(12,5): error CS0103: ...`. A PR whose agent went back to it leaves Needs You for Queued while
 the agent waits for a slot, then for Runners while it works. Needs You also lists runs that failed, timed out, or
-were lost in the last 24 hours, and agents that stopped before their PR was ready. A stopped issue, in progress with
-no agent at work, has Continue as its main button, which has the desk carry on the work after a confirm: it asks the
-dispatcher again for the issue's newest failed agent run that no agent went on from, as Retry does, or without one
-asks for a fresh start as Agent-ready does, leaving `agent-ready` to you. The run takes up the agent's own session
+were lost in the last 24 hours, and agents that stopped before their PR was ready. An agent's failed run on an issue
+with an open review, draft or ready, names the review, as `#<issue> → #<review>` on the web page. A stopped issue, in
+progress with no agent at work, has Continue as its main button, which has the desk carry on the work after a confirm:
+it asks the dispatcher again for the issue's newest failed agent run that no agent went on from, as Retry does, or
+without one asks for a fresh start as Agent-ready does, leaving `agent-ready` to you. A stopped issue with such a run
+stands for the run too: its row says how the run ended, such as `stopped  <title>  (timed out)`, offers the run's
+Log, and waits from the run's end, and when the issue has no open review, the run shows no row of its own, so Needs
+You lists the issue once. The run takes up the agent's own session
 when the last one was cut off or stopped early, and otherwise starts a new session in the same worktree. Either way
 the issue moves to Queued at once, and in Manual waits there for Start. A stopped issue whose agent posted a session
 also has Take Over, which copies `cd <worktree> && claude --resume <session>` for you to run in a terminal. A PR whose
@@ -960,11 +1233,20 @@ covers a PR whose check waited for a `check` slot until its agent finished. A dr
 or that has none, shows neither button.
 Merging lists the merge queue, described below, in the order its PRs merge, each with what it waits on. When the
 review at the head of the queue waits on an auto-fix run or a branch check that the dispatcher holds, its note says
-why, such as `conflicts with main; auto-fix waits for memory: 5.3 GB free of 9 GB needed` or `check waits for a free
-check slot`, and the reviews behind it keep `after #<n>`. Open
-lists the issues in the `open` state newest first. Each Open row has a Move to Backlog button beside Agent-ready,
-which adds `backlog` in the store and moves the issue to the top of Backlog at once, with no confirm. Blocked lists the parked ones, `on-hold` or blocked by an open
-issue, newest first with why each waits. One that only open blockers hold has an Agent-ready button, which queues it
+why, such as `conflicts with main; auto-fix waits for memory: 5.3 GB free of 1 GB + 8 GB reserve` or
+`check waits for a free check slot`, and the reviews behind it keep `after #<n>`. Open, Blocked, Needs Design,
+Backlog, and Ideas list their issues in the project's [list order](#the-local-store), where an issue takes the top
+when it is filed or enters the section. Each issue's row in them ends with Move Up and Move to Top unless it is first in
+its section, and Move Down and Move to Bottom unless it is last, so a section with one issue has none, and Blocked's
+issues that wait on a stacked PR's base have none and stay last. Move Up and Move Down trade the row with its
+neighbour, and Move to Top and Move to Bottom put it first or last in the section; each runs `agent-desk list order
+<n> --before <m>` or `--after <m>` against the neighbour or the section's first or last issue, without a confirm,
+moves the row at once, and puts it back with a message when the store refuses, as for an issue that closed since the
+read. While a section holds two or more issues in the list order, its heading has a Sort button, which asks to
+confirm, then runs `agent-desk list order --reset` with those issues' numbers, which lists them highest number first;
+a refused sort says so, and the list shows the store's order. Open lists the issues in the `open` state. Each Open row has a Move to Backlog button beside Agent-ready,
+which, after a confirm, adds `backlog` in the store and moves the issue to the top of Backlog. Blocked lists the parked ones, `on-hold` or blocked by an open
+issue, with why each waits, then the issues that wait on a stacked PR's base. One that only open blockers hold has an Agent-ready button, which queues it
 to start once they close; Queued then shows it waiting on them. Once they close, one in no serial group has no note
 of its own, so its row reads only why the dispatcher still holds its request, such as `waits for a free agent slot`.
 Each parked issue also has an Unblock button, which
@@ -972,11 +1254,11 @@ asks to confirm, since it deletes links, then takes the issue off hold, removes 
 in the store, and moves it to the top of Open at once. Links to closed blockers stay as history. A stacked
 issue waiting on its base PR has no Unblock button. An issue on hold also has Resume, which queues it at the top of
 the start order, as [the dispatcher](#the-dispatcher) describes. Ideas lists issues labelled `idea` that no agent was asked
-for, newest first, also without the button. Each idea has a Move to Open button instead, which asks to confirm, then
+for, also without the button. Each idea has a Move to Open button instead, which asks to confirm, then
 takes `idea` off in the store and moves the issue to the top of Open. An idea an agent discusses stays in Ideas while
 Runners shows the discussion as an agent run noted `discussion`, and a discussion that failed or timed out shows in
-Needs You with Retry. Backlog lists open issues labelled `backlog`, concrete work you plan to do later, newest first
-and without the Agent-ready button. A backlog issue stays out of Open, Blocked, and Needs Design, and one labelled
+Needs You with Retry. Backlog lists open issues labelled `backlog`, concrete work you plan to do later,
+without the Agent-ready button. A backlog issue stays out of Open, Blocked, and Needs Design, and one labelled
 `idea` as well shows in Ideas. Each has a Move to Open button, which asks to confirm, then takes `backlog` off and
 moves the issue to the top of Open. An issue labelled `backlog` that gets queued another way, such as with
 `agent-desk issue edit <n> --add-label agent-ready`, leaves Backlog for Queued, as an idea leaves Ideas, and a comment
@@ -991,7 +1273,10 @@ first checks that something answers at that port; when nothing does, it opens no
 terminal. The buttons merge a ready PR after a confirm,
 label a backlog issue `agent-ready` and ask the dispatcher for its run, copy the command that takes over a stopped
 agent's session, copy the `journalctl --user -u <unit>` command that prints a failed or timed-out run's log with Log,
-retry or dismiss a failed or timed-out run, and start a chore now. A working run says how many minutes it has left in its last 30 before its
+retry or dismiss a failed or timed-out run, and start a chore now. Every button that changes an issue, a run, or a
+review swaps itself for Confirm and Cancel and acts only on Confirm: Merge, Fix, Dismiss, Agent-ready, Start, Unpick,
+Retry, Continue, Designed, Move to Open, Move to Backlog, Unblock, Ready, Cancel run, Pause, and Resume. Take Over,
+Log, and the start order's moves act at once. A working run says how many minutes it has left in its last 30 before its
 unit's time limit. A run that ran past the limit shows as timed out, and one cancelled by hand doesn't
 show; a timed-out agent's worktree and commits stay on this machine. Retry asks the dispatcher for the run again,
 so an agent takes up its issue again from what the last one left, and a chore does its work again. On an agent's
@@ -1003,18 +1288,27 @@ one request with `agent-desk request --cancel` and leaves the run working its ta
 issue's row has a Move to Open button instead, which sends the issue back to Open, as Move to Open does on an idea,
 and Close, which closes the issue, cancels the requests that wait for it, drops its Manual pick, and takes the row out
 of Queued at once. A row going back to its PR, a Fix row, and an issue whose run started have no Close.
-Queued lists the queued and waiting issues first, in the project's start order, ahead of its other rows: agents sent
-back to a PR, Fix runs, chores, and requests with no issue row, which keep their own order. Each of those issue rows
-has Move Up and Move to Top unless it is first, and Move Down unless it is last; each runs `agent-desk queue order
-<n> --up`, `--down`, or `--top` without a confirm, moves the row at once, and puts it back when the store refuses, as
+Queued lists the agents sent back to a PR first, `back to its PR` or `fixing conflicts`, oldest request first, as
+the dispatcher starts them, then the queued and waiting issues in the project's start order, then Fix runs, chores,
+and requests with no issue row, which keep their own order. Each queued or waiting issue's row has Move Up and Move to
+Top unless it is first among them, and Move Down and Move to Bottom unless it is last; each runs `agent-desk queue
+order <n> --up`, `--down`, `--top`, or `--bottom` without a confirm, moves the row at once, and puts it back when the store refuses, as
 for an issue that started since the read. On the web page, you can also drag one of those cards by its row to a new
 place among its own project's queued and waiting issues. While it drags, a line on the card under the pointer shows
-where it lands, and none shows over another project's card or a Queued card outside the order. The drop runs
-`agent-desk queue order <n> --to <place>` the same way, and a click on a card still selects it. The dispatcher starts the queued issues' fresh starts in that order, and a
+where it lands, and none shows over another project's card or a Queued card outside the order. The mousewheel scrolls
+the list mid-drag, and holding the pointer near the list's top or bottom edge scrolls it toward that edge; either way
+the line moves to the card the scroll brings under the pointer. The drop runs `agent-desk queue order <n> --to
+<place>` the same way, and a drop at the card's own place or outside any row sends nothing. Escape cancels a drag, and
+a click on a card still selects it while a drag never does. While a project has
+two or more queued or waiting issues, Queued's heading has a Sort button beside it, in the pane and on the web page.
+A sort replaces any order set by hand, so Sort asks to confirm, then runs `agent-desk queue order --sort`: in the pane
+for its project, and on the web page with `-R <project>` for each project the tab shows with two or more. The list
+shows the sorted order after the read that follows, and a sort the store refuses says so as a refused move does, with
+the store's order in the list. Pressing the heading itself still collapses the section. The dispatcher starts the queued issues' fresh starts in that order, and a
 waiting serial issue's note names the first queued issue of its group in it. A row whose request the dispatcher holds
 for spare memory, the weekly usage limit, or a free slot adds why after any note it has, such as `waiting on #506;
-waits for memory: 5.3 GB free of 9 GB needed` or `waits for a free agent slot`, so a held queue reads apart from a
-stuck one.
+waits for memory: 5.3 GB free of 1 GB + 8 GB reserve` or `waits for a free agent slot`, so a held queue reads apart
+from a stuck one.
 Merge puts the PR in the merge queue. A toast says when something new needs you.
 Each button shows its move at once and holds back the pane's reads while its command runs. Every button writes the
 store or the merge queue through `agent-desk` before its command returns, so the read after it shows the move, and a
@@ -1022,13 +1316,14 @@ command that fails takes the move back. Fix's PR shows in Queued from its commen
 answers it, and then from the request for the agent's run.
 Pressing a section's heading collapses or expands it, and the pane remembers collapsed sections across sessions. Open, Blocked, Needs Design, Backlog, and Ideas show five
 issues at a time, counted in the heading, with ▲ and ▼ buttons that page through the rest, and ⤒ and ⤓ that jump to the
-first and last page. Recently Merged shows the local date and time each PR merged. An issue whose PR merged into another
+first and last page. A move across a page's edge carries the issue to the next or previous page, and the pane stays on
+the page it showed. Recently Merged shows the local date and time each PR merged. An issue whose PR merged into another
 agent branch, as a stacked PR does, keeps in-progress and waits in Blocked on that branch's PR. A review closes the
 issues it fixes only when it merges into `main`, so when that branch's PR merges there, `agent-desk clean` closes the
 issue with a comment; until it does, the issue shows in Needs You as merged.
 
 GitHub, the pane's last section, has one row for each place the desk touches GitHub, as the
-[web page](#the-web-page)'s GitHub group describes: `main`, the agent branches, and the backup. A healthy row reads dim
+[web page](#the-web-page)'s GitHub sidebar describes: `main`, the agent branches, and the backup. A healthy row reads dim
 and a failing one in the warning color.
 
 The plugin also ships the skills agent-desk runs, in `inbox/skills/`: `work-issue`, `discuss-idea`, `close-parent`,
@@ -1050,7 +1345,7 @@ The server loads its code from `web/` and `inbox/hooks/` once, when it starts. A
 lands a change to those folders in agent-desk's own checkout, it restarts the service while the service runs. A pull,
 or a server started with `agent-desk web run`, needs a hand: while the page is open, the server checks its modules
 every ten seconds, and once they differ from what it started with, the header says "Restart the web server." in small
-text in the warning tone, on a line of its own under the header's gauges and buttons, at the bar's right. Run
+text in the warning tone, on a line of its own under the page's name, at the bar's left. Run
 `agent-desk web on` to restart the service, or stop `agent-desk web run` and start it again.
 
 `agent-desk web run <owner/repo>...` serves only the registered projects it names, and exits when one isn't registered.
@@ -1067,7 +1362,7 @@ Log tab shows a made-up session with beat lines, which the server reads from the
 never takes a copy of the live store, since that holds every project's issues.
 
 The header's bar reads, from the left, `agent-desk`, the Refresh button, the time the shown boards were last read,
-the mode buttons, and the [weekly usage limit](#the-weekly-usage-limit). Refresh shows a circular arrow, which turns once a second while a shown project's board reads, or
+the mode buttons, and the [account control](#the-account-control). Refresh shows a circular arrow, which turns once a second while a shown project's board reads, or
 dims and stays still where the system asks for reduced motion; it reads the open tab's project, or every project on
 All.
 
@@ -1076,11 +1371,12 @@ six projects each take a different one, and a seventh repeats the first's. The p
 header's buttons, in larger text than the rows. The three bars stacked at the top each take a surface of their own: the
 header's buttons sit deepest, on a gray a step darker than the panels in light and darker than the page in dark; the
 tab band sits on the panels' gray; and the list's search bar sits on the page's ground, as the top of the list under
-it. In light, the header's notices and gauges take deeper warning, error, and healthy tones that keep AA contrast on
-its gray. All shows every project's work together, and a project's tab shows its
+it. In light, the header's notices, gauges, and GitHub button's count take deeper warning, error, and healthy tones that
+keep AA contrast on its gray. All shows every project's work together, and a project's tab shows its
 own and counts its Needs you cards in the attention tone. The open tab takes its project's hue in its underline and a
 light tint, with All in Working's orange. The header's right end is one row: the machine's gauges, in groups split by
-dividers for memory, CPU, and GPU, in a pill beside the New Issue, History, Runners, and Chat buttons, then the `?` button. The pill is a
+dividers for memory, CPU, and GPU, in a pill beside the New Issue, History, Runners, Chat, and GitHub buttons, then the
+`?` button. The pill is a
 button with a light fill, as tall as the others, and shows whichever sidebar is open; pressing it shows the Resources
 view. Each button shows pressed
 while its sidebar shows. On a narrow window the row wraps as one unit under the header's other controls.
@@ -1101,20 +1397,45 @@ a muted `free` under Title for an idle one. A busy slot's kind shows in Working'
 busy shows its Runner cells in the attention tone, which tells why a queued request waits. Each kind's busy slots come
 first, in the order the board lists their runs; a check's row names its review. The board counts each kind's busy runs
 without naming slots, so a kind that counts more busy runs than its rows match shows the rest as `busy` with no
-detail. A kind set to 0 is left out, `benchmark` shows while a benchmark run works, and a benchmark slot's rows are the
-agents' on issues labelled `benchmark`. Sessions started with `agent-desk start` take no slot and list after their
-project's slots, one row each with `local` as their runner. A long title clips first, so Runner, Item, and Time keep
+detail. A kind set to 0 is left out but for `agent`, whose stepper stays. `benchmark` shows while a benchmark run
+works, and a benchmark slot's rows are the agents' on issues labelled `benchmark`. A busy agent slot whose issue is
+labelled `gpu` shows a small `GPU` mark beside `agent`, so the marks count the gpu slots in use. Sessions started
+with `agent-desk start` take no slot and list after their project's slots, one row each with `local` as their
+runner. A long title clips first, so Runner, Item, and Time keep
 their room. Pressing a busy row, or its title by keyboard, selects its card, or shows its issue or PR in the panel when
 the list has no card for it, as a link to an item does; a free row doesn't react. On a window narrower than 1300
 pixels the sidebar hides, as History does.
+
+Each project's group starts with an `agent` row whose − and + set the project's agent slots one at a time, through
+`POST /api/slots` and `lib/hold.py`, as `agent-desk slots <owner/repo> agent=<n>` does; − stops at 0 and the server
+refuses more than 20. When an override sets the count, the config's count shows beside it, as `1 of 3`, with a Reset
+button that drops the override, as `agent-desk slots <owner/repo> --reset agent` does; stepping back to the config's
+count drops it too. The server rereads every board once `hold.json` changes, so a change from the page or a shell shows
+on every open page without a reload. A project at 0 agent slots keeps its `agent` row, with the agents still working
+listed under it and none free.
+
+A `gpu` row under it steps the project's [`slots.gpu`](#the-config) the same way, as `agent-desk slots <owner/repo>
+gpu=<n>` does, with `n of m` and Reset while an override sets it. Its count shows no higher than the agent count, an
+unset count shows as the agent count, + stops there, and the server refuses a count above it. The row takes the
+attention tone when the agent runs on `gpu` issues fill its count. Other kinds stay on the command line.
 
 Under the project tabs, a list on the left holds one card per piece of work: an issue with its PR, runs, and runner, built in
 `web/cards.ts` from the board's rows. The cards fall in groups by stage: Needs You, longest waiting first with how long
 each has waited; Merging, in the order the queue merges them; Working, with each card's runner; Queued; Open; Blocked;
 Needs Design; Backlog; and Ideas. Open cards have Move to Backlog and Backlog cards Move to Open, which work as the
-pane's buttons do. Open, Blocked, Needs Design, Backlog, and Ideas list issues by number, highest first, and each heading
-has a `# ↓` button at its right end that flips its group to lowest first and back, showing `# ↑` while flipped; on
-All, a flipped group keeps each project's cards together in project order and sorts within each. A card shows its project on All and its numbers in columns of their own, so titles line up: its issue's in
+pane's buttons do. Open, Blocked, Needs Design, Backlog, and Ideas list their cards in the order the board gives
+them, the list order, and on All each project's cards stay together in project order. Their cards have Move Up, Move
+Down, Move to Top, and Move to Bottom where the pane's rows have them, which work as the pane's do. A card with one of
+those moves also drags by its row to a new place among its own project's cards in the same group, as a queued card
+does in Queued: the line, the scrolling, Escape, and the drops that send nothing work the same way, and none shows over
+a card of another project or another group. The drop moves the card at once and runs `agent-desk list order <n>
+--before <m>` or `--after <m>` against the card it landed above or below; when the store refuses, the card goes back
+and a toast says so, and the server refuses a drop for a row that left its group since its read. Queued's heading
+has a Sort button at its right end, which sorts the start order in the store, as [The pane](#the-pane) describes.
+Each of the other five headings has one while a shown project has two or more of its issues in the group. It asks
+`Sort <group> by number?` in the heading, then runs `agent-desk list order --reset` with each such project's issue
+numbers in the group, which lists them highest number first. Pressing the rest of a heading still collapses its
+group. A card shows its project on All and its numbers in columns of their own, so titles line up: its issue's in
 gray, and its PR's in green after an arrow when it has one, as `#348 → #349`; a chore's PR shows its own number alone. An issue an agent works or waits to work in Queued or
 Working names its open review, so a review sent to the agent keeps its card's review in the panel, and an issue whose
 review closed or merged names no review.
@@ -1124,36 +1445,51 @@ names a label, such as `serial` or `on hold`, shows as that label. Chores close 
 it runs with, when it last ran and runs next, how its newest ten finished runs went from the store's `runs` table
 (their average length and what became of their PRs), a box for how many times to run it, Run, and Loop, which runs it
 again each time a run ends; a chore with runs queued shows how many, or that it loops, and a Stop button. A failed run
-stops its chore's queue. Edit changes a chore's days between runs, a whole number from 1 to 365, and Pause or Resume
+stops its chore's queue. A click on a chore's row, outside its buttons and inputs, opens the chore in the panel, as
+its card in Queued does: its days between runs and last run, its skill's `description` as a lead paragraph, the rest of
+its `SKILL.md` or command file as Markdown with the path it comes from, and the project's
+`.agent-skills/<name>/PROFILE.md` under `This project's profile` when the checkout has one. `/api/chore-text` reads
+them, finding the skill through `lib/chore_skills.py` as `agent-desk chores status` does, and shows that command's
+warning for a skill Claude Code can't find; it answers 404 for a name the project's `chores.every` doesn't list. Edit changes a chore's days between runs, a whole number from 1 to 365, and Pause or Resume
 adds it to `chores.paused` or takes it off. Either asks for a confirm, then commits the change to `.agent-desk.json` on
 `agent/chore-schedule`, in the `../<repo>-chore-schedule` worktree that `agent-desk worktree chore-schedule` makes, and
 opens a review with `agent-desk review create`, titled like `Change the chore schedule: audit every 3 days`. Changes
 while that review is open add commits to it and retitle it with `agent-desk review edit`. The commit changes those values alone and keeps the rest of the file's text, and the new schedule
 takes effect once the PR merges and the sync updates the main checkout. Until then the row shows the pending value
 with the PR's number, as `every 7d → 3d in #52`, which shows the schedule review in the panel. A `git` or `agent-desk` step that fails shows its error in the row,
-and removes the worktree and branch the change made, or puts an open PR's branch back where origin has it. Pressing a group's heading, apart from its sort button, collapses it, and Needs Design, Backlog, and Ideas start collapsed. The page remembers which groups it knew, so a
+and removes the worktree and branch the change made, after running `worktree.teardown` there, or puts an open PR's
+branch back where origin has it. Pressing a group's heading, apart from its sort button, collapses it, and Needs Design, Backlog, and Ideas start collapsed.
+`-` collapses every group, Chores' included, and shows the list from its top, where `j` and `k` step through no card
+until a group opens; `+`, or `=` without Shift, expands them all. The page remembers both as it does a heading's fold.
+All and each project's tab keep their own folds, so `-` on one tab leaves the others as they were. The page remembers which groups it knew, so a
 group added since you last opened it, as Backlog was, starts collapsed too. A search
 box at the list's top, which `/` focuses, filters it to the cards whose title, number, project, labels, state, note,
-runner, or group hold every word typed, opening each group with a match; Enter selects the first, and Esc clears it. A
-card added, moved, or dropped leaves the rest of the list where it was on screen: the row under the pointer, or else the
-first row in view, holds still. A group's heading, Chores' and GitHub's included, sticks under the search box while its
+runner, or group hold every word typed, opening each group with a match; Enter selects the first, and Esc clears it.
+The Detailed button after the search box's `/` hint switches the list between Compact, which draws each card on one
+line, and Detailed, which moves a card's labels, run kind, and note to a second line that starts under its title, so
+long titles keep more room and notes show in a list too narrow for the note column. A card with none of them keeps one
+line. The page remembers the choice in this browser and starts in Compact without one. A card added, moved, or dropped leaves the rest of the list where it was on screen: the row under the pointer, or else the
+first row in view, holds still. A group's heading, Chores' included, sticks under the search box while its
 rows scroll under it, until the next group's heading pushes it out, and it holds no row still, since it stays put
 whatever moves above it. Collapsing a group from its stuck heading keeps the heading where it showed, and the keys stop
 a card they select below the search box and a stuck heading. On a narrow window, where the page scrolls as one, the
 search box and the headings scroll with the list.
 
-A GitHub group closes the list, under Chores, with one row for each place the desk touches GitHub and how it last
-went, so it never pushes an issue down. Each project that pushes to a host has a `main` row, which reads `matches
-origin` with the time of the last push, or how many commits `main` is ahead and why the push waits: for the next tick,
-retrying after a failure with the time left, or refused by `origin`. Its `agent branches` row counts the branches that
-match `origin`'s copy and those that wait, with the time a push last sent one, and names any the last push failed to
-send with git's reason. A project whose `host` is `none` has neither row. The `backup` row shows once, with no project,
-since the backup covers every project: the time of its newest commit and its last push, `no backup remote` on a
-machine whose backup repository has none, and the error when the last push or backup failed. A healthy row reads in
-the muted tone of the header's notices and a failing one in their warning tone, and the heading counts the failing
-rows. Every value comes from a state file or `git` on this machine, and none from GitHub, so the group shows with the
-network down and updates with each read of the board, on a store event or the minute's reread. The row under Merging
-for `main` ahead of `origin` stays, reading the same state.
+A GitHub sidebar at the right, which the header's GitHub button or `g` shows or hides in the Runners sidebar's place,
+lists each place the desk touches GitHub and how it last went, in the Runners sidebar's look: one table with a Project
+column on All, Push, and Status, each project's rows in a group with its chip on the first. Each project that pushes to
+a host has a `main` row, which reads `matches origin` with the time of the last push, or how many commits `main` is
+ahead and why the push waits: for the next tick, retrying after a failure with the time left, or refused by `origin`.
+Its `agent branches` row counts the branches that match `origin`'s copy and those that wait, with the time a push last
+sent one, and names any the last push failed to send with git's reason. A project whose `host` is `none` has neither
+row. The `backup` row shows once, last, with no project, since the backup covers every project: the time of its newest
+commit and its last push, `no backup remote` on a machine whose backup repository has none, and the error when the
+last push or backup failed. A healthy row reads in the muted tone of the header's notices and a failing one in their
+warning tone, and Status wraps, so an error reads whole. While any shown row fails, the sidebar's head and the header's
+GitHub button count the failing rows in the warning tone, the button whether or not the sidebar shows. Every value
+comes from a state file or `git` on this machine, and none from GitHub, so the sidebar shows with the network down and
+updates with each read of the board, on a store event or the minute's reread. The row under Merging for `main` ahead of
+`origin` reads the same state. On a window narrower than 1300 pixels the sidebar hides, as Runners does.
 
 A History column at the right lists the reviews the store holds as merged for the shown projects over a span, each
 under its issue's number when an agent's branch worked one, with what the runs behind it cost: the total of what Claude
@@ -1162,7 +1498,7 @@ prices, which `lib/run_log.py` records on the run's row in the store's `runs` ta
 reports one. A span picker offers the last 24 hours, the default, 3, 7, or 30 days, or a custom range of
 whole days up to 90; a line totals the merges, their runs, and the cost; and each heading sorts by its column, newest
 or largest first, and again the other way. A search box at the column's top keeps the span's rows whose title, issue or
-PR number, or project holds every word, and the totals line then counts and adds up only those; Escape clears it. It shows 20 rows a page. A
+PR number, or project holds every word, and the totals line then counts and adds up only those; Escape clears it. It shows 30 rows a page. A
 Number column between Project and Item draws each row's numbers the way the list's cards do: the issue's in gray, an
 arrow, and the PR's in green, as `#12 → #58`, or the PR's alone for a PR with no issue behind it, such as a chore's.
 Each number links to its item on the page and shows it in the panel, so either stays a press away after the issue
@@ -1207,6 +1543,10 @@ the panel's top, as on GitHub. Its X, or Esc, closes the card and leaves the pan
 An issue and its review show as one page with a tab for each conversation, so you read the issue's discussion apart
 from the review's. The store keeps them as two items, and the page joins them. The header shows the issue's title and
 number, then the review's state, its number, and its `wants to merge … from <branch>` line, with one set of buttons.
+Agent-authored descriptions and comments, including comments on diff lines, show the model reported by the run
+and the Agent Desk version that launched it. Anthropic and OpenAI models display their provider's mark.
+Posts without recorded model metadata keep their usual author and avatar.
+
 The Issue tab shows the issue's description and its comments, oldest first, and counts the issue's comments. The Review
 tab shows the review's description and its comments and counts the review's. Each tab ends in its own comment box,
 which posts to that tab's item. The Issue tab's box has the issue's Close and Close with Comment, and while the issue
@@ -1253,11 +1593,11 @@ stays in view below it, beside the diffs, and scrolls on its own when it is tall
 and the page remembers that across reloads; a panel narrower than 760px hides the tree, and the button shows it
 above the diffs. Checks shows the newest branch check
 of the review's head from the store, and its Details link opens the check's log from
-`~/.local/state/agent-desk/checks/`. An issue's Agent Log tab shows the newest Claude Code session in the
-issue's worktree on this machine, run through `lib/agent_log.py` as its run's journal reads, each line led by its
-local time in the accent color, and read again every 5 seconds while the agent works. The session's beat lines, from
+`~/.local/state/agent-desk/checks/`. An issue's Agent Log tab shows the latest recorded Claude Code or
+Codex session in its worktree, by transcript modification time. **Copy Take Over Command** copies the matching
+CLI command and session ID. The log shows local timestamps and refreshes every 5 seconds while the agent works. The session's beat lines, from
 its file under `~/.local/state/agent-desk/beats/`, go among the agent's own lines by time, muted, so a long wait on a
-tool call reads as the beats `lib/agent_run.py` logged during it. Every description and comment renders on this
+tool call reads as the beats `lib/agent_run.py` logged during it, and its crash lines go among them in plain. Every description and comment renders on this
 machine through `web/markdown.ts`, so the panel reads with the network down, and its `#123` references link to the page
 itself: a click shows item 123 in the panel, as a card of its own with no buttons when the list has none for it, and a
 click with Ctrl or a middle click opens the page at it in a new tab. The number beside the title and a review page's
@@ -1426,22 +1766,26 @@ Keys drive the list: `j` and `k` or the up and down arrows step through the card
 through the open card's tabs, `o` or Enter shows the selected card in the panel, opening the panel when you closed it,
 or on a failed or timed-out run's card shows its Agent Log tab when the run worked an issue, `m` merges, `f` fixes a PR, `a` labels an issue
 Agent-Ready, `s` starts a queued issue in Manual, `z` unpicks one you started, `r` copies a stopped issue's Take Over command, `e` continues its agent,
-`t` retries a failed run or continues a timed-out agent's, `d` dismisses one, `c` closes an issue as completed, `g` moves a Needs Design issue to
-Open, `n` moves an idea, a backlog issue, or a queued issue to Open, `b` moves an Open issue to Backlog, `u` unblocks a Blocked issue, `p` marks a draft PR ready for review, `x` cancels a Queued run request that waits, `w` pauses an agent at work on an issue, `q` resumes an issue on hold, `[` moves a queued or waiting issue up the start order, `]` moves it down, `{` moves it to the top, `l` closes the review shown in the
+`t` retries a failed run or continues a timed-out agent's, `d` dismisses one, `c` closes an issue as completed, `v` moves a Needs Design issue to
+Open, `n` moves an idea, a backlog issue, or a queued issue to Open, `b` moves an Open issue to Backlog, `u` unblocks a Blocked issue, `p` marks a draft PR ready for review, `x` cancels a Queued run request that waits, `w` pauses an agent at work on an issue, `!` stops the command a stalled agent waits on, `q` resumes an issue on hold, `[` moves a queued or waiting issue up the start order, or an issue in Open, Blocked, Needs Design, Backlog, or Ideas up its group in the list order, `]` moves it down, `{` moves it to the top, `}` moves it to the bottom, `l` closes the review shown in the
 panel, `i` opens the New Issue form, `\` shows or hides the Runners sidebar, `h` shows or hides the History column in
-its place, the backtick (`` ` ``) shows or hides the Chat in its place, and `1` through
+its place, the backtick (`` ` ``) shows or hides the Chat in its place, `g` shows or hides the GitHub sidebar in its
+place, and `1` through
 `9` pick a tab; `?`, or
-the button at the header's right, lists them under the sections Move Around, Issues, Start Order, Runs, Reviews,
+the button at the header's right, lists them under the sections Move Around, Issues, Order, Runs, Reviews,
 Panels, and Confirm and Cancel, which flow into as many columns as the window fits. The letter keys work in either case, so `M` with Shift or Caps Lock
 merges as `m` does. Close shows on issues with no agent at work and no open PR: in Open,
-Blocked, Backlog, Ideas, and Needs Design, queued and waiting ones in Queued, and stopped ones in Needs You. Merge, Fix, Retry, Continue, Dismiss, Close,
-Close Without Merging, Unblock, Move to Open, Ready, and Agent-Ready ask
-to confirm: press the same key again, `y`, or the button. Each press moves its card at once, the server holds back its
+Blocked, Backlog, Ideas, and Needs Design, queued and waiting ones in Queued, and stopped ones in Needs You. Every
+action that changes an issue, a run, or a review asks to confirm: Merge, Fix, Dismiss, Agent-Ready, Start, Unpick,
+Retry, Continue, Designed, Move to Open, Move to Backlog, Unblock, Ready, Cancel Run, Pause, Resume, Close, and Close
+Without Merging. Its key or button swaps the button for Confirm and Cancel; press the same key again, `y`, Enter, or
+Confirm to act, and Escape or Cancel to act on nothing. Move Up, Move Down, Move to Top, Move to Bottom, and Take
+Over, which copies a command, act at once. Each press moves its card at once, the server holds back its
 reads of the project's board while the command runs, and a command that fails takes the move back and raises a toast
 after its project's name, such as "Acme: Couldn't close #12." A command that works raises none, since its card's
 move shows it; a review's buttons and a chore's schedule show the server's answer on their own. Every button writes
 the merge queue or the store before its command returns, so the read after it shows the move, Fix's included, as in
-the pane. A chore shows as starting, and in Queued until a slot takes it. The page remembers the tab, the collapsed groups, each group's sort order, and the selected card. A new Needs you or
+the pane. A chore shows as starting, and in Queued until a slot takes it. The page remembers the tab, each tab's collapsed groups, and the selected card. A new Needs you or
 Needs design card raises a toast on the page. In place of the pane's Report button, the Resources view's Audit with
 Claude button asks the Chat for `/agent-desk:resource-report`. Its
 header's gauges, at the right, add the GPU's use and free memory to the pane's, from `nvidia-smi` on a machine with an
@@ -1466,7 +1810,7 @@ view shows, and pressing it again, Esc, the view's close button, or selecting a 
   can take back, while a claim compares against the memory the run's programs allocated themselves (anonymous
   memory), so a run can show several GB in Memory and still hold back most of its claim.
 - **Waiting for memory**: each run and branch check the dispatcher holds at its memory gate, in every project, with the
-  reason it recorded, such as `memory: 5.3 GB free of 11 GB needed`.
+  reason it recorded, such as `memory: 5.3 GB free of 3 GB + 8 GB reserve`.
 - **Everything else**: the 15 processes outside agent-desk's units that use the most memory and swap, from `ps` and
   each process's `VmSwap`, grouped by the program their command line starts with, so a browser's tabs count with the
   browser.
@@ -1484,7 +1828,8 @@ The page draws itself with Preact and htm from `web/vendor/preact-htm.js`, htm 3
 needs no build step. `web/app.js` draws the list and the chores, and handles the keys and the event stream. It imports
 the rest from the modules beside it: `web/app-state.js` holds what the page shows and the presses that change it,
 `web/app-parts.js` the project chips, icons, and labels several of them draw, `web/app-header.js` the header and its
-mode buttons, `web/app-runners.js` the Runners sidebar, `web/app-detail.js` the selected card's panel,
+mode buttons, `web/app-runners.js` the Runners sidebar, `web/app-github.js` the GitHub sidebar, `web/app-detail.js` the selected card's panel,
+`web/app-chore.js` a chore's skill and profile in that panel,
 `web/app-review.js` a review's files, line comments, and buttons, `web/app-decisions.js` a body's Decisions Needed
 sections and their answer forms, `web/app-history.js` the History column, `web/app-chat.js` the Chat,
 `web/app-new-issue.js` the New Issue form, `web/app-delete.js` Delete Issue and its dialog, `web/app-resources.js`
@@ -1504,7 +1849,8 @@ pictures from that git, and posts comments and line comments through `lib/store_
 the New Issue form's issue through it and reads the project's task template, `web/item-edit.ts` and
 `web/comment-edit.ts` write the page's edits of a title, a description, labels, a task box, and a comment through it,
 `web/issue-delete.ts` asks it whether an issue would delete and deletes one, `web/hold.ts` runs the hold controls through `lib/hold.py`, `web/chores.ts` starts and stops chores, counts
-their stats, and opens the schedule reviews, `web/card-actions.ts` carries out a card's buttons and a review page's
+their stats, and opens the schedule reviews, `web/chore-text.ts` reads a chore's skill and profile for the panel,
+`web/card-actions.ts` carries out a card's buttons and a review page's
 buttons, `web/chat.ts` runs the Chat's turns and reads its transcript, `web/resources.ts` reads what uses the machine's memory
 for the Resources view, `web/peer.ts` checks that a request comes from this
 user's own page, and `web/state.ts` holds what they share,
@@ -1581,6 +1927,8 @@ agent-desk issue edit 14 --add-label in-progress --remove-label agent-ready
 agent-desk issue close 16 --duplicate-of 14 --comment "Same bug as the store's."
 agent-desk review create --branch agent/issue-14 --title "Add a store" --draft --fixes 14
 agent-desk review view agent/issue-14 --json number,isDraft,headRefOid
+agent-desk review list --merged-since 2026-11-13T00:00:00Z --json number,mergedAt,additions,deletions,changedFiles
+agent-desk review diff 15
 agent-desk review checks 15 --watch
 agent-desk review merge 15 --sha "$(git rev-parse main)"
 ```
@@ -1593,6 +1941,14 @@ itself. Every close ends each agent request that still waits for the issue as `c
 `cancel_waiting` in `lib/run_control.py`, the function `unqueue` uses, and then drops the issue's Manual pick, so a
 reopened issue waits for Start again; a run that already works the issue keeps working. `agent-desk issue reopen <n>`
 drops the `duplicate` link.
+
+`agent-desk review list --merged-since <time>` lists the reviews merged at or after a time or a date, and
+`--since` keeps filtering on creation. It lists merged reviews without `--state`, and refuses `--state open` or
+`closed`. `mergedAt` is the time a review merged, or null for one that hasn't. `agent-desk review diff <n>` prints a
+review's patch as `gh pr diff` does, through `lib/review_diff.py`, from git in the project's main checkout: a merged
+review's merge commit against its first parent, or a rebase-merge's commits, and any other review's branch since it
+left its base, or the head the review recorded once the branch is gone. `--json additions,deletions,changedFiles`
+counts the same span, and only those fields run git; each is null when git can't read the span.
 
 `agent-desk label edit <name> --color <hex>` gives a label its color, such as one created on this machine that would
 otherwise take a hashed color, and `agent-desk label list` prints the project's colors. The next import replaces a
@@ -1658,15 +2014,39 @@ The store follows these rules:
   units it starts. Code from a worktree stops with an error naming the database, the checkout, and the fix, unless it
   runs with its own `XDG_STATE_HOME` or opens a database by its path, as the tests do.
 - **Read-only commands.** `agent-desk board`, `issue view`, `list`, and `delete` without `--yes`, `review view`,
-  `list`, and `checks`,
-  `queue order` without a move, and `lib/dispatch.py runs`, `chore-runs`, and `stop --dry-run` open the database with `mode=ro`. They never create,
+  `list`, `diff`, and `checks`,
+  `queue order` and `list order` without a move, and `lib/dispatch.py runs`, `chore-runs`, and `stop --dry-run` open the database with `mode=ro`. They never create,
   migrate, or write it, and set no journal mode. They read an older database as far as its tables allow, and read a
   missing one as empty.
 - **Start order.** Each project's `queued` and `waiting` issues hold a place in one start order, `items.rank`, which
   `agent-desk queue order` prints as one issue a line with its place, number, status, and title, and `issue view
-  --json position` prints from 1, or null outside it. `queue order <n> --up`, `--down`, `--top`, or `--to <place>` moves
-  issue n, the last for a place past the end, writes a `queue-moved` event, and refuses an issue in any other state. The backup leaves ranks out, so a restored or
+  --json position` prints from 1, or null outside it. `queue order <n> --up`, `--down`, `--top`, `--bottom`, or `--to
+  <place>` moves issue n, the last for a place past the end, writes a `queue-moved` event, and refuses an issue in any other state. The backup leaves ranks out, so a restored or
   imported queued issue without one joins the end by number.
+- **Sorted start order.** `queue order --sort` rewrites a project's start order in two tiers, prints it as `queue
+  order` does, and writes one `queue-sorted` event, or nothing when the order is sorted already. It takes no issue
+  and no move.
+  1. **Startable:** each issue with no blocker that isn't closed, in the queue or outside it, and, for each of its
+     serial groups, no other issue in progress holding the group and no issue earlier in this tier in the group, by
+     number.
+  2. **Gated:** every other issue, each after every queued or waiting issue that blocks it, and by number where
+     blockers don't decide. The members of a cycle of blockers sort by number among themselves.
+
+  A sort sets each place once: an issue that enters `queued` or `waiting` later joins the end, and a move changes a
+  place as before. `lib/start_order.py` holds the sort.
+- **List order.** Each project's issues hold a place in one list order apart from the start order, in
+  `items.list_rank`, the higher value first, which the board lists Open, Blocked, Needs Design, Backlog, and Ideas in.
+  `agent-desk list order` prints the open issues outside the start order in it, as `queue order` prints, and `board
+  --json` gives each its `listPosition` from 1. An issue takes the top when it is filed, and whenever a write changes
+  its workflow state, adds or removes its `backlog` or `idea` label, or adds or removes a `blocks` link onto it, so
+  Move to Open, Move to Backlog, and Unblock each put it first in the section it enters; one whose blocker closes keeps
+  its place. The store doesn't know the sections, so `list order <n> --before <m>` or `--after <m>` moves issue n next
+  to issue m, and `--top` or `--bottom` first or last in the project, each with a `list-moved` event, and `--reset
+  <n>...` deals the places the issues named hold back out among them, the highest number first, with a `list-reset`
+  event; a change that leaves the order as it was writes nothing. Each refuses a closed, queued, or waiting issue, a
+  review, or a number that names nothing. The migration gave each issue its number, a read-only store on an older
+  database lists by number, the highest first, and the backup leaves the list order out, so a restored issue takes
+  its number.
 - **Line comments.** `review comment --path <file> --line <n>` comments on line n of the file in the review's new
   side, and `--head-sha` names the commit it was made on, by default the review's newest head. An issue takes no line
   comment.
@@ -1853,14 +2233,19 @@ project back on the desk with an empty store.
 `agent-desk board --json`, which `lib/board.py` prints, is the one command a refresh of the pane or the page runs, and
 it asks GitHub nothing. It reads the store once and the files the timers saved, and prints:
 
-- `issues`: each open issue with its workflow state as `status`, its labels, its blockers with their states, and how
-  many of its sub-issues closed. An issue in progress also carries its comments, whose notes say whether its agent
+- `issues`: each open issue with its workflow state as `status`, its labels, its blockers with their states, how
+  many of its sub-issues closed, and its place from 1 in the start order as `position`, or in the list order as
+  `listPosition`. An issue in progress also carries its comments, whose notes say whether its agent
   finished, stopped, or works in a session here, and `landed`: the base its `agent/issue-<n>` branch last merged into,
   with that base's own review, which tells a stacked issue that waits on its base from one that merged with it.
 - `reviews`: each open review with its branch, base, head, and draft flag, the checks of its head, and `mergeable`. The
   head is the branch's row in the `branches` table, or the review's recorded head without one. Its checks are the
   newest attempt of the head's [branch check](#branch-checks), leaving out superseded and cancelled ones; a failed first
-  attempt stands while its second waits and runs, so the review shows failing until the second passes. `mergeable` is
+  attempt stands while its second waits and runs, so the review shows failing until the second passes, and the head's
+  passed check stands while a re-check of a newer base waits and runs. Each check carries `base` and `baseSha`, the
+  base it merged and that base's commit, and `recheck`, and a ready review's passed check carries `behind`, how many
+  commits on the first-parent line of `baseHead`, the base's commit the dispatcher last tried the head against, its
+  `baseSha` lacks, which `lib/board.py` counts with `git rev-list`. `mergeable` is
   whether the head merges with the review's base, as the dispatcher last tried it with `git merge-tree`; before a try,
   it is `CONFLICTING` once a check couldn't merge main, `MERGEABLE` once one got past the merge, and `UNKNOWN` before.
   `agent-desk review view --json checks,mergeable` prints the same two fields, which Fix reads.
@@ -1881,6 +2266,9 @@ it asks GitHub nothing. It reads the store once and the files the timers saved, 
 - `hold`: the desk's mode and the issues and requests picked for Manual, as `lib/hold.py status` prints them.
 - `chores`: the table the last `agent-desk chores status` saved in
   `~/.local/state/agent-desk/chores/<owner>__<repo>/status.txt`, which the chore timer runs every 5 minutes.
+- `account`: the [account](#the-account) the desk's runs bill, `spent`, the month's spend on the API key across every
+  project, `budget`, the [API budget](#the-api-budget) as `{"on", "dollars"}` or null, and `held`, whether it holds
+  new runs.
 - `at` and `machine`: the time with its zone, and this machine's name, which a session's note names.
 - `web`: the address the [web page](#the-web-page) serves at, which every issue, review, and merged row links to:
   `http://127.0.0.1:<port>` at `AGENT_DESK_WEB_PORT`, or else at the port of the service `agent-desk web on`
@@ -1919,7 +2307,7 @@ so a request held by the mode or by other issues never takes a slot:
    Retry, Continue, or the dispatcher's wake made, by its issue or its run id, and any other request, such as a
    comment's run, Fix, a chore, or a merge-queue fix, by its run id. Branch checks pass this gate.
 2. **The weekly usage limit.** While the [weekly usage limit](#the-weekly-usage-limit) is on, the Claude plan's 7-day
-   usage reads under it. At or over it, every agent, chore, and fix request in every project waits, with a note such
+   usage reads under it. At or over it, every request that uses Claude waits, with a note such
    as `weekly plan usage is 81%, at the 80% limit; resets Wed 04:00`. The retry every 15 seconds starts it once a
    reading falls under the limit, as after the weekly reset, with no event. The branch checks spend no Claude tokens
    and never wait on it.
@@ -1932,7 +2320,11 @@ so a request held by the mode or by other issues never takes a slot:
 5. **Serial groups.** For an agent request on an issue labelled `serial` or `serial:<group>`, no other issue in one of
    its groups is `in-progress` or works in a running agent run, by `lib/serial_slots.py`'s `holder` rule.
 6. **A slot.** The project runs fewer runs of the kind than its [`slots`](#the-config) and their overrides allow, and for a `--benchmark`
-   request fewer benchmark runs than `slots.benchmark`. The `check` slots hold the [branch checks](#branch-checks).
+   request fewer benchmark runs than `slots.benchmark`. For an agent request on an issue labelled `gpu`, with
+   `slots.gpu` set, fewer agent runs work issues labelled `gpu` than it allows; the dispatcher reads the labels of the
+   issue and of each running run's issue when it decides, so a label an agent adds counts from then on. A request held
+   here leaves the requests behind it free to start, so an issue without the label takes a free agent slot while a
+   `gpu` issue ahead of it waits. The `check` slots hold the [branch checks](#branch-checks).
 7. **The target.** No other run holds the same target. An agent run on issue or PR n and a fix of PR n share one
    target, `agent-<n>`, and a chore holds `chores-<skill>`. A target's later
    requests wait behind its earliest, in the order they came.
@@ -1946,13 +2338,14 @@ so a request held by the mode or by other issues never takes a slot:
    `resources.maxWaitMinutes`, so a slot or memory that frees goes to the fix first.
 
 The waiting requests try their gates with the merge queue's fixes first, unless an earlier request holds a fix's
-target, and then oldest request first, except the fresh starts of a project's queued and waiting
+target, then the follow-ups and the requests for `in-progress` issues, and then oldest request first, except the fresh
+starts of a project's queued and waiting
 issues, which trade places among themselves to follow the project's start order: the store keeps one order per project
 of its issues in either state, in `items.rank`, which `agent-desk queue order` prints and moves. An issue joins its end
 when it enters `queued` or `waiting`, keeps its place as it moves between them, and leaves when it starts, closes, or
 goes back to `open`, so the next free slot goes to the first issue in the order whose gates clear. Every other
 request, such as an `@agent` comment's or a chore's, keeps its place by request time. A move writes a `queue-moved`
-event, which makes the dispatcher try its waiting requests again. The wake and `agent-desk serial release` hand a free
+event and a sort a `queue-sorted` one, and either makes the dispatcher try its waiting requests again. The wake and `agent-desk serial release` hand a free
 serial slot to the group's first waiting issue in the same order, through `lib/serial_slots.py`'s `release`.
 
 `lib/dispatch.py runs` prints the project's requests that wait and runs that work as JSON, and `agent-desk board --json`
@@ -1966,8 +2359,8 @@ of a request queued behind it.
 
 A request that can't start waits and starts when the gate clears. The dispatcher records the gate that holds it in
 the store's `runs` row, as `wait_gate`, one of `mode`, `usage`, `hold`, `blocker`, `serial`, `slot`, `lock`, or `memory`, with
-`wait_reason`, a short reason that reads after "waits for", such as `memory: 5.3 GB free of 9 GB needed`, `a free fix
-slot`, or `run 612 ahead of it`. It writes no event for them, so the board picks them up on its next read. It rewrites
+`wait_reason`, a short reason that reads after "waits for", such as `memory: 5.3 GB free of 1 GB + 8 GB reserve`,
+`a free fix slot`, or `run 612 ahead of it`. It writes no event for them, so the board picks them up on its next read. It rewrites
 the record and says why in its log when the gate or reason changes, except that a memory reason whose GB free moved by
 less than half a GB stays as it was, and it clears the record when the run starts or ends. `lib/dispatch.py runs` lists
 each waiting request's `gate` and `reason`, and the board shows them on the cards in Merging and Queued. A queued
@@ -2079,6 +2472,25 @@ records each cleanup it starts as a `cleanup-started` event naming the review's 
 it starts the cleanups of the reviews that ended since the last one, so a review that ended while the dispatcher was
 down, or whose cleanup failed to start, still gets its cleanup.
 
+Each reconcile also starts `agent-desk sweep` for each project whose last sweep started an hour ago or more, as
+`agent-desk-sweep-<owner>-<repo>.service`, in the project's main checkout, with a 15-minute limit. The dispatcher records
+when each sweep started in `~/.local/state/agent-desk/sweeps.json`, so a restart starts none early, and a sweep still
+running keeps its unit's name, so a second one never starts beside it. The sweep catches what a run's end or a cleanup
+left behind, such as a worktree kept because a process worked in it at the time:
+
+1. It removes each issue worktree, `../<repo>-issue-<n>` on `agent/issue-<n>`, and each chore worktree,
+   `../<repo>-chore-<skill>-<time>`, once no run of its issue or chore, and no fix or review run of its branch's
+   reviews, is running or queued, its branch has no open review, and its issue is not `in-progress`, `waiting`, or `on-hold`, whose next run takes up
+   its session there.
+   The removal keeps the same guards as the cleanup's: a process in the worktree, uncommitted changes, or commits that
+   neither `origin` nor the newest review's base, or `main`, holds.
+2. It deletes each local `agent/*` branch that has no worktree and no open review and whose commits `origin` or the
+   local `main` holds, under the same run and issue guards for an issue's or a chore's branch.
+3. It leaves a worktree made by hand, such as one from `agent-desk worktree <slug>`, until you remove it.
+
+It prints one line for each worktree and branch it removes or keeps, with the reason for each one it keeps, which
+`journalctl --user -u agent-desk-sweep-<owner>-<repo>.service` shows.
+
 A dispatcher restart leaves running units alone. It rebuilds its view from `runs` and
 `systemctl --user list-units 'agent-desk-*'`, and ends a running run whose unit is gone as `lost`; it checks the same
 every 30 seconds. The dispatcher reads `PRAGMA user_version` on each wake and starts nothing while the store's schema
@@ -2095,15 +2507,12 @@ discussions of one idea, or a discussion and a `work-issue` run of the issue, ne
 one works waits behind it. Its serial and blocking links hold nothing back, and it has its own 30-minute limit and
 memory need, `resources.needGB.discuss`, 2 GB unless the project sets one, whatever the issue's labels.
 
-`agent-desk discuss-idea <n>` works it. It posts a note that the discussion started, with the Claude Code session, as
-`work-issue`'s start note does, then makes a detached worktree of the local `main` at a path fixed for the issue,
-`~/.cache/agent-desk/ideas/<owner>__<repo>/<n>`, and runs `claude -p` there with the `/agent-desk:discuss-idea`
-skill. The skill reads the issue, its comments, and the code they name, answers the newest comment with one comment,
+`agent-desk discuss-idea <n>` posts a start note, makes a detached worktree of the local `main` at
+`~/.cache/agent-desk/ideas/<owner>__<repo>/<n>`, and runs the discuss-idea skill with the project's runner. The skill reads the issue, its comments, and the code they name, answers the newest comment with one comment,
 and ends; it edits the description only when the comment asks it to, and never commits, opens a review, files an
 issue, or changes the issue's labels or state. The worktree goes when the run ends, however it ends, and makes no
-branch, so `agent-desk clean` has nothing to remove. Claude Code keeps a session by its folder, so the next discussion
-of the idea, in the same path, takes up the session the last start note names when this machine still has it, and
-the conversation goes on. The issue stays `open` and in Ideas throughout: the run never moves it, and a failed or
+branch, so `agent-desk clean` has nothing to remove. The next discussion takes up the previous session when
+the project still uses the same runner and the session is available on this machine. The issue stays `open` and in Ideas throughout: the run never moves it, and a failed or
 timed-out run's release only says how it ended. Runners shows the run as an agent run noted `discussion`, and one
 that failed shows in Needs You with Retry.
 
@@ -2164,18 +2573,34 @@ worktree, and records `MERGEABLE` or `CONFLICTING` from its exit status in the b
 `branch-merges` event when the answer changes. It does so whatever the project's `test` setting, so the board marks a
 conflicting PR in a project without checks too.
 
+In a project whose config sets [`testOnBaseMove`](#the-config), the same read checks a ready review again when its
+base moves. When a review's head passed a check, its newest check merged an older commit of the base than the base's
+newest, and `git merge-tree` finds the head merges cleanly with the newest, the dispatcher queues a re-check of the
+head merged with that commit. It waits until the base's commit stands still for 60 seconds, so several merges in a
+row get one re-check of the last. A newer commit of the base ends a queued or running re-check of an older one as
+`superseded` and stops its unit. It changes no branch: the re-check merges the base in its scratch worktree as any
+check does. It leaves out drafts, reviews a run works, a head whose own check waits, runs, or never passed, a head that
+already holds the base's newest commit, and a review that conflicts, which the board marks `conflicts` already. A
+re-check starts in a free `check` slot after every other queued check, so it never runs ahead of the check of a moved
+head or of the merge queue's own checks. A failed first attempt queues a second of the same base commit, as other
+checks do. A review whose re-check fails, retry included, has checks main broke, and the [conflict
+fixes](#conflict-fixes) start its fix without waiting for Merge. Turning the key off cancels the re-checks still
+queued.
+
 Each check runs `lib/checks.py` in a unit named `agent-desk-check-<owner>-<repo>-<id>.service`, with the priority and
 environment of a run's unit, its own temp folder `/tmp/ad-check-<id>` that the unit removes as a run's does, the `MemoryHigh` of an agent run, and the config's [`testMinutes`](#the-config) as its time
 limit, 15 minutes by default. It makes a detached scratch worktree of the head under `~/.cache/agent-desk/checks/`,
-merges the head's base into it from the local branch or else `origin/<base>`, and names that base in the log's first
-line and its `Merge <base>` step. It then copies `worktree.seeds` from the main checkout, runs `worktree.setup`, runs
-`test`, and removes the worktree, also from the unit's exit handler after a timeout. A merge conflict ends the check as
+merges the head's base into it from the local branch or else `origin/<base>`, records the base and the commit it
+merges on the check, and names both in the log's first line and the base in its `Merge <base>` step. A re-check
+merges the commit of the base the dispatcher queued it with. It then copies `worktree.seeds` from the main checkout as a run does, runs `worktree.setup`, runs
+`test`, runs `worktree.teardown`, and removes the worktree, also from the unit's exit handler after a timeout, with
+the teardown's output in the check's log. A merge conflict ends the check as
 `failed` with the name `merge` and runs no test, and a failed setup ends it with the name `setup`. A first attempt that
 fails or times out queues a second of the same head, so a flaky test counts as failed only when it fails twice; a
 conflict gets no second attempt.
 
-A row of `checks` holds the project, branch, the review the store knows for the branch, the head, the name (`test`,
-`merge`, or `setup`), the status (`queued`, `running`, `passed`, `failed`, `timed-out`, `superseded`, `cancelled`, or
+A row of `checks` holds the project, branch, the review the store knows for the branch, the head, the base and its
+commit the check merged, whether it is a re-check, the name (`test`, `merge`, or `setup`), the status (`queued`, `running`, `passed`, `failed`, `timed-out`, `superseded`, `cancelled`, or
 `lost`), the attempt, the start and end times, and `log_path`, which is
 `~/.local/state/agent-desk/checks/<owner>__<repo>/<id>.log`. `lib/failures.py log <file>` prints the lines of such a
 log that say what failed, as [Conflict fixes](#conflict-fixes) describes.
@@ -2199,7 +2624,7 @@ public repository, and to one whose visibility `gh` can't read because it isn't 
 and records why as the error; the commit stays in the backup repository, and the next run asks again. A remote on
 another host pushes without the check. Each run saves how it went in `backup.json` beside the database: its remote, the
 time of the newest backup commit and of the last push, whether a commit waits for the push, and the error of a push or
-backup that failed. The GitHub group on the [web page](#the-web-page) and in the pane reads it.
+backup that failed. The GitHub sidebar on the [web page](#the-web-page) and the GitHub group in the pane read it.
 
 `agent-desk backup snapshot` copies the whole database with `VACUUM INTO` to
 `~/.local/state/agent-desk/snapshots/<date>.sqlite`, replacing one taken earlier the same day, and deletes the
@@ -2230,13 +2655,12 @@ A release starts as a local review. `just release` from a clean, up-to-date `mai
 commits the release on `agent/release-X.Y.Z` and opens a `Release X.Y.Z` review of that branch in the
 [local store](#the-local-store) with `agent-desk review create`. The commit folds the waiting `changelog.d/` files into
 a new `CHANGELOG.md` section, deletes them, and sets `VERSION` and the plugin's `plugin.json` to the new version, and
-the review's description holds the new section. The entries pick the version: below 1.0.0, a **Breaking** or
-**Workflows** entry bumps the minor number and anything else the patch number; from 1.0.0 on, **Breaking** bumps the
-major number, **Workflows** the minor, and anything else the patch. `just release major`, `minor`, `patch`, or `X.Y.Z`
-overrides the choice, and `just release --dry-run` prints the version and the section without changing anything. The
-script refuses while a release review is open or when `changelog.d/` holds no entries. When a step fails, it drops the
-release branch and its changes and returns to `main`, so running it again starts over. Nothing cuts a release on a
-schedule.
+the review's description holds the new section. The entries pick the version: a **Breaking** entry bumps the minor
+number below 1.0.0 and the major number from 1.0.0 on, and anything else bumps the patch number. `just release major`,
+`minor`, `patch`, or `X.Y.Z` overrides the choice, and `just release --dry-run` prints the version and the section
+without changing anything. The script refuses while a release review is open or when `changelog.d/` holds no entries.
+When a step fails, it drops the release branch and its changes and returns to `main`, so running it again starts over.
+Nothing cuts a release on a schedule.
 
 Merging the release review publishes it. The [merge queue](#merge-queue) lands it on `main`, and once the [push
 queue](#pushing-main) pushes a `main` whose `VERSION` changed from agent-desk's main checkout, it runs

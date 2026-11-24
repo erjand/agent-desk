@@ -196,6 +196,24 @@ test('Agent-Ready starts unchecked each time the form opens, and its box says it
   assert.match(textOf(drawn(NewIssue() as Drawn)), /Agent-Ready: start an agent on it now/)
 })
 
+test('Parent and Blocked By open empty, with no sample number that reads as a real one', () => {
+  ui.server = { desks: DESKS }
+  openNewIssue('yard')
+  const fields: Record<string, unknown>[] = []
+  const walk = (node: Drawn): void => {
+    if (Array.isArray(node)) {
+      node.forEach(walk)
+    } else if (node !== null && typeof node === 'object') {
+      if (node.type === 'input' && node.props?.class === 'number-field') {
+        fields.push(node.props)
+      }
+      walk(node.props?.children as Drawn)
+    }
+  }
+  walk(drawn(NewIssue() as Drawn))
+  assert.deepEqual(fields.map(one => [one.value, one.placeholder]), [['', undefined], ['', undefined]])
+})
+
 test('the body starts from the project\'s template, and a project change swaps it only while it is untouched',
   async () => {
     ui.server = { desks: DESKS }

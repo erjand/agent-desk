@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks a parent issue whose sub-issues have all closed with a headless Claude Code agent, which closes the issue or
+# Checks a parent issue whose sub-issues have all closed with a headless agent, which closes the issue or
 # says what is left:
 #   lib/close-parent.sh 12
 # work-issue.sh runs it in place of a full run when the agent-ready label reaches a parent issue with at least one
@@ -36,22 +36,26 @@ issue agent-ready to check it again."
     fi
 
     # The check is the agent's from here, so a pick for Manual has done its work.
+    issue_labels=$(desk_store issue view "$issue" --json labels | jq -r '[.labels[].name] | join(",")')
+    if ! desk_runner_flags agent "$issue_labels"; then
+        desk_leave_state "$issue" queued
+        desk_note issue "$issue" "The parent check didn't start: $desk_runner_error$run_link."
+        return 1
+    fi
     desk_store issue edit "$issue" --status in-progress >/dev/null
     python3 -B "$desk_lib/hold.py" spend "$issue" || true
-    issue_labels=$(desk_store issue view "$issue" --json labels | jq -r '[.labels[].name] | join(",")')
     # A check builds nothing, so it waits for a discussion's memory, whatever the issue's labels.
     desk_memory_start discuss
-    desk_model_flags agent "$issue_labels"
     # Removes the worktree however the run ends; a stop, as at the time limit, ends the script through its EXIT trap.
     trap close_parent_end EXIT
     trap 'exit 143' TERM
 
     desk_note issue "$issue" "A parent check started on this issue, to close it once its closed sub-issues meet its \
-Done When$run_link. To take over, run \`claude --resume $session\` in \`$dest\` while it runs."
+Done When$run_link. $(desk_takeover_note "$dest" "$session" " while it runs")"
     desk_scratch_add "$dest"
 
     status=0
-    desk_agent_run "$dest" "$issue_labels" new "/agent-desk:close-parent $issue" --session-id "$session" || status=$?
+    desk_agent_run "$dest" "$issue_labels" new "$(desk_skill_prompt close-parent "$issue")" "$session" || status=$?
 
     # The agent closes the issue or moves it to needs-design, and has commented already.
     status_now=$(desk_store issue view "$issue" --json status | jq -r .status)

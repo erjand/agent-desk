@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Works one issue with a headless Claude Code agent in ../<repo>-issue-<n>, on agent/issue-<n>:
+# Works one issue with a headless agent in ../<repo>-issue-<n>, on agent/issue-<n>:
 #   agent-desk work-issue 12
 # The dispatcher runs it when the user labels an issue agent-ready, or starts a comment on the issue or its review with
 # @agent. It moves the issue to in-progress, posts the session, runs the work-issue skill, and posts the outcome, on the
@@ -7,9 +7,9 @@
 # the local store, and writes its notes and state changes back there. Running it again for the same issue continues
 # the same branch and review, with its base merged in first, and takes up the last run's session when that run was cut
 # off. The base is main, or the branch a base:<branch> label names, which the worktree branches from and the review
-# merges into. A run that stops without a review, and not for a decision or early, removes its worktree. A run that
-# stops early, its agent ending its turn while a task it started still ran, says so, keeps its worktree, and exits
-# with desk_stopped, and the next run takes up its session. The dispatcher starts the run only once the desk's mode,
+# merges into. A run that stops without a review, and not early, removes its worktree, and the branch's copy on origin
+# when origin's main holds it. A run that stops early, its agent ending its turn while a task it started still ran,
+# says so, keeps its worktree, and exits with desk_stopped, and the next run takes up its session. The dispatcher starts the run only once the desk's mode,
 # the issue's blockers, and its serial groups let it, so agent-desk serial claim moves the issue to in-progress at
 # once; an issue claim finds blocked after all waits instead, and agent-desk serial release asks for its run later.
 set -euo pipefail
@@ -103,9 +103,16 @@ branch there or change the label, then label the issue agent-ready again"
         "$desk_lib/serial.sh" release
         exit 1
     fi
+    if ! desk_runner_flags agent "$issue_labels"; then
+        stop=$desk_runner_error
+        free_issue
+        report "The agent didn't start: $stop$run_link." \
+            "The agent didn't start on feedback from #$reply_to: $stop$run_link."
+        "$desk_lib/serial.sh" release
+        exit 1
+    fi
     # The run waits here, holding its slot, until the machine has the memory its issue's kind of work needs.
     desk_memory_start agent "$issue_labels"
-    desk_model_flags agent "$issue_labels"
 
     # A run cut off, at its time limit or by hand, left its session on this machine, so the next run takes that session
     # up again, with all it knew, in place of a new one. So does a run that stopped early, when the agent ended its turn
@@ -117,7 +124,8 @@ branch there or change the label, then label the issue agent-ready again"
     cut_off=no
     last_session=
     stopped_task=
-    read -r cut_off last_session stopped_task < <({ desk_store issue view "$issue" --json comments
+    last_runner=
+    read -r cut_off last_runner last_session stopped_task < <({ desk_store issue view "$issue" --json comments
         desk_store review view "agent/$slug" --json comments 2>/dev/null || true; } |
         jq -c '.comments[] | {id, createdAt, body}' | python3 -B -c '
 import json, re, sys
@@ -126,25 +134,40 @@ ours = [one["body"] for one in notes if re.match(r"An agent started|The agent (f
 last = ours[-1] if ours else ""
 early = re.match(r"The agent stopped early: it ended its turn while (.+?) still ran, so the run stopped it\.", last)
 cut = "early" if early else "yes" if last.startswith("The agent run") and "cancelled" in last.split("(")[0] else "no"
-ids = [m.group(1) for body in ours if (m := re.search(r"claude --resume ([0-9a-f-]+)", body))]
-print(cut, ids[-1] if ids else "-", early.group(1) if early else "")') || true
+starts = [body for body in ours if body.startswith("An agent started on `agent/issue-") and
+          ("claude --resume " in body or "Codex session ID is in the run log" in body)]
+match = re.search(r"claude --resume ([0-9a-f-]+)", starts[-1]) if starts else None
+runner = "claude" if match else "-"
+if starts and not match:
+    runner = "local" if "Local Codex session ID is in the run log" in starts[-1] else "codex"
+print(cut, runner, match.group(1) if match else "-", early.group(1) if early else "")') || true
     [[ $last_session == - ]] && last_session=
-    if [[ ($cut_off == yes || $cut_off == early) && $continuing == 1 && -n $last_session ]] \
-        && find "$HOME/.claude/projects" -maxdepth 2 -name "$last_session.jsonl" | grep -q .; then
-        resumed=$last_session
-        session=$last_session
+    marker=
+    if [[ $desk_runner != claude && $continuing == 1 ]]; then
+        marker=$(git -C "$dest" rev-parse --path-format=absolute --git-path agent-desk-codex-session)
+    fi
+    if [[ ($cut_off == yes || $cut_off == early) && $continuing == 1 && $desk_runner == "$last_runner" ]]; then
+        if [[ $desk_runner != claude ]]; then
+            resumed=$(desk_codex_thread "$marker") || resumed=
+        elif desk_has_claude_session "$last_session"; then
+            resumed=$last_session
+        fi
     fi
 
+    if [[ -n $marker && -z $resumed ]] && ! rm -f -- "$marker"; then
+        free_issue
+        "$desk_lib/serial.sh" release
+        return 1
+    fi
     started="An agent started on \`agent/$slug\`${resumed:+, taking up the session stopped last time,}$run_link."
-    report "$started To take over, run \`claude --resume $session\` in \`$dest\`." \
-        "An agent started on feedback from #$reply_to$run_link."
+    takeover=$(desk_takeover_note "$dest" "${resumed:-$session}")
+    report "$started $takeover" "An agent started on feedback from #$reply_to$run_link."
 
     # A failed setup, such as a main that doesn't build, frees the issue as a run that stops without a PR does.
-    if [[ ! -d $dest ]] && ! (cd "$main" && "$desk_lib/worktree.sh" "$slug" "$base") 8>&-; then
+    if [[ ! -d $dest ]] && ! desk_make_worktree "$slug" "$base"; then
         free_issue
-        setup=$(desk_config worktree.setup "")
-        report "The agent didn't start: the worktree setup, \`$setup\`, failed$run_link." \
-            "The agent didn't start on the feedback from #$reply_to: the worktree setup failed$run_link."
+        report "The agent didn't start: $desk_worktree_failed$run_link." \
+            "The agent didn't start on the feedback from #$reply_to: $desk_worktree_failed$run_link."
         "$desk_lib/serial.sh" release
         exit 1
     fi
@@ -166,24 +189,36 @@ conflicts first."
         echo "$merged"
     fi
 
-    prompt=("/agent-desk:work-issue $issue" --session-id "$session")
+    prompt="/agent-desk:work-issue $issue"
     carry_on="Read the comments on the issue and its review since your last commit for anything new, then carry on \
 with the /agent-desk:work-issue skill from where you stopped: commit, open or update the draft review, verify, and \
 finish."
     if [[ -n $resumed && $cut_off == early ]]; then
-        prompt=("agent-desk stopped your last run on #$issue early: you ended your turn while $stopped_task still \
+        prompt="agent-desk stopped your last run on #$issue early: you ended your turn while $stopped_task still \
 ran, so the run stopped it, and this run takes up the same session. $merged Run it again in the foreground, and don't \
 end your turn until it returns: if your shell moves it to the background, wait for it to finish before you go on. \
-$carry_on" --resume "$resumed")
+$carry_on"
     elif [[ -n $resumed ]]; then
-        prompt=("agent-desk stopped your last run on #$issue before it finished, at the run's time limit or because \
-the user paused it, and this run takes up the same session. $merged $carry_on" --resume "$resumed")
+        prompt="agent-desk stopped your last run on #$issue before it finished, at the run's time limit or because \
+the user paused it, and this run takes up the same session. $merged $carry_on"
     fi
 
     status=0
     stream=$(mktemp)
     # The run's stream-json goes to a file too, for its length and turns in the run log.
-    desk_claude_run "$dest" "$stream" "${prompt[@]}" 8>&- || status=$?
+    if [[ $desk_runner != claude ]]; then
+        marker=${marker:-$(git -C "$dest" rev-parse --path-format=absolute --git-path agent-desk-codex-session)}
+        handoff="Work issue #$issue. Read and follow $desk_root/inbox/skills/work-issue/SKILL.md.
+Agent Desk already claimed the issue and prepared this worktree. Begin with Step 2.
+Use the installed agent-desk command for the project's store and keep the main checkout untouched."
+        if [[ -n $resumed ]]; then
+            handoff="$handoff
+
+$prompt"
+        fi
+        prompt=$handoff
+    fi
+    desk_run "$dest" "$stream" "$prompt" "$session" "$resumed" "$marker" 8>&- || status=$?
     # A run that stopped early names the task it stopped, for the note and the next run's prompt.
     left=$(desk_left_task "$stream" "$status")
 
@@ -202,7 +237,13 @@ the user paused it, and this run takes up the same session. $merged $carry_on" -
         --labels "$issue_labels" --start "$start" || true
     rm -f "$stream"
     early="The agent stopped early: it ended its turn while $left still ran, so the run stopped it."
-    if [[ $status_now == needs-design ]]; then
+    if [[ $status_now == needs-design && -z ${pr:-} ]]; then
+        # The agent asked for a decision and opened no review. The run after the answer starts a new session and makes
+        # the worktree again, so nothing waits on this one. A branch that holds work the agent never pushed stays.
+        desk_end_leftovers "$dest"
+        desk_remove_worktree "$dest" "agent/$slug" || true
+        desk_drop_origin_branch "agent/$slug"
+    elif [[ $status_now == needs-design ]]; then
         :
     elif [[ -n $left && -n ${pr:-} ]]; then
         # The next run takes up the session, so the issue keeps its worktree and stays in progress.
@@ -212,6 +253,10 @@ session$run_link."
     elif [[ -n $left ]]; then
         desk_note issue "$issue" "$early It opened no review yet, and the next run on the issue takes up the same \
 session$run_link."
+    elif [[ $desk_runner == local && $status != 0 ]]; then
+        free_issue
+        failure="Local Codex using $desk_local_provider exited with status $status. See the run log for details$run_link."
+        report "$failure" "The local Codex run on feedback from #$reply_to failed$run_link."
     elif [[ -n ${pr:-} ]]; then
         # The issue and the review both get the same note, whichever one asked.
         desk_note issue "$issue" "The agent finished: $pr$run_link."
@@ -220,10 +265,11 @@ session$run_link."
         desk_leave_state "$issue" in-progress
         report "The agent stopped without opening a PR$run_link." \
             "The agent stopped on the feedback from #$reply_to without a PR$run_link."
-        # Nothing waits on the worktree, and a later run makes a new one. One that holds work the agent never pushed
-        # stays.
+        # Nothing waits on the worktree, and a later run makes a new one. A branch that holds work the agent never
+        # pushed stays. Origin's copy goes when origin's main holds it, and worktree.sh cuts a new branch from main.
         desk_end_leftovers "$dest"
         desk_remove_worktree "$dest" "agent/$slug" || true
+        desk_drop_origin_branch "agent/$slug"
     fi
     # An issue that stopped for a decision or without a PR no longer holds the serial slot, so the queue moves on.
     "$desk_lib/serial.sh" release

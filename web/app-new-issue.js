@@ -6,7 +6,7 @@
 import { html } from './vendor/preact-htm.js'
 import { MarkdownBox } from './app-edit.js'
 import { LabelPicker, UNOFFERED } from './app-parts.js'
-import { deskOf, draw, emptyDraft, listedCard, pickTab, post, remember, select, toast, ui } from './app-state.js'
+import { deskOf, draw, emptyDraft, listedCard, pickTab, post, rememberFolds, select, toast, ui } from './app-state.js'
 
 // The key the body's draft, its preview, and whether it previews go under in drafts, previewing, and rendered.
 export const NEW_ISSUE = 'new-issue'
@@ -187,7 +187,7 @@ export function showCreated() {
   }
   ui.created = null
   if (ui.collapsed.delete(card.stage)) {
-    remember('inbox-collapsed', [...ui.collapsed])
+    rememberFolds()
   }
   select(card.id)
   ui.detailTab = 'issue'
@@ -259,10 +259,10 @@ export function NewIssue() {
       onType=${text => { form.typed = text }} /></div>
     <div class="field-row">
       <label class="field"><span class="field-name">Parent</span>
-        <input type="text" class="number-field" placeholder="#12" value=${form.parent} disabled=${form.creating}
+        <input type="text" class="number-field" value=${form.parent} disabled=${form.creating}
           onInput=${event => { form.parent = event.target.value }} /></label>
       <label class="field"><span class="field-name">Blocked By</span>
-        <input type="text" class="number-field" placeholder="#12, #15" value=${form.blockedBy}
+        <input type="text" class="number-field" value=${form.blockedBy}
           disabled=${form.creating} onInput=${event => { form.blockedBy = event.target.value }} /></label>
     </div>
     <div class="new-issue-foot">

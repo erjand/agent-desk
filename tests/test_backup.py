@@ -427,6 +427,19 @@ class RestoreTest(BackupCase):
         # New numbers continue past the restored ones.
         self.assertEqual(again.create(REPO, "issue", "After the restore"), 4)
 
+    def test_the_backup_leaves_the_list_order_out_and_a_restore_lists_each_issue_by_number(self):
+        for title in ("Paint", "Sand", "Oil"):
+            self.store.create(REPO, "issue", title)
+        self.store.list_move(REPO, 4, where="top")
+        self.assertEqual([one["number"] for one in self.store.list_order(REPO)], [4, 6, 5])
+        backup.backup(self.database, self.data, CLOCK)
+        self.assertNotIn("rank", (self.data / REPO / "4.json").read_text())
+        backup.restore(self.data, self.target)
+        again = self.restored()
+        self.assertEqual([one["number"] for one in again.list_order(REPO)], [6, 5, 4])
+        ranks = again.db.execute("SELECT number, list_rank FROM items WHERE project = ? ORDER BY number", (REPO,))
+        self.assertEqual([tuple(row) for row in ranks], [(1, 1), (2, 2), (3, None), (4, 4), (5, 5), (6, 6)])
+
     def test_an_imported_comment_keeps_its_remote_id_and_an_older_backup_restores_without_one(self):
         self.store.import_comments(REPO, [{"remote_id": "IC_kwDO1", "number": 1, "author": "you", "body": "Imported.",
                                            "path": None, "line": None, "head_sha": None, "to_agent": False,

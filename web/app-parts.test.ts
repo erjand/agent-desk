@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 
-import { Avatar, avatarOf, Chip, chipWidth, hueOf, iconOf, Label, labelNamed, labelOf, LabelPicker, offeredLabels,
-  openPicture, Reaction, STATE_LABELS, tagsOf, viewedPicture } from './app-parts.js'
+import { authorName, Avatar, avatarOf, Chip, chipWidth, hueOf, iconOf, Label, labelNamed, labelOf, LabelPicker,
+  offeredLabels, openPicture, PostingFooter, Reaction, STATE_LABELS, tagsOf, viewedPicture } from './app-parts.js'
 import { ui } from './app-state.js'
 
 afterEach(() => {
@@ -206,6 +206,20 @@ function picked(node: unknown, hit: (one: Node) => boolean): Node[] {
   const one = node as Node
   return [...hit(one) ? [one] : [], ...picked(one.props.children, hit)]
 }
+
+test('recorded providers use their bundled marks and the footer names the model and version', () => {
+  for (const [provider, model] of [['anthropic', 'claude-opus-4-6'], ['openai', 'gpt-6.2-sol']]) {
+    const person = { login: 'agent', posting: { provider, model, version: '0.2.4' } }
+    assert.equal(authorName(person), model)
+    const image = picked(Avatar({ person, size: 24 }), node => node.type === 'img')[0]
+    assert.equal(image.props.src, `/${provider}.svg`)
+    const footer = picked(PostingFooter({ person }), node => node.type === 'small')[0]
+    assert.equal(footer.props.children, `Posted by ${model} with agent-desk v0.2.4`)
+  }
+  assert.equal(PostingFooter({ person: { login: 'agent' } }), null)
+  const local = { login: 'agent', posting: { model: 'qwen3', version: '0.2.4' } }
+  assert.equal(Avatar({ person: local }).props.children, 'Q')
+})
 
 test('a label picker draws each offered label in its color, pressed when picked, and presses call back by name', () => {
   ui.server = { desks: [{ id: 'game', labels: { bug: 'd73a4a', web: '1d76db', 'agent-ready': '0e8a16' } }] }

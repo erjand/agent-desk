@@ -484,6 +484,8 @@ async function scheduleOnce(desk: ScheduleDesk, edit: ConfigEdit): Promise<Sched
     if (pushed) {
       await steps.run(['git', 'push', '-q', 'origin', '--delete', SCHEDULE_BRANCH], dest)
     }
+    // The teardown says why it failed or ran too long and still exits 0, so the removal goes on either way.
+    await steps.run([DESK, 'worktree', '--teardown', SCHEDULE_SLUG], desk.main)
     await steps.run(['git', 'worktree', 'remove', '--force', dest], desk.main)
     await steps.run(['git', 'branch', '-q', '-D', SCHEDULE_BRANCH], desk.main)
   }

@@ -36,6 +36,43 @@ class UsageLimitTest(DispatchCase):
         self.dispatcher.tick()
         self.assertEqual([self.status(run) for run in runs], ["running"] * 3)
 
+    def test_codex_headless_runs_use_the_codex_account_at_the_claude_usage_limit(self):
+        self.configure({"issueRunner": "codex"})
+        runs = [self.request("agent", "7", env={"EVENT": "issues"}), self.request("agent", "pr-8"),
+                self.request("agent", "idea-9"), self.request("chore", "audit"), self.request("fix", "12")]
+        self.dispatcher.tick()
+        self.assertEqual([self.status(run) for run in runs], ["running"] * len(runs))
+        self.assertEqual([self.store.run(run)["account"] for run in runs], ["codex"] * len(runs))
+        self.assertTrue(all("AGENT_DESK_ISSUE_RUNNER=codex" in args for args in self.systemd.started))
+
+    def test_switching_the_runner_retries_queued_issues_and_keeps_running_jobs_on_their_runner(self):
+        self.configure({"issueRunner": "claude", "slots": {"agent": 2}})
+        first = self.request("agent", "7")
+        chore = self.request("chore", "audit")
+        self.dispatcher.tick()
+        self.assertEqual(self.status(first), "requested")
+        self.assertEqual(self.waits(first)[0], "usage")
+
+        self.hold["issueRunners"] = {REPO: "local"}
+        self.dispatcher.tick()
+        self.assertEqual(self.status(first), "running")
+        self.assertEqual(self.status(chore), "running")
+        self.assertEqual(self.store.run(first)["account"], "local")
+        self.assertIn("AGENT_DESK_ISSUE_RUNNER=local", self.systemd.started[0])
+
+        del self.hold["issueRunners"]
+        second = self.request("agent", "8")
+        self.dispatcher.tick()
+        self.assertEqual(self.waits(second)[0], "usage")
+        self.usage = (None, None)
+        self.time += dispatch.RETRY_SECONDS
+        self.dispatcher.tick()
+        self.assertEqual(self.status(second), "running")
+        self.assertEqual(self.store.run(second)["account"], "subscription")
+        self.assertEqual(self.status(first), "running")
+        self.assertEqual(self.store.run(first)["account"], "local")
+        self.assertTrue(any("AGENT_DESK_ISSUE_RUNNER=claude" in args for args in self.systemd.started))
+
     def test_check_runs_spend_no_tokens_and_pass_the_limit(self):
         request = {"kind": "check", "project": REPO, "target": "agent/issue-7", "env": {}}
         self.assertIsNone(self.dispatcher.held(request))

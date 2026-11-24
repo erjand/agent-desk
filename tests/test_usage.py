@@ -150,19 +150,39 @@ class FetchTest(UsageCase):
         folder.mkdir()
         (folder / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": TOKEN}}))
 
-    def test_a_fetch_sends_the_token_and_reads_the_seven_day_window(self):
+    def test_a_fetch_sends_the_token_and_reads_both_windows(self):
         self.sign_in()
         sent = []
+        short_reset = "2026-01-01T08:00:00Z"
 
         def urlopen(request, timeout):
             sent.append(request)
-            return io.BytesIO(json.dumps({"five_hour": {"utilization": 3.0},
+            return io.BytesIO(json.dumps({"five_hour": {"utilization": 3.0, "resets_at": short_reset},
                                           "seven_day": {"utilization": 42.5, "resets_at": RESETS}}).encode())
         with mock.patch.object(usage.urllib.request, "urlopen", urlopen):
-            self.assertEqual(usage.fetch(), {"percent": 42.5, "resets_at": RESETS})
+            self.assertEqual(usage.reading(NOW), {"percent": 42.5, "resets_at": RESETS, "read_at": NOW,
+                             "tried_at": NOW, "error": None,
+                             "five_hour": {"percent": 3.0, "resets_at": short_reset, "read_at": NOW}})
         self.assertEqual(sent[0].get_header("Authorization"), f"Bearer {TOKEN}")
         self.assertEqual(sent[0].get_header("Anthropic-beta"), "oauth-2025-04-20")
         self.assertEqual(sent[0].get_header("User-agent"), "agent-desk")
+
+    def test_a_five_hour_reading_neither_renews_nor_replaces_the_week_used_by_the_limit(self):
+        self.sign_in()
+        usage.reading(NOW, Fetch(95.0))
+        now = NOW + usage.STALE_SECONDS
+        reply = io.BytesIO(b'{"five_hour":{"utilization":98},"seven_day":null}')
+        with mock.patch.object(usage.urllib.request, "urlopen", return_value=reply):
+            data = usage.reading(now)
+        self.assertEqual(data["read_at"], NOW)
+        self.assertEqual(data["percent"], 95)
+        self.assertEqual(data["five_hour"], {"percent": 98, "resets_at": None, "read_at": now})
+        self.assertEqual(usage.check({"usageLimit": {"on": True, "percent": 80}}, now), (None, usage.NO_WEEK))
+        reply = io.BytesIO(b'{"seven_day":{"utilization":42}}')
+        with mock.patch.object(usage.urllib.request, "urlopen", return_value=reply):
+            data = usage.reading(now + usage.FETCH_SECONDS)
+        self.assertEqual(data["percent"], 42)
+        self.assertNotIn("five_hour", data)
 
     def test_a_failed_fetch_says_why_without_the_token(self):
         self.sign_in()

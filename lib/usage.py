@@ -11,6 +11,9 @@ beside the desk's mode, so the web page reads it as it reads the mode. While the
 timer, and this command share one fetch. The call spends no tokens. A reading at or over the limit holds the
 dispatcher's agent, chore, and fix requests and the chore timer's ticks; check runs spend no tokens and go on.
 
+The limit holds runs only while lib/account.py's account is `subscription`, since the plan's usage says nothing
+about what an API key spends. On `api` it waits for the subscription, fetches nothing, and holds nothing.
+
 The endpoint is undocumented, and a fetch also fails on an expired sign-in or offline. The limit fails open: it holds
 runs on the last good reading for up to STALE_SECONDS, or until the window that reading counts resets, and then lets
 them start, and this command, the dispatcher's log, and `agent-desk doctor` say it can't read usage.
@@ -30,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import account  # noqa: E402
 import hold  # noqa: E402
 
 CACHE = hold.STATE / "usage.json"
@@ -40,6 +44,7 @@ FETCH_SECONDS = 300
 # How long a reading holds runs when no newer one comes.
 STALE_SECONDS = 3600
 TIMEOUT_SECONDS = 5
+NO_WEEK = "the usage endpoint's answer holds no seven_day.utilization"
 
 
 class UsageError(Exception):
@@ -66,8 +71,18 @@ def token():
     return found
 
 
+def quota(window):
+    """The percentage used and reset time from one window, or an empty dict."""
+    percent = window.get("utilization") if isinstance(window, dict) else None
+    if (not isinstance(percent, (int, float)) or isinstance(percent, bool)
+            or not 0 <= percent <= sys.float_info.max):
+        return {}
+    reset = window.get("resets_at")
+    return {"percent": float(percent), "resets_at": reset if isinstance(reset, str) else None}
+
+
 def fetch():
-    """The 7-day window's usage as a percentage, and when the window resets, from the usage endpoint."""
+    """The weekly and five-hour readings that the usage endpoint supplies."""
     request = urllib.request.Request(URL, headers={"Authorization": f"Bearer {token()}",
                                                   "anthropic-beta": "oauth-2025-04-20",
                                                   "Content-Type": "application/json", "User-Agent": "agent-desk"})
@@ -81,16 +96,18 @@ def fetch():
         raise UsageError(f"the usage endpoint can't be reached ({reason})") from None
     except ValueError:
         raise UsageError("the usage endpoint answered with something other than JSON") from None
-    week = body.get("seven_day") if isinstance(body, dict) else None
-    percent = week.get("utilization") if isinstance(week, dict) else None
-    if not isinstance(percent, (int, float)) or isinstance(percent, bool):
-        raise UsageError("the usage endpoint's answer holds no seven_day.utilization")
-    resets = week.get("resets_at")
-    return {"percent": float(percent), "resets_at": resets if isinstance(resets, str) else None}
+    body = body if isinstance(body, dict) else {}
+    week = quota(body.get("seven_day"))
+    five_hour = quota(body.get("five_hour"))
+    if not week and not five_hour:
+        raise UsageError(NO_WEEK)
+    if five_hour:
+        week["five_hour"] = five_hour
+    return week
 
 
 def cached():
-    """The reading usage.json keeps: `percent`, `resets_at`, `read_at`, `tried_at`, and `error`, or {} for none."""
+    """The weekly reading, any five-hour reading, and the last fetch attempt from usage.json."""
     try:
         data = json.loads(CACHE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -124,7 +141,14 @@ def reading(now=None, get=None):
         if not due(data, now):
             return data
         try:
-            data = {**(get or fetch)(), "read_at": now, "tried_at": now, "error": None}
+            result = dict((get or fetch)())
+            five_hour = result.pop("five_hour", None)
+            if "percent" in result:
+                data = {**result, "read_at": now, "tried_at": now, "error": None}
+            else:
+                data = {**data, "tried_at": now, "error": NO_WEEK}
+            if five_hour:
+                data["five_hour"] = {**five_hour, "read_at": now}
         except UsageError as error:
             data = {**data, "tried_at": now, "error": str(error)}
         new = CACHE.with_suffix(".json.new")
@@ -187,10 +211,10 @@ def problem_of(data):
 def check(state, now=None, get=None):
     """
     Why the limit holds a run that spends Claude tokens, or None, and why it can't read usage, or None. Fetches only
-    while the limit is on.
+    while the limit is on and the account is `subscription`.
     """
     limit = limit_of(state)
-    if limit is None or not limit["on"]:
+    if limit is None or not limit["on"] or account.current(state) != "subscription":
         return None, None
     now = time.time() if now is None else now
     data = reading(now, get)
@@ -216,6 +240,10 @@ def describe(state, now=None, get=None):
         lines = [f"The weekly usage limit is on at {limit['percent']}%."]
     else:
         lines = [f"The weekly usage limit is off; on, it holds new runs at {limit['percent']}%."]
+    if limit is not None and limit["on"] and account.current(state) != "subscription":
+        lines.append("The account is api, so the limit waits for the subscription and holds no runs. Bill the plan "
+                     "with: agent-desk account subscription")
+        return "\n".join(lines)
     reason, problem = check(state, now, get)
     data = cached()
     if isinstance(data.get("percent"), (int, float)) and isinstance(data.get("read_at"), (int, float)):

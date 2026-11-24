@@ -3,8 +3,8 @@ head, and for lib/checks.py's run of one check in its unit."""
 
 import json
 import os
-import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,56 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import branch_watch  # noqa: E402
 import checks  # noqa: E402
-import dispatch  # noqa: E402
 import merges  # noqa: E402
-from test_dispatch import REPO, DispatchCase  # noqa: E402
-
-
-class GitCase(DispatchCase):
-    """A project whose main checkout is a git repository with a commit on main, and checks that log and work in the
-    test's folder."""
-
-    def setUp(self):
-        super().setUp()
-        for patch in (mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}),
-                      mock.patch.object(checks, "LOGS", self.folder / "logs"),
-                      mock.patch.object(checks, "WORK", self.folder / "work")):
-            patch.start()
-            self.addCleanup(patch.stop)
-        self.git("init", "-q", "-b", "main")
-        self.git("config", "user.name", "Test")
-        self.git("config", "user.email", "test@example.com")
-        self.commit("main", "a.txt", "base\n")
-
-    def git(self, *args):
-        done = subprocess.run(["git", "-C", str(self.checkout), *args], capture_output=True, text=True, check=True)
-        return done.stdout.strip()
-
-    def commit(self, branch, name, text):
-        """Commits `text` to file `name` on `branch`, cut from main when it's new, and returns the new head."""
-        if branch != "main":
-            known = subprocess.run(["git", "-C", str(self.checkout), "rev-parse", "-q", "--verify",
-                                    f"refs/heads/{branch}"], capture_output=True).returncode == 0
-            self.git("checkout", "-q", *([branch] if known else ["-b", branch, "main"]))
-        (self.checkout / name).write_text(text)
-        self.git("add", name)
-        self.git("commit", "-q", "-m", f"Change {name}")
-        head = self.git("rev-parse", "HEAD")
-        self.git("checkout", "-q", "main")
-        return head
-
-    def wait(self, seconds):
-        """Lets `seconds` pass a second at a time, with a wake each second."""
-        for _ in range(seconds):
-            self.time += 1
-            self.dispatcher.tick()
-
-    def settle(self):
-        """Lets a head that moves now settle: the next wake reads it, and its check starts SETTLE_SECONDS later."""
-        self.wait(branch_watch.SETTLE_SECONDS + 1)
-
-    def moves(self):
-        return [event["payload"] for event in self.store.events_since(0) if event["type"] == "branch-moved"]
+import run_units  # noqa: E402
+from dispatch_case import REPO, GitCase  # noqa: E402
+from test_worktree import fake_cp  # noqa: E402
 
 
 class WatchTest(GitCase):
@@ -90,7 +44,7 @@ class WatchTest(GitCase):
         self.assertIn('checks.py" "stopped"', next(p for p in properties if p.startswith("ExecStopPost=")))
         args = self.systemd.started[0]
         self.assertEqual(args[args.index("--slice") + 1], "agentdesk.slice")
-        self.assertEqual(args[args.index("--") + 3:], [str(dispatch.LIB / "checks.py"), "run", str(check["id"]),
+        self.assertEqual(args[args.index("--") + 3:], [str(run_units.LIB / "checks.py"), "run", str(check["id"]),
                                                        str(self.checkout)])
         self.assertEqual(self.systemd.env()["AGENT_DESK_UNIT"], unit)
         self.assertEqual(self.systemd.env()["TMPDIR"], f"/tmp/ad-check-{check['id']}")
@@ -186,13 +140,19 @@ class WatchTest(GitCase):
         self.commit("agent/issue-5", "b.txt", "five\n")
         self.commit("agent/issue-6", "b.txt", "six\n")
         self.settle()
-        self.assertEqual(len(self.store.checks(("queued",))), 2)
+        waits = lambda: [(check["wait_gate"], check["wait_reason"]) for check in self.store.checks(("queued",))]
+        self.assertEqual(waits(), [("mode", "Resume")] * 2)
         self.hold = {"state": "running", "picked": []}
         self.wait(1)
         [first] = self.store.checks(("running",))
+        # The check that started clears its reason, and the one left records the slot it waits for.
+        self.assertEqual((first["wait_gate"], first["wait_reason"]), (None, None))
+        self.assertEqual(waits(), [("slot", "a free check slot")])
         self.store.check_ended(first["id"], "passed")
         self.wait(1)
-        self.assertEqual([check["branch"] for check in self.store.checks(("running",))], ["agent/issue-6"])
+        [second] = self.store.checks(("running",))
+        self.assertEqual((second["branch"], second["wait_gate"]), ("agent/issue-6", None))
+        self.assertEqual(sum(" waits: " in line for line in self.said), 3)
 
     def test_a_check_slot_override_holds_checks_past_its_count(self):
         self.configure({"test": "just test", "slots": {"check": 2}})
@@ -205,6 +165,40 @@ class WatchTest(GitCase):
         self.assertEqual((waiting["wait_gate"], waiting["wait_reason"]), ("slot", "a free check slot"))
         self.assertIn(f"Check {waiting['id']} of {waiting['branch']} waits: its project's 1 check slots are busy.",
                       self.said)
+
+    def checked(self, status):
+        return sorted(check["branch"] for check in self.store.checks((status,)))
+
+    def test_a_held_project_starts_the_check_of_a_working_agent_run_and_holds_the_rest_for_resume(self):
+        self.request("agent", "5")
+        self.dispatcher.tick()
+        self.hold = {"state": "running", "picked": [], "projects": {REPO: "held"}}
+        self.commit("agent/issue-5", "b.txt", "five\n")
+        self.commit("agent/issue-6", "b.txt", "six\n")
+        self.settle()
+        self.assertEqual(self.checked("running"), ["agent/issue-5"])
+        self.assertEqual(self.checked("queued"), ["agent/issue-6"])
+        self.hold = {"state": "running", "picked": []}
+        self.wait(1)
+        self.assertEqual(self.checked("running"), ["agent/issue-5", "agent/issue-6"])
+
+    def test_a_held_project_starts_the_check_of_a_working_fix_run_within_its_check_slots(self):
+        self.configure({"test": "just test", "slots": {"check": 1}})
+        review = self.store.create(REPO, "review", "Five", branch="agent/issue-5")
+        self.request("fix", str(review))
+        self.request("agent", "7")
+        self.dispatcher.tick()
+        self.assertEqual(len(self.dispatcher.running), 2)
+        self.hold = {"state": "held", "picked": []}
+        for branch in ("agent/issue-5", "agent/issue-6", "agent/issue-7"):
+            self.commit(branch, "b.txt", f"{branch}\n")
+        self.settle()
+        [first] = self.store.checks(("running",))
+        self.assertIn(first["branch"], ("agent/issue-5", "agent/issue-7"))
+        self.store.check_ended(first["id"], "passed")
+        self.wait(1)
+        self.assertEqual(self.checked("running"), sorted({"agent/issue-5", "agent/issue-7"} - {first["branch"]}))
+        self.assertEqual(self.checked("queued"), ["agent/issue-6"])
 
     def test_a_restart_checks_a_move_made_while_the_dispatcher_was_down_and_ends_a_vanished_check(self):
         self.commit("agent/issue-5", "b.txt", "one\n")
@@ -297,6 +291,118 @@ class WatchTest(GitCase):
         self.assertEqual(self.store.item(REPO, review, "review")["mergeable"], "CONFLICTING")
 
 
+class RecheckTest(GitCase):
+    """The re-check of a ready review whose base moved after its head's check passed, with `testOnBaseMove` on."""
+
+    def setUp(self):
+        super().setUp()
+        self.configure({"test": "just test", "testOnBaseMove": True})
+        self.review = self.store.create(REPO, "review", "Five", branch="agent/issue-5")
+        self.head = self.commit("agent/issue-5", "b.txt", "work\n")
+        self.settle()
+        [check] = self.store.checks(("running",))
+        self.finish(check["id"], self.git("rev-parse", "main"))
+
+    def finish(self, check, base_sha, status="passed"):
+        """Ends a running check as its unit does once it merged main at `base_sha`."""
+        if not self.store.check(check)["base_sha"]:
+            self.store.check_merges(check, "main", base_sha)
+        self.store.check_ended(check, status)
+        self.systemd.live.discard(checks.unit_name(REPO, check))
+
+    def rechecks(self, statuses=("queued", "running")):
+        return [row for row in self.store.checks(statuses) if row["recheck"]]
+
+    def test_a_base_that_moves_once_gets_one_re_check_of_the_head_merged_with_it_a_minute_later(self):
+        main = self.commit("main", "c.txt", "main\n")
+        self.wait(1)
+        self.assertEqual(self.rechecks(), [])
+        self.wait(branch_watch.SETTLE_SECONDS)
+        [recheck] = self.rechecks(("running",))
+        self.assertEqual((recheck["head_sha"], recheck["base"], recheck["base_sha"], recheck["attempt"]),
+                         (self.head, "main", main, 1))
+        self.assertEqual(self.store.head_checks(REPO, self.head)[0]["id"], recheck["id"])
+        self.finish(recheck["id"], main)
+        self.settle()
+        self.assertEqual([row["id"] for row in self.store.checks(("queued", "running", "passed"))
+                          if row["recheck"]], [recheck["id"]])
+
+    def test_a_base_that_moves_three_times_in_a_row_gets_one_re_check_of_its_newest_commit(self):
+        for name in ("c.txt", "d.txt", "e.txt"):
+            newest = self.commit("main", name, "main\n")
+            self.wait(20)
+        self.assertEqual(self.rechecks(), [])
+        self.wait(branch_watch.SETTLE_SECONDS)
+        [recheck] = self.rechecks(("running",))
+        self.assertEqual(recheck["base_sha"], newest)
+        # A move while it runs supersedes it and stops its unit, and the newer commit gets a re-check of its own.
+        newer = self.commit("main", "f.txt", "main\n")
+        self.wait(1)
+        self.assertEqual(self.store.check(recheck["id"])["status"], "superseded")
+        self.assertEqual(self.systemd.stopped, [checks.unit_name(REPO, recheck["id"])])
+        self.wait(branch_watch.SETTLE_SECONDS)
+        [again] = self.rechecks(("running",))
+        self.assertEqual(again["base_sha"], newer)
+        # The head's own result stands while the re-check runs.
+        [shown] = self.store.newest_checks(REPO, "agent/issue-5", self.head)
+        self.assertEqual((shown["status"], shown["recheck"]), ("passed", False))
+
+    def test_a_review_that_conflicts_with_its_moved_base_gets_no_re_check(self):
+        self.commit("main", "b.txt", "main's own\n")
+        self.wait(branch_watch.SETTLE_SECONDS + 1)
+        self.assertEqual(self.store.branch(REPO, "agent/issue-5")["mergeable"], "CONFLICTING")
+        self.assertEqual(self.rechecks(), [])
+
+    def test_a_project_with_the_key_off_gets_no_re_check_and_cancels_one_queued(self):
+        self.configure({"test": "just test"})
+        self.commit("main", "c.txt", "main\n")
+        self.wait(branch_watch.SETTLE_SECONDS + 1)
+        self.assertEqual(self.rechecks(), [])
+        queued = self.store.check_queue(REPO, "agent/issue-5", self.head, "main", self.git("rev-parse", "main"),
+                                        recheck=True)
+        self.wait(1)
+        self.assertEqual(self.store.check(queued)["status"], "cancelled")
+
+    def test_a_draft_a_review_an_agent_works_and_a_head_that_failed_get_no_re_check(self):
+        self.store.review_update(REPO, self.review, draft=True)
+        self.commit("main", "c.txt", "main\n")
+        self.wait(branch_watch.SETTLE_SECONDS + 1)
+        self.assertEqual(self.rechecks(), [])
+        self.store.review_update(REPO, self.review, draft=False)
+        run = self.request("agent", "5")
+        self.wait(branch_watch.SETTLE_SECONDS + 1)
+        self.assertEqual(self.rechecks(), [])
+        self.end(run)
+        self.store.create(REPO, "review", "Six", branch="agent/issue-6")
+        self.commit("agent/issue-6", "g.txt", "six\n")
+        self.settle()
+        [check] = [row for row in self.store.checks(("running",)) if row["branch"] == "agent/issue-6"]
+        self.finish(check["id"], self.git("rev-parse", "main"), "failed")
+        self.commit("main", "d.txt", "main\n")
+        self.wait(branch_watch.SETTLE_SECONDS + 1)
+        # Once its run ends, the ready review of agent/issue-5 gets its re-check, and the failed head none.
+        self.assertEqual([row["branch"] for row in self.rechecks()], ["agent/issue-5"])
+
+    def test_a_re_check_starts_after_the_check_of_a_moved_head_and_waits_for_a_free_slot(self):
+        self.configure({"test": "just test", "testOnBaseMove": True, "slots": {"check": 1}})
+        self.commit("agent/issue-6", "g.txt", "six\n")
+        self.settle()
+        [six] = self.store.checks(("running",))
+        self.commit("main", "c.txt", "main\n")
+        self.wait(branch_watch.SETTLE_SECONDS + 1)
+        [recheck] = self.rechecks(("queued",))
+        self.assertEqual((recheck["wait_gate"], recheck["wait_reason"]), ("slot", "a free check slot"))
+        self.commit("agent/issue-7", "h.txt", "seven\n")
+        self.settle()
+        self.finish(six["id"], self.git("rev-parse", "main"))
+        self.wait(1)
+        [running] = self.store.checks(("running",))
+        self.assertEqual(running["branch"], "agent/issue-7")
+        self.finish(running["id"], self.git("rev-parse", "main"))
+        self.wait(1)
+        self.assertEqual([row["id"] for row in self.store.checks(("running",))], [recheck["id"]])
+
+
 class CheckRunTest(GitCase):
     """lib/checks.py's run of one check in its unit."""
 
@@ -332,6 +438,25 @@ class CheckRunTest(GitCase):
         self.assertEqual(self.worktrees(), 1)
         self.assertEqual(self.store.checks(("queued",)), [])
 
+    def test_a_seed_copy_that_meets_a_vanished_file_copies_again_and_a_copy_that_keeps_meeting_one_fails_setup(self):
+        (self.checkout / "target").mkdir()
+        (self.checkout / "target" / "app").write_text("built\n")
+        self.configure({"test": "test -f target/app && test -f built", "worktree": {"seeds": ["target"],
+                                                                                    "setup": "touch built"}})
+        fakes = self.folder / "fakes"
+        fakes.mkdir()
+        path = {"PATH": f"{fakes}:{os.environ['PATH']}"}
+        for failures, outcome in ((1, ("passed", "test")), (3, ("failed", "setup"))):
+            calls = fake_cp(fakes, failures)
+            calls.unlink(missing_ok=True)
+            check = self.queue(self.commit("agent/issue-5", "b.txt", f"{failures}\n"))
+            with mock.patch.dict(os.environ, path):
+                row = self.run_check(check)
+            self.assertEqual((row["status"], row["name"]), outcome, self.log(check))
+            self.assertEqual(len(calls.read_text().splitlines()), min(failures + 1, 3))
+            self.assertIn("Pass 1 of 3 met files gone from", self.log(check))
+            self.assertFalse(checks.work_path(REPO, check).exists())
+
     def test_a_merge_conflict_fails_the_check_as_merge_without_testing_or_a_rerun(self):
         self.configure({"test": "touch $HOME/tested"})
         head = self.commit("agent/issue-5", "a.txt", "branch\n")
@@ -358,8 +483,24 @@ class CheckRunTest(GitCase):
         check = self.queue(head)
         row = self.run_check(check)
         self.assertEqual((row["status"], row["name"]), ("passed", "test"), self.log(check))
-        self.assertTrue(self.log(check).startswith(f"Check {check} of agent/issue-5 at {head} merged with local-desk,"))
+        desk = self.git("rev-parse", "origin/local-desk")
+        self.assertTrue(self.log(check).startswith(f"Check {check} of agent/issue-5 at {head} merged with local-desk at"
+                                                   f" {desk}, attempt 1."))
+        self.assertEqual((row["base"], row["base_sha"], row["recheck"]), ("local-desk", desk, 0))
         self.assertIn("== Merge local-desk\n", self.log(check))
+
+    def test_a_re_check_merges_the_commit_of_its_base_it_names_and_records_nothing_newer(self):
+        self.configure({"test": "test -f c.txt && test ! -f d.txt"})
+        head = self.commit("agent/issue-5", "b.txt", "work\n")
+        named = self.commit("main", "c.txt", "main\n")
+        self.commit("main", "d.txt", "main\n")
+        check = self.store.check_queue(REPO, "agent/issue-5", head, "main", named, recheck=True)
+        self.store.check_started(check, checks.log_path(REPO, check))
+        row = self.run_check(check)
+        self.assertEqual((row["status"], row["base_sha"]), ("passed", named), self.log(check))
+        self.assertTrue(self.log(check).startswith(
+            f"Check {check} of agent/issue-5 at {head} merged with main at {named}, attempt 1, a re-check after the"
+            " base moved."))
 
     def test_a_branch_without_an_open_review_merges_main(self):
         self.configure({"test": "test -f main.txt"})
@@ -404,6 +545,61 @@ class CheckRunTest(GitCase):
         self.assertEqual([row["attempt"] for row in self.store.checks(("queued",))], [2])
         self.assertFalse(work.exists())
         self.assertEqual(self.worktrees(), 1)
+
+    def test_a_check_runs_the_teardown_in_its_worktree_before_removing_it(self):
+        torn = self.folder / "torn"
+        self.configure({"test": "true", "worktree": {"setup": "touch built", "teardown": f"ls >{torn}; touch left"}})
+        check = self.queue(self.commit("agent/issue-5", "b.txt", "work\n"))
+        row = self.run_check(check)
+        self.assertEqual(row["status"], "passed", self.log(check))
+        self.assertEqual(torn.read_text().split(), ["a.txt", "b.txt", "built"])
+        self.assertIn("== Tear down: ls", self.log(check))
+        self.assertFalse(checks.work_path(REPO, check).exists())
+        self.assertEqual(self.worktrees(), 1)
+
+    def test_a_failed_teardown_is_logged_and_the_worktree_still_goes(self):
+        self.configure({"test": "true", "worktree": {"teardown": "echo no database; exit 4"}})
+        check = self.queue(self.commit("agent/issue-5", "b.txt", "work\n"))
+        self.assertEqual(self.run_check(check)["status"], "passed", self.log(check))
+        self.assertIn("no database\nThe worktree teardown failed with status 4.\n", self.log(check))
+        self.assertFalse(checks.work_path(REPO, check).exists())
+        self.assertEqual(self.worktrees(), 1)
+
+    def test_a_teardown_past_its_limit_is_stopped_with_what_it_started(self):
+        work = self.folder / "work"
+        work.mkdir()
+        self.configure({"worktree": {"teardown": f"sleep 30 & echo $! >{self.folder}/child; wait"}})
+        log = self.folder / "teardown.log"
+        with mock.patch.object(checks, "TEARDOWN_SECONDS", 0.5), open(log, "w") as out:
+            checks.teardown(self.checkout, work, out)
+        self.assertIn("The worktree teardown ran past 0.5s and was stopped.", log.read_text())
+        # The killed sleep may stay a zombie for a moment, until the process that adopts it reaps it.
+        stat = Path(f"/proc/{int((self.folder / 'child').read_text())}/stat")
+        for _ in range(50):
+            try:
+                if stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                    break
+            except FileNotFoundError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("the teardown's sleep outlived its limit")
+
+    def test_a_project_without_a_teardown_runs_none(self):
+        self.configure({"test": "true"})
+        check = self.queue(self.commit("agent/issue-5", "b.txt", "work\n"))
+        self.assertEqual(self.run_check(check)["status"], "passed", self.log(check))
+        self.assertNotIn("Tear down", self.log(check))
+
+    def test_the_exit_handler_runs_the_teardown_into_the_checks_log(self):
+        self.configure({"worktree": {"teardown": "echo torn down"}})
+        head = self.commit("agent/issue-5", "b.txt", "work\n")
+        check = self.queue(head)
+        work = checks.work_path(REPO, check)
+        self.git("worktree", "add", "-q", "--detach", str(work), head)
+        checks.stopped(self.store, check, str(self.checkout), {"SERVICE_RESULT": "timeout", "EXIT_CODE": "killed"})
+        self.assertIn("== Tear down: echo torn down\ntorn down\n", self.log(check))
+        self.assertFalse(work.exists())
 
     def test_the_exit_handler_leaves_a_recorded_end_alone(self):
         check = self.queue(self.commit("agent/issue-5", "b.txt", "work\n"))

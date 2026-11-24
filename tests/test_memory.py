@@ -44,6 +44,55 @@ class NeedTest(unittest.TestCase):
         self.assertEqual(memory.need("org/game", "agent", ["blender"], SETTINGS, history), 8.4)
         self.assertEqual(memory.need("org/game", "agent", ["assets"], SETTINGS, runs(6, 2.0)), 14)
 
+    def test_a_heavy_spike_the_project_fixed_stops_setting_the_need_once_newer_runs_are_light(self):
+        history = runs(300, 1.0) + runs(40, 8.5) + runs(30, 1.1)
+        self.assertEqual(memory.need("org/game", "agent", [], SETTINGS, history), 1.3)
+
+    def test_a_project_whose_newest_runs_grew_heavy_gets_the_room_they_need(self):
+        history = runs(330, 1.0) + runs(40, 8.5)
+        self.assertEqual(memory.need("org/game", "agent", [], SETTINGS, history), 10.2)
+
+    def test_a_label_raises_the_need_from_its_newest_runs_alone(self):
+        history = runs(40, 9.0, labels=["blender"]) + runs(30, 3.0, labels=["blender"]) + runs(30, 1.0)
+        self.assertEqual(memory.need("org/game", "agent", ["blender"], SETTINGS, history), 3.6)
+
+
+class LabelCapTest(unittest.TestCase):
+    CAPPED = {**SETTINGS, "labelCapGB": {"documentation": 3, "text": 2}}
+
+    def test_a_run_without_a_capped_label_keeps_its_need(self):
+        history = runs(30, 10.5) + runs(2, 1.0, labels=["documentation"])
+        self.assertEqual(memory.need("org/game", "agent", ["enhancement"], self.CAPPED, history), 12.6)
+        self.assertEqual(memory.need("org/game", "agent", ["assets"], self.CAPPED, []), 14)
+
+    def test_a_configured_cap_lowers_a_learned_need(self):
+        history = runs(30, 10.5)
+        self.assertEqual(memory.need("org/game", "agent", [], self.CAPPED, history), 12.6)
+        self.assertEqual(memory.need("org/game", "agent", ["documentation", "enhancement"], self.CAPPED, history), 3)
+
+    def test_a_cap_beats_a_raise_from_label_gb_or_another_labels_learned_need(self):
+        self.assertEqual(memory.need("org/game", "agent", ["assets", "documentation"], self.CAPPED, []), 3)
+        history = runs(6, 2.0) + runs(3, 7.0, labels=["blender"])
+        self.assertEqual(memory.need("org/game", "agent", ["blender", "documentation"], self.CAPPED, history), 3)
+
+    def test_the_smallest_of_two_caps_wins(self):
+        self.assertEqual(memory.need("org/game", "agent", ["documentation", "text"], self.CAPPED, runs(30, 10.5)), 2)
+
+    def test_a_label_learns_its_cap_from_three_runs_of_its_kind(self):
+        history = runs(30, 10.5) + runs(2, 1.5, labels=["documentation"])
+        self.assertEqual(memory.need("org/game", "agent", ["documentation"], self.CAPPED, history), 3)
+        history += runs(1, 1.5, labels=["documentation"])
+        self.assertEqual(memory.need("org/game", "agent", ["documentation"], self.CAPPED, history), 1.8)
+        self.assertEqual(memory.need("org/game", "chore/audit", ["documentation"], self.CAPPED, history), 3)
+
+    def test_a_configured_or_learned_cap_never_raises_the_need(self):
+        self.assertEqual(memory.need("org/game", "agent", ["documentation"], self.CAPPED, runs(30, 2.0)), 2.4)
+        settings = {**self.CAPPED, "needGB": {"agent": 4}}
+        self.assertEqual(memory.need("org/game", "agent", ["text"], settings, runs(3, 6.0, labels=["text"])), 4)
+
+    def test_an_unset_cap_defaults_to_none(self):
+        self.assertEqual(memory.resources("/nonexistent")["labelCapGB"], {})
+
 
 class SettleTest(unittest.TestCase):
     def test_too_few_timed_runs_learn_no_settle_time(self):
@@ -315,7 +364,8 @@ class GateTest(unittest.TestCase):
             self.assertEqual(memory.spare("org/game", "agent", [], 0), (False, 10, short))
             self.assertEqual(memory.spare("org/game", "agent", [], 121 * 60), (True, 10, short))
             reason = memory.spare("org/game", "agent", [], 0)[2]
-            self.assertEqual((reason.short, reason.free, reason.needed), ("memory: 17.0 GB free of 18 GB needed", 17.0, 18))
+            self.assertEqual((reason.short, reason.free, reason.needed),
+                             ("memory: 17.0 GB free of 10 GB + 8 GB reserve", 17.0, 18))
         with mock.patch.object(memory, "available_gb", lambda: 18.0):
             with memory.claims_locked():
                 self.assertEqual(memory.spare("org/game", "agent", [], 0), (True, 10, None))
@@ -470,6 +520,15 @@ class WaitTest(unittest.TestCase):
                 memory.wait("org/game", "agent", [], 999999999, "/tmp/peak")
             self.assertEqual(memory.read_claim(self.state / "c" / "999999999")[2:], (None, Path("/tmp/peak")))
             self.assertNotIn("may shrink", out.getvalue())
+
+    def test_a_run_with_a_capped_label_claims_the_capped_need(self):
+        settings = {**SETTINGS, "labelCapGB": {"documentation": 3}}
+        with mock.patch.object(memory, "available_gb", lambda: 60.0), \
+                mock.patch.object(memory, "resources", lambda: settings), \
+                mock.patch.object(memory, "history", lambda: runs(30, 10.5)), redirect_stdout(io.StringIO()) as out:
+            memory.wait("org/game", "agent", ["documentation", "enhancement"], os.getpid())
+        self.assertIn("Starting with 3 GB claimed.", out.getvalue())
+        self.assertEqual((self.state / "c" / str(os.getpid())).read_text().split()[0], "3")
 
     def test_a_run_held_too_long_starts_and_says_what_held_it(self):
         pressure_file(self.state, 40.0)

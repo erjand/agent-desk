@@ -70,10 +70,10 @@ function row() {
 }
 const title = ["Show what uses the machine's resources"]
 
-test('with no sidebar, the row draws the gauges, New Issue, History, Runners, Chat, and help, none pressed', () => {
+test('with no sidebar, the row draws the gauges, New Issue, History, Runners, Chat, GitHub, and help, none pressed', () => {
   ui.server = { desks: [], gauges }
   assert.deepEqual(row(), { parts: ['gauges', 'New Issue i undefined', 'History h false', 'Runners \\ false',
-    'Chat ` false', '? undefined'],
+    'Chat ` false', 'GitHub g false', '? undefined'],
     gauges: ['RAM 40% | CPU 12%'], title })
 })
 
@@ -81,7 +81,7 @@ test('with History shown, the pill keeps the gauges and History is pressed', () 
   ui.server = { desks: [], gauges }
   ui.side = 'history'
   assert.deepEqual(row(), { parts: ['gauges', 'New Issue i undefined', 'History h true', 'Runners \\ false',
-    'Chat ` false', '? undefined'],
+    'Chat ` false', 'GitHub g false', '? undefined'],
     gauges: ['RAM 40% | CPU 12%'], title })
 })
 
@@ -89,7 +89,7 @@ test("with Runners shown, the pill keeps the gauges in their colors, and the sid
   ui.server = { desks: [], gauges }
   ui.side = 'runners'
   assert.deepEqual(row(), { parts: ['gauges', 'New Issue i undefined', 'History h false', 'Runners \\ true',
-    'Chat ` false', '? undefined'],
+    'Chat ` false', 'GitHub g false', '? undefined'],
     gauges: ['RAM 40% | CPU 12%'], title })
   const colors = find(draw(Header()), 'gauges').flatMap(one => (one.props.children as Drawn[]).flat())
     .filter((one): one is { props: Record<string, unknown> } => typeof one === 'object' && one !== null)
@@ -98,6 +98,45 @@ test("with Runners shown, the pill keeps the gauges in their colors, and the sid
   const side = draw(Runners({ shown: new Set() }))
   assert.deepEqual(find(side, 'gauges'), [])
   assert.equal(squash(textOf(find(side, 'side-head'))), 'Runners')
+})
+
+// A project whose board reads `notices`, one GitHub row each in its tone, a failing one in the warning tone.
+function githubDesk(id: string, notices: string[]) {
+  return { id, title: id, board: { error: null, needs: [], github: notices.map((notice, at) => ({ key: `github-${at}`,
+    title: `row ${at}`, note: notice, notice })) } }
+}
+
+test("the GitHub button counts the failing rows in the warning tone, whether or not the sidebar shows", () => {
+  ui.server = { desks: [githubDesk('game', ['warning', 'muted']), githubDesk('tools', ['warning'])], gauges }
+  const counter = () => find(find(draw(Header()), 'side-row'), 'counter').map(one => [one.props.class,
+    squash(textOf(one as Drawn))])
+  assert.deepEqual(row().parts.slice(-2), ['GitHub 2 g false', '? undefined'])
+  assert.deepEqual(counter(), [['counter warning', '2']])
+  ui.side = 'github'
+  assert.deepEqual(row().parts.slice(-2), ['GitHub 2 g true', '? undefined'])
+  assert.deepEqual(counter(), [['counter warning', '2']])
+  // A project's tab counts only its own rows.
+  ui.tab = 'tools'
+  assert.deepEqual(counter(), [['counter warning', '1']])
+  ui.server = { desks: [githubDesk('game', ['muted'])], gauges }
+  ui.tab = 'all'
+  assert.deepEqual(counter(), [])
+})
+
+test('the GitHub button shows the GitHub sidebar in place of the others, hides it again, and remembers each', () => {
+  ui.server = { desks: [], gauges }
+  ui.side = 'runners'
+  const saved: [string, string][] = []
+  Object.assign(globalThis, { localStorage: { setItem: (key: string, value: string) => saved.push([key, value]) } })
+  const github = () => ((find(draw(Header()), 'side-row')[0]!.props.children as Drawn[]).flat()
+    .filter((one): one is { props: Record<string, unknown> } => typeof one === 'object' && one !== null
+      && squash(textOf(one)).startsWith('GitHub')))[0]!
+  ;(github().props.onClick as () => void)()
+  assert.equal(ui.side, 'github')
+  ;(github().props.onClick as () => void)()
+  assert.equal(ui.side, null)
+  assert.deepEqual(saved, [['side-shown', '"github"'], ['side-shown', 'null']])
+  Reflect.deleteProperty(globalThis, 'localStorage')
 })
 
 test('the gauges pill is a button that shows the Resources view, pressed while it shows, and closes it again', t => {
@@ -122,17 +161,18 @@ test('the gauges pill is a button that shows the Resources view, pressed while i
 test('the bar draws no pill before the server sends gauges', () => {
   ui.server = { desks: [] }
   assert.deepEqual(row().parts, ['New Issue i undefined', 'History h false', 'Runners \\ false', 'Chat ` false',
-    '? undefined'])
+    'GitHub g false', '? undefined'])
 })
 
-test('the restart notice takes a line under the row, and the Runners sidebar draws none', () => {
+test('the restart notice takes a line under the page\'s name, and the Runners sidebar draws none', () => {
   ui.server = { desks: [], gauges, code: 'Restart the web server.' }
   ui.side = 'runners'
-  const [drawn] = find(draw(Header()), 'meters')
+  const [drawn] = find(draw(Header()), 'brand')
   const classes = (drawn.props.children as Drawn[]).flat()
     .filter((one): one is { props: Record<string, unknown> } => typeof one === 'object' && one !== null)
     .map(one => one.props.class)
-  assert.deepEqual(classes, ['side-row', 'code-notice warning'])
+  assert.deepEqual(classes, ['name', 'code-notice warning'])
+  assert.deepEqual(find(find(draw(Header()), 'meters'), 'code-notice'), [])
   assert.deepEqual(find(draw(Runners({ shown: new Set() })), 'code-notice'), [])
 })
 
@@ -225,7 +265,7 @@ test('the bar reads the name, the Refresh icon button, the status, then the mode
   ui.connected = true
   ui.server = { desks: [{ id: 'game', repo: 'me/game', title: 'Game', board: { at: '12:04', needs: [] } }],
     hold: { state: 'running', projects: {} } }
-  assert.deepEqual(bar(), ['strong.name', 'button Refresh', 'span.muted', 'span.hold', 'span.meters'])
+  assert.deepEqual(bar(), ['span.brand', 'button Refresh', 'span.muted', 'span.hold', 'span.meters'])
   const [status] = find(draw(Header()), 'muted')
   assert.equal(squash(textOf(status)), 'Updated 12:04')
   assert.equal(refresh()['data-tip'], 'Refresh')
@@ -267,26 +307,30 @@ test('each mode button names its mode for the CSS, and on All with mixed modes n
     assert.equal(pressed.props['data-mode'], 'held')
   })
 
-test('the usage limit sits beside the mode buttons, and reads and acts the same on All and on a project\'s tab', () => {
-  ui.connected = true
-  ui.server = { desks: [{ id: 'game', repo: 'me/game', title: 'Game', board: { at: '12:04', needs: [] } }],
-    hold: { state: 'running', projects: {} },
-    usage: { on: true, limit: 80, percent: 81.2, readAt: 1, resetsAt: null, problem: null } }
-  assert.deepEqual(bar(), ['strong.name', 'button Refresh', 'span.muted', 'span.hold', 'span.usage', 'span.meters'])
-  const control = () => {
-    const [button] = find(draw(Header()), 'usage-button')
-    return { text: squash(textOf(button)), class: button.props.class, tip: button.props['data-tip'],
-      expanded: button.props['aria-expanded'], popup: button.props['aria-haspopup'] }
-  }
-  const all = control()
-  assert.deepEqual(all, { text: 'Week 81% / 80%', class: 'usage-button over',
-    tip: 'Weekly plan usage is 81%, at the 80% limit, so new agent, chore, and fix runs wait', expanded: 'false',
-    popup: 'dialog' })
-  ui.tab = 'game'
-  assert.deepEqual(control(), all)
-})
+test('the billing control sits beside the mode buttons and shows the sole account on All and on its project\'s tab',
+  () => {
+    ui.connected = true
+    ui.server = { desks: [{ id: 'game', repo: 'me/game', title: 'Game', board: { at: '12:04', needs: [] },
+      issueRunner: { config: 'claude', override: null, effective: 'claude' } }],
+      hold: { state: 'running', projects: {} },
+      usage: { on: true, limit: 80, percent: 81.2, readAt: 1, resetsAt: null, problem: null },
+      account: { account: 'subscription', spent: 63.2, budget: { on: true, dollars: 200 }, held: false,
+        key: { set: false, ending: null } } }
+    assert.deepEqual(bar(), ['span.brand', 'button Refresh', 'span.muted', 'span.hold', 'span.usage', 'span.meters'])
+    const control = () => {
+      const [button] = find(draw(Header()), 'usage-button')
+      return { text: squash(textOf(button)), class: button.props.class, tip: button.props['data-tip'],
+        described: button.props['aria-description'],
+        expanded: button.props['aria-expanded'], popup: button.props['aria-haspopup'] }
+    }
+    const all = control()
+    assert.deepEqual(all, { text: 'Claude Weekly 18% left', class: 'usage-button over',
+      tip: undefined, described: 'Claude. Weekly 18% left.', expanded: 'false', popup: 'dialog' })
+    ui.tab = 'game'
+    assert.deepEqual(control(), all)
+  })
 
 test('the bar draws no usage limit before the server says its state', () => {
   ui.server = { desks: [], hold: { state: 'running', projects: {} } }
-  assert.deepEqual(bar(), ['strong.name', 'button Refresh', 'span.offline', 'span.hold', 'span.meters'])
+  assert.deepEqual(bar(), ['span.brand', 'button Refresh', 'span.offline', 'span.hold', 'span.meters'])
 })

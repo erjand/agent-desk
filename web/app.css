@@ -285,6 +285,8 @@ kbd {
 .runners-table td.runner { color: var(--muted); font-size: 12px; }
 .runners-table td.runner.working { color: var(--runners); }
 .runners-table td.runner.full { color: var(--warning); font-weight: 600; }
+/* An agent slot working an issue labelled gpu: small enough to fit beside `agent` in the Runner column. */
+.runners-table td.runner .gpu-mark { font-size: 10px; font-weight: 600; text-transform: uppercase; }
 .runners-table .num { display: flex; gap: 4px; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
 .runners-table td.time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 /* A busy row's title is a button, so the keyboard reaches it, drawn as the plain text around it. */
@@ -304,9 +306,23 @@ kbd {
   white-space: nowrap;
 }
 .runners-table td.title button:focus-visible { outline: none; }
+/* A project's agent and gpu steppers: − and + around the count, which the config's count follows when an override sets
+   it, then Reset, each button small enough to keep the row as tall as a slot's. */
+.runners-table td.slots .slot-line { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.runners-table td.slots .stepper { display: inline-flex; align-items: center; gap: 4px; }
+.runners-table td.slots button { height: 20px; min-width: 20px; padding: 0 6px; font-size: 12px; line-height: 1; }
+.runners-table td.slots .slot-count { min-width: 2ch; text-align: center; font: 12px var(--mono);
+  font-variant-numeric: tabular-nums; }
 .runners-table tr.pressable { cursor: pointer; }
 .runners-table tr.pressable:hover td, .runners-table tr.pressable:focus-within td { background: var(--hover); }
 .runners-table tr.pressable:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The GitHub sidebar's table, in the Runners table's look: Push fits `agent branches`, and Status takes the rest and
+   wraps, so an error reads whole. */
+.github-table col.g-name { width: calc(15ch + 10px); }
+/* A row whose Status wraps keeps its other cells on its first line. */
+.github-table td { padding-top: 4px; padding-bottom: 4px; vertical-align: top; }
+.github-table td.g-note { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.github-side .side-head .counter { margin-left: 0; }
 
 .split {
   flex: 1;
@@ -360,10 +376,11 @@ kbd {
   font: 600 12px var(--sans);
 }
 .history-table th.cost, .history-table td.cost { text-align: right; }
-/* The Item column takes what the others leave: Time fits a date and a time, Project its chip, and Number two
-   four-digit numbers and the arrow between them, as `#1985 → #1986`, measured in the numbers' own font. */
-.history-table th.at { width: 9.5em; }
-.history-table th.desk { width: 7.5em; }
+/* The Item column takes what the others leave: Time fits a date and a time, as `May 31 10:08 PM`, Project the chip of a
+   name up to about a dozen characters, and Number two four-digit numbers and the arrow between them, as
+   `#1985 → #1986`, measured in the numbers' own font. */
+.history-table th.at { width: 8.5em; }
+.history-table th.desk { width: 8.5em; }
 .history-table th.number { width: calc(11ch + 16px); font: 12px var(--mono); }
 .history-table .num { display: flex; gap: 4px; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
 .history-table th.cost { width: 4.5em; }
@@ -448,6 +465,16 @@ kbd {
   font-size: 12px;
   font-weight: 600;
 }
+
+/* A group's Sort asks to confirm in its place, beside the heading. */
+.box-heading .order-sort {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  font-size: 12px;
+}
 .box-row, .item, .empty { border-top: 1px solid var(--border-muted); }
 .empty { padding: 10px 16px; color: var(--muted); }
 
@@ -472,9 +499,11 @@ kbd {
 
 .item:hover { background: var(--hover); }
 .item.selected { background: color-mix(in srgb, var(--accent) 12%, var(--bg)); box-shadow: inset 3px 0 var(--accent); }
-/* A queued card that drags shows a grab cursor and fades while it moves, and the line where it lands sits on the edge of
-   the card under the pointer, beside any selected card's bar. */
-.item[draggable="true"] { cursor: grab; }
+/* A card that drags shows a grab cursor and fades while it moves, and the line where it lands sits on the edge of
+   the card under the pointer, beside any selected card's bar. While a drag runs, the page shows a grabbing cursor and
+   selects no text. */
+.item[data-drags="true"] { cursor: grab; }
+.card-drag, .card-drag * { cursor: grabbing !important; user-select: none; }
 .item.dragging { opacity: 0.45; }
 .item.drop-above { box-shadow: inset 0 2px var(--accent); }
 .item.drop-below { box-shadow: inset 0 -2px var(--accent); }
@@ -501,12 +530,45 @@ kbd {
 
 .item .note-cell .note { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .item .time { min-width: 4ch; margin-left: auto; padding-left: 8px; text-align: right; }
-.item .note-cell + .time { margin-left: 0; padding-left: 0; }
+.item .more:has(.note-cell) + .time { margin-left: 0; padding-left: 0; }
 /* A list too narrow for the note column also lets its titles give way further, so a row keeps its state and time. */
 @container list (max-width: 640px) {
   .item .note-cell { display: none; }
   .item .text { min-width: min(6em, 25%); }
 }
+/* The run kind, labels, and note sit in .more, which Compact leaves out of the layout, so they lay out as the row's own
+   parts. */
+.item .more { display: contents; }
+/* Detailed draws a row on two lines. Line 1 holds the icon, project, numbers, title, sub-issues, and state, with the
+   time at its right; each part takes its own column, so one a card lacks leaves no gap. Line 2 starts under the
+   title and holds the labels, run kind, and note, whatever the list's width. A card with none of them draws one line. */
+.list.detailed .item {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, max-content) auto auto 1fr auto;
+  gap: 0;
+}
+
+.list.detailed .item > .icon { grid-area: 1 / 1; }
+.list.detailed .item > .chip-cell { grid-area: 1 / 2; margin-left: 8px; }
+.list.detailed .item > .num { grid-area: 1 / 3; margin-left: 8px; }
+.list.detailed .item > .text { grid-area: 1 / 4; min-width: 0; margin-left: 8px; }
+.list.detailed .item > .subs-badge { grid-area: 1 / 5; margin-left: 8px; }
+.list.detailed .item > .badge { grid-area: 1 / 6; margin-left: 8px; }
+.list.detailed .item > .time { grid-area: 1 / 8; margin-left: 0; padding-left: 8px; }
+
+.list.detailed .item > .more {
+  display: flex;
+  grid-area: 2 / 4 / auto / -1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 4px 0 0 8px;
+}
+
+.list.detailed .item > .more.empty, .list.detailed .item .tags:empty { display: none; }
+.list.detailed .item .tags { order: -1; }
+.list.detailed .item .note-cell { display: flex; flex: 0 1 auto; width: auto; min-width: 0; max-width: none;
+  margin-left: 0; padding-left: 0; }
 /* The project and number take columns of their own, so titles line up whatever the project's name. */
 .item .chip-cell { flex: none; width: var(--chip-width, 14ch); font-size: 12px; }
 /* Wide enough for an issue's number and its PR's, as `#348 → #349`. */
@@ -571,6 +633,8 @@ kbd {
 .clear-search:hover { background: var(--hover); color: var(--fg); }
 .clear-search svg { display: block; margin: auto; }
 .search kbd { color: var(--muted); }
+.search .detailed-toggle { flex: none; }
+.search .detailed-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .no-match { padding: 0 4px; }
 .time { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .num { color: var(--muted); }
@@ -615,6 +679,11 @@ kbd {
 }
 
 .chore-row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A row opens its chore's page in the panel, and the open one shows the selected card's bar. */
+.chore-row { cursor: pointer; }
+.chore-row:hover { background: var(--hover); }
+.chore-row.selected { background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  box-shadow: inset 3px 0 var(--accent); }
 /* A chip stands taller than a line of text, so its cell shows it whole. */
 .chore-row .chip-cell { grid-row: 1; grid-column: 1; display: flex; align-items: center; overflow: visible; }
 .chore-row .c-name { grid-row: 1; grid-column: 2; font-size: 14px; }
@@ -628,24 +697,6 @@ kbd {
 .chore-row .c-pending { grid-row: 3; grid-column: 2 / 5; color: var(--warning); }
 .chore-row .c-pending a { color: inherit; }
 .model-tag { color: var(--muted); font: 12px var(--mono); }
-
-/* Each GitHub touchpoint on one line: its project on All, what it is, and how it last went in its tone. */
-.github-row {
-  display: grid;
-  grid-template-columns: var(--chip-col, 0px) 18ch minmax(0, 1fr);
-  align-items: baseline;
-  gap: 10px;
-  padding: 8px 16px;
-  border-top: 1px solid var(--border-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.github-row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.github-row .chip-cell { display: flex; align-items: center; overflow: visible; }
-.github-row .g-name { font-size: 14px; }
-/* A note wraps, so an error reads whole in a narrow list. */
-.github-row .g-note { white-space: normal; overflow-wrap: anywhere; }
 
 /* In a narrow list a chore's buttons take a third line under its other values, which keep their columns. */
 @container list (max-width: 720px) {

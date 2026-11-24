@@ -16,7 +16,9 @@ import type { Board, Row, RowAction } from '../inbox/types'
 import { DESK } from '../inbox/hooks/run.ts'
 import { CONFIRMS, FORWARD, KEYS, LABELS } from './app-state.js'
 import { act } from './card-actions.ts'
-import { catchUp, gpuGauges, handle, loop, parseProjects, servedProjects, splitBeats, STATIC, transcriptFolder }
+import { codexLogFolder, splitBeats } from './agent-log.ts'
+import { transcriptFolder } from './chat.ts'
+import { catchUp, gpuGauges, handle, loop, parseProjects, servedProjects, STATIC }
   from './server.ts'
 import { appName, appsOf, claimsOf, inDeskUnit, processesOf, TOP_PROCESSES, topOf, unitUsage, useProc }
   from './resources.ts'
@@ -40,7 +42,8 @@ test('the server serves the page\'s own files and every module the page imports,
   const page = readFileSync(join(HERE, 'index.html'), 'utf8')
   const linked = [...page.matchAll(/(?:src|href)="([^"]+)"/g)].map(found => found[1] ?? '')
   const loaded = new Set<string>(['index.html'])
-  const pending = [...linked]
+  // The avatar component loads these marks when a post has a verified provider.
+  const pending = [...linked, 'anthropic.svg', 'openai.svg']
   for (let file = pending.pop(); file !== undefined; file = pending.pop()) {
     if (!loaded.has(file)) {
       loaded.add(file)
@@ -48,8 +51,12 @@ test('the server serves the page\'s own files and every module the page imports,
     }
   }
   assert.deepEqual(Object.values(STATIC).map(([file]) => file).sort(), [...loaded].sort())
-  for (const [path, [file]] of Object.entries(STATIC)) {
+  for (const [path, [file, type]] of Object.entries(STATIC)) {
     assert.equal(path, file === 'index.html' ? '/' : `/${file}`)
+    if (file.endsWith('.svg')) {
+      assert.equal(type, 'image/svg+xml')
+      assert.match(readFileSync(join(HERE, file), 'utf8'), /^<svg\b/)
+    }
   }
 })
 
@@ -129,10 +136,10 @@ test('an issue\'s Agent Log puts the session\'s beats among its lines by time, a
     `${call('2026-11-19T15:00:00Z', 'just test')}\n${call('2026-11-19T15:12:00Z', 'git commit')}\n`)
   desks.set('yard', { id: 'yard', repo: 'me/yard', owner: 'me', title: 'Yard', main } as Desk)
   const read = async () => JSON.parse((await getFrom('/api/log?desk=yard&number=4')).body.toString()) as
-    { session: string; lines: string[]; beats: number[] }
+    { runner: string; session: string; sessions: number; lines: string[]; beats: number[] }
   try {
     const plain = await read()
-    assert.deepEqual([plain.session, plain.lines.length, plain.beats], [session, 2, []])
+    assert.deepEqual([plain.runner, plain.session, plain.lines.length, plain.beats], ['claude', session, 2, []])
     mkdirSync(join(dirname(storePath()), 'beats'), { recursive: true })
     writeFileSync(join(dirname(storePath()), 'beats', session), `${JSON.stringify({ type: 'beat',
       timestamp: '2026-11-19T15:05:00.000Z', text: 'Still in Bash for 5 min: just test · busy: nothing' })}\n`)
@@ -140,8 +147,30 @@ test('an issue\'s Agent Log puts the session\'s beats among its lines by time, a
     assert.deepEqual(log.lines.map(line => line.replace(/^\d\d:\d\d:\d\d /, '')),
       ['→ Bash: just test', 'Still in Bash for 5 min: just test · busy: nothing', '→ Bash: git commit'])
     assert.deepEqual(log.beats, [1])
+
+    const thread = '5f1c2a9e-0000-4000-8000-000000000613'
+    const codexFolder = codexLogFolder(dirname(storePath()), `${main}-issue-4`)
+    const codexFile = join(codexFolder, `${thread}.jsonl`)
+    const claudeFile = join(folder, `${session}.jsonl`)
+    mkdirSync(codexFolder, { recursive: true })
+    writeFileSync(codexFile, `${call('2026-11-20T10:00:00Z', 'git status').replace('"Bash"', '"Shell"')}\n`)
+    utimesSync(claudeFile, 1, 1)
+    utimesSync(codexFile, 2, 2)
+    const codex = await read()
+    assert.deepEqual([codex.runner, codex.session, codex.sessions, codex.beats], ['codex', thread, 2, []])
+    assert.match(codex.lines[0], /→ Shell: git status$/)
+    assert.equal(codex.resumeCommand, undefined)
+    const init = { type: 'system', subtype: 'init', session_id: thread,
+      local_runner: { provider: 'lmstudio', model: 'example:24b' } }
+    writeFileSync(codexFile, `${JSON.stringify(init)}\n${call('2026-11-20T10:00:00Z', 'git status')}\n`)
+    utimesSync(codexFile, 2, 2)
+    assert.equal((await read()).resumeCommand, `codex resume --oss --local-provider lmstudio --model='example:24b' ${thread}`)
+    utimesSync(claudeFile, 3, 3)
+    const switched = await read()
+    assert.deepEqual([switched.runner, switched.session, switched.sessions], ['claude', session, 2])
   } finally {
     desks.delete('yard')
+    rmSync(codexLogFolder(dirname(storePath()), `${main}-issue-4`), { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
     rmSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
     if (signIn === undefined) {
@@ -643,7 +672,7 @@ test('the resources route reads memory, the runs\' claims, the desk\'s units, it
     'agent = store.request_run(p, "agent", "12")',
     'store.run_started(agent, "agent-desk-agent-me-fence-12-7.service")',
     'fix = store.request_run(p, "fix", "30")',
-    'store.run_waits(fix, "memory", "memory: 5.3 GB free of 11 GB needed")',
+    'store.run_waits(fix, "memory", "memory: 5.3 GB free of 3 GB + 8 GB reserve")',
     'serial = store.request_run(p, "agent", "14")',
     'store.run_waits(serial, "serial", "#12\'s serial slot")',
     'store.request_run("me/other", "chore", "audit")',
@@ -651,7 +680,7 @@ test('the resources route reads memory, the runs\' claims, the desk\'s units, it
     'check = store.check_queue(p, "agent/issue-30", "abc123")',
     'store.check_started(check, "/tmp/log")',
     'waiting = store.check_queue(p, "agent/issue-31", "def456")',
-    'store.check_waits(waiting, "memory", "memory: 2.0 GB free of 9 GB needed")'].join('\n'))
+    'store.check_waits(waiting, "memory", "memory: 2.0 GB free of 1 GB + 8 GB reserve")'].join('\n'))
   useStore(store)
   useProc(proc)
   desks.set('fence', { id: 'fence', repo: 'me/fence', owner: 'me', title: 'Fence' } as Desk)
@@ -686,9 +715,9 @@ test('the resources route reads memory, the runs\' claims, the desk\'s units, it
       'agent-desk-check-me-fence-1.service', 'agent-desk-dispatch.service'])
     // The memory gate's runs and checks, in every project, and not the serial one.
     assert.deepEqual(read.waiting.map(one => [one.desk, one.kind, one.label, one.reason]), [
-      ['fence', 'fix', 'PR #30', 'memory: 5.3 GB free of 11 GB needed'],
+      ['fence', 'fix', 'PR #30', 'memory: 5.3 GB free of 3 GB + 8 GB reserve'],
       [null, 'chore', 'audit', 'memory pressure under 5%, now 7%'],
-      ['fence', 'check', '', 'memory: 2.0 GB free of 9 GB needed']])
+      ['fence', 'check', '', 'memory: 2.0 GB free of 1 GB + 8 GB reserve']])
     // The browser's tabs count with it, and the process in the agent's unit counts with the unit instead.
     assert.deepEqual(read.apps, [
       { name: 'firefox', processes: 3, memory: 3.5 * 1024 ** 3, swap: 0.625 * 1024 ** 3, cpu: 330 },

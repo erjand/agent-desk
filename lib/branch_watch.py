@@ -1,6 +1,7 @@
 """
 The dispatcher's branch checks: BranchWatch reads each project's agent/* heads, records each move, queues a check of
-a branch's newest head, and starts each queued check as lib/checks.py's unit. lib/dispatch.py's Dispatcher ticks it on
+a branch's newest head, queues a re-check of a ready review whose base moved since its head's check in a project that
+sets `testOnBaseMove`, and starts each queued check as lib/checks.py's unit. lib/dispatch.py's Dispatcher ticks it on
 each wake and passes itself as the host, whose desk, running runs, mode, systemd, say, and desk_lib the watch uses, so
 this module never imports lib/dispatch.py.
 """
@@ -41,7 +42,10 @@ class BranchWatch:
     a `branch-moved` event, which supersedes the branch's checks of older heads, and queues a check once the run
     working the branch ends or the head stands still for SETTLE_SECONDS. A queued check starts in a `check` slot as
     lib/checks.py's unit. Whenever an open review's head or its base moves, it also tries the head against the base
-    with `git merge-tree` and records whether it merges, whether or not the project has a `test` command.
+    with `git merge-tree` and records whether it merges, whether or not the project has a `test` command. In a project
+    that sets `testOnBaseMove`, a ready review that merges cleanly and whose head's check merged an older commit of
+    its base gets a re-check of the head merged with the base's newest commit, once that commit stands still for
+    SETTLE_SECONDS; a newer commit supersedes the re-check of an older one.
     """
 
     def __init__(self, dispatcher):
@@ -54,6 +58,11 @@ class BranchWatch:
         self.read = None
         # The (head, base head) each (project, branch) was last tried at, so a pair git couldn't try isn't tried again.
         self.tried = {}
+        # Each (project, branch) whose review waits for its base to settle before a re-check, with the base's commit
+        # and when the watch first saw the review need it.
+        self.rebasing = {}
+        # Whether one commit holds another, by the pair, so a review that waits to settle asks git once.
+        self.holds = {}
 
     def rebuild(self, live):
         """
@@ -62,7 +71,7 @@ class BranchWatch:
         check. settle() still skips a head its base holds or whose project has no `test` command.
         """
         now = self.host.clock()
-        self.heads, self.settling, self.read = {}, {}, None
+        self.heads, self.settling, self.rebasing, self.read = {}, {}, {}, None
         for project, checkout in projects():
             for branch, head in self.desk.branch_heads(project).items():
                 self.heads[(project, branch)] = head
@@ -91,6 +100,7 @@ class BranchWatch:
                     self.moved(project, checkout, branch, heads.get(branch), known.get(branch), now)
                     moved = True
             self.try_merges(project, checkout, bases)
+            self.recheck(project, checkout, bases, now)
         self.settle(now)
         self.start_queued(dict(listed))
         return moved
@@ -129,6 +139,67 @@ class BranchWatch:
                     self.host.say(f"{one['branch']} at {head[:12]} {mergeable.lower()} with {base} at "
                                   f"{base_sha[:12]} in {project}.")
 
+    def recheck(self, project, checkout, bases, now):
+        """
+        In a project that sets `testOnBaseMove`, stops each re-check an open review's newer base commit supersedes, and
+        queues a re-check of each ready review rebase_due names once its base's commit stood still for SETTLE_SECONDS.
+        """
+        config = read_config(checkout)
+        if not checks.test_command(config) or not checks.rechecks_on(config):
+            return
+        worked = self.worked()
+        due = set()
+        for one in self.desk.merge_targets(project):
+            key, base_sha = (project, one["branch"]), bases.get(one["review_base"])
+            if one["head_sha"] is None or base_sha is None:
+                continue
+            for row in self.desk.base_moved(project, one["branch"], base_sha):
+                unit = checks.unit_name(project, row["id"])
+                self.host.say(f"Re-check {row['id']} of {one['branch']} is superseded by {one['review_base']} at "
+                              f"{base_sha[:12]}; stopping {unit}.")
+                self.host.systemd(["systemctl", "--user", "stop", "--no-block", unit])
+            if key in worked or key in self.settling or not self.rebase_due(project, checkout, one, base_sha):
+                continue
+            due.add(key)
+            entry = self.rebasing.get(key)
+            if entry is None or entry["base_sha"] != base_sha:
+                self.rebasing[key] = {"base_sha": base_sha, "since": now}
+            elif now - entry["since"] >= SETTLE_SECONDS:
+                del self.rebasing[key]
+                check = self.desk.check_queue(project, one["branch"], one["head_sha"], one["review_base"], base_sha,
+                                              recheck=True)
+                self.host.say(f"Queued re-check {check} of {one['branch']} at {one['head_sha'][:12]} merged with "
+                              f"{one['review_base']} at {base_sha[:12]} in {project}.")
+        for key in [key for key in self.rebasing if key[0] == project and key not in due]:
+            del self.rebasing[key]
+
+    def rebase_due(self, project, checkout, one, base_sha):
+        """
+        Whether a review's head needs a re-check merged with `base_sha`, its base's newest commit: the review is ready,
+        its head merges cleanly with that commit, no check of the head waits or runs, and the head passed a check whose
+        newest result merged another commit of the base, while the head lacks `base_sha` and the base lacks the head.
+        """
+        head = one["head_sha"]
+        if one["draft"] or (one["base"], one["base_sha"], one["mergeable"]) != (one["review_base"], base_sha,
+                                                                               "MERGEABLE"):
+            return False
+        mine = [row for row in self.desk.checks_of_head(project, one["branch"], head)
+                if row["status"] not in ("superseded", "cancelled")]
+        if not mine or any(row["status"] in ("queued", "running") for row in mine):
+            return False
+        if not any(row["status"] == "passed" for row in mine) or mine[-1]["base_sha"] in (None, base_sha):
+            return False
+        return not self.contains(checkout, base_sha, head) and not self.contains(checkout, head, base_sha)
+
+    def contains(self, checkout, commit, holder):
+        """Whether commit `holder` holds `commit`, asking git once for each pair."""
+        key = (str(checkout), commit, holder)
+        if key not in self.holds:
+            if len(self.holds) > 1000:
+                self.holds.clear()
+            self.holds[key] = checks.contains(checkout, commit, holder)
+        return self.holds[key]
+
     def settle(self, now):
         """Queues a check of each head whose branch's run ended, or that stood still for SETTLE_SECONDS."""
         if not self.settling:
@@ -160,7 +231,9 @@ class BranchWatch:
         the checks of branches a run still works, so the runs Hold lets go on can finish. Records why each check left
         waiting waits, as the dispatcher records a request's.
         """
-        queued = self.desk.checks(("queued",))
+        # A re-check starts after every other check, so it never takes a slot from a moved head's check or the
+        # merge queue's.
+        queued = sorted(self.desk.checks(("queued",)), key=lambda row: (bool(row.get("recheck")), row["id"]))
         if not queued:
             return
         running = collections.Counter(row["project"] for row in self.desk.checks(("running",)))
@@ -172,6 +245,9 @@ class BranchWatch:
             mode = hold.mode_of(state, project)
             if not checks.test_command(config):
                 self.host.say(f"Check {row['id']} ends as cancelled: {project} has no test command.")
+                self.desk.check_ended(row["id"], "cancelled")
+            elif row.get("recheck") and not checks.rechecks_on(config):
+                self.host.say(f"Re-check {row['id']} ends as cancelled: {project} turned testOnBaseMove off.")
                 self.desk.check_ended(row["id"], "cancelled")
             elif mode == "held" and (project, row["branch"]) not in worked:
                 self.note(row, "mode", *hold.MODE_WAITS[mode])

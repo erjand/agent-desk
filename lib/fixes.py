@@ -8,10 +8,13 @@ the queue found that main broke its checks, and asks for an agent to resolve the
 
 It reads the open reviews, whether each merges with its base, and the runs from the local store, and each branch's
 head from git in the main checkout. lib/merges.py marks a queued review's head as broken by main when the review's
-checks passed until the queue merged main into it and failed since, retry included. Each merge moves main and can
+checks passed until the queue merged main into it, or until a fix resolved its conflicts with main, and failed since,
+retry included. Each merge moves main and can
 bring back the conflicts of a review fixed before it, so a review gets its fix only once it is the queue's oldest,
 which holds the queue until its fix lands, and main stays where the fix merged it.
-A review outside the queue waits for Merge, and one behind others in the queue for its turn. The fix waits while a run
+A review outside the queue waits for Merge, and one behind others in the queue for its turn, except a ready review
+whose re-check failed, which the dispatcher queues after its base moved: main broke its checks, and its fix starts
+without waiting for Merge. The fix waits while a run
 works the review or its issue or waits to, and while anybody works in its worktree. Each start is noted in
 ~/.local/state/agent-desk/fixes/<owner>__<repo>.tsv by the review's head and its base's, main or the branch a
 `base:<branch>` label set. A review gets one fix for each commit its base reaches, and `fixes.maxTries` in all for one
@@ -140,21 +143,23 @@ def plan(prs, active, starts, bases, chosen, busy=lambda pr: False, queue=(), br
     (pr, verdict) pairs: verdict is "start", or why the fix waits. `prs` are the open reviews under the names gh gives
     a PR's fields, `active` the numbers of the reviews a run works or waits to, `bases` maps each review's base branch
     to its head, `busy` says whether a review's worktree is in use, `queue` lists the merge queue's reviews, oldest
-    first, and `broken` maps a queued review to the head whose checks main broke, as lib/merges.py notes it.
+    first, and `broken` maps a queued review to the head whose checks main broke, as lib/merges.py notes it. A review
+    whose `baseBroke` says its head's re-check failed needs no turn in the queue.
     """
     broken = broken or {}
     verdicts = []
     for pr in sorted(prs, key=lambda one: one["number"]):
         branch = pr["headRefName"]
-        mends = pr.get("mergeable") == "CONFLICTING" or broken.get(pr["number"]) == pr["headRefOid"]
+        rechecked = bool(pr.get("baseBroke"))
+        mends = pr.get("mergeable") == "CONFLICTING" or broken.get(pr["number"]) == pr["headRefOid"] or rechecked
         if pr.get("isDraft") or not mends:
             continue
         if not AGENT_BRANCH.match(branch):
             continue
         tries = [start for start in starts if start[1] == pr["number"] and start[2] == pr["headRefOid"]]
-        if pr["number"] not in queue:
+        if not rechecked and pr["number"] not in queue:
             verdict = "auto-fix on Merge"
-        elif pr["number"] != queue[0]:
+        elif not rechecked and pr["number"] != queue[0]:
             verdict = "auto-fix when next to merge"
         elif pr["number"] in active:
             verdict = "agent working or queued"
@@ -193,7 +198,8 @@ def active_reviews(desk, repo):
 def gather(desk, repo, checkout):
     """
     The open reviews, under the names gh gives a PR's fields, each with its branch's head from git in the main
-    checkout, and the head of each of their bases.
+    checkout and `baseBroke`, whether that head failed its re-check after its base moved, and the head of each of their
+    bases.
     """
     prs, bases = [], {}
     for review in desk.items(repo, "review", limit=10000):
@@ -201,7 +207,8 @@ def gather(desk, repo, checkout):
         if head is None:
             continue
         prs.append({key: review[key] for key in ("number", "title", "headRefName", "baseRefName", "isDraft",
-                                                 "mergeable")} | {"headRefOid": head})
+                                                 "mergeable")} | {
+            "headRefOid": head, "baseBroke": desk.base_broke(repo, review["headRefName"], head)})
         if base_of(review) not in bases:
             bases[base_of(review)] = merges.rev(checkout, f"refs/heads/{base_of(review)}")
     return prs, bases

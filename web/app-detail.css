@@ -57,6 +57,8 @@
 .title-edit input:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--bg); }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .confirm { display: contents; }
+/* Stop Command's question takes a line of its own above the card's buttons. */
+.confirm-ask { flex-basis: 100%; order: -1; color: var(--warning); font-size: 14px; }
 
 .close-detail {
   width: 32px;
@@ -425,6 +427,11 @@ button.link:hover { background: none; text-decoration: underline; }
 .avatar-5 { background: var(--avatar-5); }
 .avatar-6 { background: var(--avatar-6); }
 .avatar-7 { background: var(--avatar-7); }
+
+.avatar-provider { background: #fff; }
+.avatar-provider img { width: 65%; height: 65%; }
+.avatar-openai img { width: 100%; height: 100%; }
+.posting-footer { margin-top: 0.75rem; }
 
 .comment { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 .comment.opener { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
@@ -908,3 +915,11 @@ button.link.delete-issue:hover { color: var(--error); }
 .delete-buttons { display: flex; justify-content: flex-end; gap: 8px; }
 .delete-buttons button.danger:not(:disabled) { background: var(--solid-danger); border-color: oklch(0 0 0 / 0.15);
   color: #ffffff; }
+
+/* A chore's page: its skill's description as a lead paragraph, the skill and the project's profile each in a box with
+   the file it comes from under it, or the warning for a skill Claude Code can't find. */
+.chore-text { margin: 12px 0 16px; }
+.chore-lead { margin-bottom: 12px; font-size: 16px; }
+.chore-path { margin: 6px 0 0; font-size: 12px; }
+.chore-heading { margin: 24px 0 8px; font-size: 16px; font-weight: 600; }
+.chore-warning { padding: 8px 12px; border: 1px solid var(--warning); border-radius: 6px; color: var(--warning); }

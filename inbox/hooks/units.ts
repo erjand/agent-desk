@@ -25,7 +25,17 @@ export type DeskRun = { id: number; kind: string; target: string; status: string
   /** While it waits, the gate that holds it, such as `memory` or `slot`, and why, which reads after "waits for". */
   gate?: string; reason?: string
   /** The minutes its `agent-desk gpu` calls held a GPU slot and queued for one, once one ended. */
-  gpu_held?: number; gpu_queued?: number }
+  gpu_held?: number; gpu_queued?: number
+  /** Once it started, the Claude account it bills, `subscription` or `api`, as lib/account.py describes. */
+  account?: string
+  /**
+   * While it works and lib/run_stall.py's rule flags it, the tool call it stalls in: when the call started, its tool,
+   * and the first line of its input.
+   */
+  stalled?: Stall }
+
+/** A stalled run's waiting tool call, as `agent-desk board --json` gives it. */
+export type Stall = { since: string; tool: string; summary?: string }
 
 /** A branch check running now, as `agent-desk board --json` lists it, with its review's number or null. */
 export type RunningCheck = { branch: string; review: number | null; head: string; startedAt: string | null }
@@ -74,6 +84,10 @@ export type UnitContext = {
     limit?: number): string | undefined
   /** How long ago a time was, compactly. */
   ago(stamp: string): string
+  /** What a stalled run's row says of its stall, as stallNote words it. */
+  stalled(stall: unknown): string | undefined
+  /** What Stop Command asks before it stops a stalled run's command, as stopAsk words it. */
+  stopAsk(stall: unknown): string | undefined
 }
 
 /**
@@ -89,6 +103,35 @@ export function timeLeft(now: number, workflow: string, started: string | undefi
   }
   const left = Math.max(0, Math.ceil(limit - (now - Date.parse(started)) / 60_000))
   return left <= WARN_MINUTES ? `${left} min left` : undefined
+}
+
+/** A stall's minutes at `now` and what it waits in, its tool and the first line of its input; undefined for none. */
+function stallOf(now: number, stall: unknown): { minutes: number; what: string } | undefined {
+  const one = stall as Partial<Stall> | null | undefined
+  if (typeof one?.since !== 'string' || typeof one.tool !== 'string' || Number.isNaN(Date.parse(one.since))) {
+    return undefined
+  }
+  return { minutes: Math.max(0, Math.floor((now - Date.parse(one.since)) / 60_000)),
+    what: `${one.tool}${one.summary ? `: ${one.summary}` : ''}` }
+}
+
+/**
+ * What a stalled run's row says at `now`: how long its tool call has waited, its tool, and the first line of its input,
+ * such as `stalled 12 min in Bash: cargo test …`; undefined for a run that doesn't stall.
+ */
+export function stallNote(now: number, stall: unknown): string | undefined {
+  const one = stallOf(now, stall)
+  return one && `stalled ${one.minutes} min in ${one.what}`
+}
+
+/**
+ * What Stop Command asks at `now` before it stops a stalled run's command, with its tool, the first line of its input,
+ * and how long it has run, such as `Stop Bash: cargo test … after 14 min? The agent goes on with its failure.`;
+ * undefined for a run that doesn't stall.
+ */
+export function stopAsk(now: number, stall: unknown): string | undefined {
+  const one = stallOf(now, stall)
+  return one && `Stop ${one.what} after ${one.minutes} min? The agent goes on with its failure.`
 }
 
 /** Minutes as a GPU total reads them: whole minutes, or `<1 min` for a part of one. */
@@ -230,8 +273,10 @@ function known(number: number): number | undefined {
 /**
  * A unit at work shows in Runners under its kind, as a runner's job does under the runner's name. An agent's row takes
  * its issue's title and number, with the issue's open review when it has one, a fix's or a PR-only agent's its PR's,
- * and a chore's its skill, and its note says how long its GPU calls held and queued for the GPU once one ended. An
- * agent's row on an issue has Pause, which stops the run and holds the issue.
+ * and a chore's its skill, and its note says how long its GPU calls held and queued for the GPU once one ended. A run
+ * that stalls leads its note with the stall, and its row carries `stalled`. An agent's row on an issue has Pause, which
+ * stops the run and holds the issue, and while it stalls Stop Command, which ends the command it waits on and leaves
+ * the run going, after asking with `stopAsk`.
  */
 export function unitRows(units: DeskRun[], seen: UnitContext): Row[] {
   return units.filter(one => one.status === 'running').map(one => {
@@ -242,16 +287,20 @@ export function unitRows(units: DeskRun[], seen: UnitContext): Row[] {
     const title = chore ? `chore: ${one.target}` : shown?.title ?? `#${number}`
     const started = one.started_at ?? undefined
     const gpu = gpuUse(one.gpu_held, one.gpu_queued)
+    const stalled = seen.stalled(one.stalled)
+    const ask = stalled && pausable(one) ? seen.stopAsk(one.stalled) : undefined
     // A discussion holds no serial slot.
-    const note = [one.kind === 'fix' ? 'fix' : discusses(one) ? 'discussion' : '',
+    const note = [stalled, one.kind === 'fix' ? 'fix' : discusses(one) ? 'discussion' : '',
       issue !== undefined && !discusses(one) && seen.serial.has(issue) ? 'serial' : '',
       seen.timeLeft(workflowOf(one), started, issue, one.benchmark, one.limit), gpu].filter(Boolean).join(' · ')
     return { key: `unit-${one.id}`, text: `${one.kind.padEnd(9)} ${title}${note ? `  (${note})` : ''}`,
       ...(shown ? { url: shown.url } : {}), ...(worksIssue(one) ? seen.workRef(number) : seen.refOf(number)),
       runner: one.kind,
-      state: 'working', title, ...(note ? { note } : {}), ...(started ? { since: started } : {}),
+      state: 'working', title, ...(note ? { note } : {}), ...(stalled ? { stalled: true } : {}),
+      ...(ask ? { stopAsk: ask } : {}), ...(started ? { since: started } : {}),
       time: started ? seen.ago(started) : undefined,
-      actions: [...(shown ? ['open'] : []), ...(pausable(one) ? ['pause'] : [])] as RowAction[] }
+      actions: [...(shown ? ['open'] : []), ...(ask ? ['stop-command'] : []), ...(pausable(one) ? ['pause'] : [])] as
+        RowAction[] }
   })
 }
 
@@ -282,18 +331,21 @@ export function checkRows(checks: RunningCheck[], seen: UnitContext): Row[] {
  * Whether Retry on a run carries on its session: lib/work-issue.sh takes up the session of an agent's run on an issue
  * that hit its time limit, while every other run starts fresh.
  */
-function continues(one: DeskRun): boolean {
+export function continues(one: DeskRun): boolean {
   return worksIssue(one) && !discusses(one) && one.status === 'timed-out'
 }
 
 /**
  * A unit's run that failed, timed out, or vanished shows in Needs You until a later run asks for its target, or its
- * issue or PR closes. Its row carries the run's id below zero, which tells Retry and Dismiss it from an Actions run's:
- * Retry asks the dispatcher for the run again, and reads Continue on a row that continues. A run whose unit the store
- * names has a Log, the command that prints the unit's log from the journal.
+ * issue or PR closes, unless its id is in `covered`, the runs a stopped issue's row carries as its rerun, which shows
+ * the run in its place. Its row carries the run's id below zero, which tells Retry and Dismiss it from an Actions
+ * run's: Retry asks the dispatcher for the run again, and reads Continue on a row that continues. A run whose unit the
+ * store names has a Log, the command that prints the unit's log from the journal. An agent's run on an issue names the
+ * issue's open review as Working's row does, while Open still opens the issue.
  */
-export function unitFailures(units: DeskRun[], seen: UnitContext): Row[] {
-  return units.filter(one => ['failed', 'timed-out', 'lost'].includes(one.status)).flatMap(one => {
+export function unitFailures(units: DeskRun[], seen: UnitContext, covered: Set<number> = new Set()): Row[] {
+  const ended = units.filter(one => ['failed', 'timed-out', 'lost'].includes(one.status) && !covered.has(one.id))
+  return ended.flatMap(one => {
     const chore = one.kind === 'chore'
     const number = chore ? undefined : known(numberOfUnit(one))
     const shown = worksIssue(one) ? seen.issues.get(number ?? Number.NaN)
@@ -301,12 +353,13 @@ export function unitFailures(units: DeskRun[], seen: UnitContext): Row[] {
     if (!chore && shown === undefined) {
       return []
     }
-    const state = one.status === 'timed-out' ? 'timed out' : 'failed'
+    const state = endedAs(one)
     const workflow = workflowOf(one)
     const title = chore ? one.target : shown?.title ?? ''
-    const log = one.unit ? `journalctl --user -u ${one.unit}` : undefined
-    return [{ key: `failed-unit-${one.id}`, text: `${state}  ${workflow}: ${title}`,
-      ...(worksIssue(one) ? { number } : seen.refOf(number)), ...(shown ? { url: shown.url } : {}),
+    const log = logOf(one)
+    const ref = !worksIssue(one) ? seen.refOf(number) : discusses(one) ? { number } : seen.workRef(number)
+    return [{ key: `failed-unit-${one.id}`, text: `${state}  ${workflow}: ${title}`, ...ref,
+      ...(shown ? { url: shown.url } : {}),
       ...(log ? { log } : {}), run: -one.id, ...(continues(one) ? { continues: true } : {}), title, state,
       note: workflow, ...(one.ended_at ? { since: one.ended_at } : {}),
       actions: [...(shown ? ['open'] : []), ...(log ? ['log'] : []), 'retry', 'dismiss'] as RowAction[] }]
@@ -356,13 +409,23 @@ export function waitingRequest(units: DeskRun[], issue: number, issueOfPr: Map<n
 }
 
 /**
- * The newest agent run on `issue` that failed, timed out, or was lost, as Continue asks for again, with its id below
- * zero as Retry takes it; undefined when there is none, or when `answered` says an agent went on after it ended. A
- * discussion of the issue while it was an idea is no work to restart.
+ * The newest agent run on `issue` that failed, timed out, or was lost, as Continue asks for again; undefined when there
+ * is none, or when `answered` says an agent went on after it ended. A discussion of the issue while it was an idea is
+ * no work to restart.
  */
-export function lastFailure(units: DeskRun[], issue: number, answered: (ended: string) => boolean): number | undefined {
-  const failed = units.filter(one => worksIssue(one) && !discusses(one) && numberOfUnit(one) === issue
+export function lastFailure(units: DeskRun[], issue: number,
+  answered: (ended: string) => boolean): DeskRun | undefined {
+  return units.filter(one => worksIssue(one) && !discusses(one) && numberOfUnit(one) === issue
     && ['failed', 'timed-out', 'lost'].includes(one.status) && !(one.ended_at && answered(one.ended_at)))
     .sort((a, b) => (b.ended_at ?? '').localeCompare(a.ended_at ?? '') || b.id - a.id)[0]
-  return failed === undefined ? undefined : -failed.id
+}
+
+/** How a run that ended short reads on its row: `timed out` at its time limit, or else `failed`. */
+export function endedAs(one: DeskRun): string {
+  return one.status === 'timed-out' ? 'timed out' : 'failed'
+}
+
+/** The command that prints a run's log from the journal, which Log copies; undefined when the store names no unit. */
+export function logOf(one: DeskRun): string | undefined {
+  return one.unit ? `journalctl --user -u ${one.unit}` : undefined
 }

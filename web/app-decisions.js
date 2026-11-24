@@ -3,7 +3,7 @@
 // box for a section in the older layout, then a note and the conversation's Comment and Send to Agent. A section an
 // answer covers shows who answered and when, and folds its form behind Answer Again.
 import { html } from './vendor/preact-htm.js'
-import { clean, Markup, scrollToAnchor } from './app-parts.js'
+import { authorName, clean, Markup, scrollToAnchor } from './app-parts.js'
 import { age, draw, ui } from './app-state.js'
 
 /** A body's parts with every piece of HTML cleaned, as the page cleans a whole body; undefined stays undefined. */
@@ -92,7 +92,7 @@ function Section({ section, answering }) {
     <div dangerouslySetInnerHTML=${{ __html: section.heading }} />
     ${answer ? html`<p class="answered muted"><button type="button" class="link" title="Show the answer"
       onClick=${event => scrollToAnchor(event.currentTarget, `comment-${answer.id}`)}>${answer.author.login === 'you'
-        ? 'You' : answer.author.login} answered${answer.answers.picks.length > 0
+        ? 'You' : authorName(answer.author)} answered${answer.answers.picks.length > 0
         ? ` ${answer.answers.picks.join(', ')}` : ''} · ${age(answer.at)} ago</button></p>` : null}
     ${section.intro ? html`<div dangerouslySetInnerHTML=${{ __html: section.intro }} />` : null}
     ${section.decisions.map(decision => html`<div class="decision" key=${decision.number}>

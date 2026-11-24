@@ -120,6 +120,16 @@ class RefusedStartTest(StartCase):
         self.assertFalse(self.worktree(f"issue-{number}").exists())
         self.assertEqual(self.notes(number), [])
 
+    def test_a_failed_setup_runs_the_teardown_before_it_removes_the_worktree(self):
+        self.configure(worktree={"setup": "touch half-built; exit 1", "teardown": "ls >../torn; exit 2"})
+        number = self.issue(status="queued")
+        done = self.start(number)
+        self.assertEqual(done.returncode, 1)
+        dest = self.worktree(f"issue-{number}")
+        self.assertEqual((self.root / "torn").read_text(), "half-built\n")
+        self.assertIn("The worktree teardown failed with status 2", done.stderr)
+        self.assertFalse(dest.exists())
+
     def test_a_failed_setup_keeps_the_issue_in_progress_while_its_branch_has_an_open_review(self):
         self.configure(worktree={"setup": "exit 1"})
         number = self.issue(status="queued")

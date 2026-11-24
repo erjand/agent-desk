@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 import type { Board } from '../inbox/types'
 import type { Host } from '../inbox/hooks/board.ts'
+import type { IssueRunner } from './hold.ts'
 
 export const HERE = dirname(fileURLToPath(import.meta.url))
 // The agent-desk checkout whose command the server runs: AGENT_DESK_HOME, or else the one the server runs from, so the
@@ -28,6 +29,12 @@ export type Desk = {
   title: string
   main: string
   chores: string[]
+  /** The configured issue runner, or null when issueRunner is invalid. */
+  issueRunner?: IssueRunner | null
+  /** The agent slots the project's `.agent-desk.json` sets, as hold.ts's configAgentSlots reads them. */
+  agentSlots?: number
+  /** The gpu slots the project's `.agent-desk.json` sets, or null for none, as hold.ts's configGpuSlots reads them. */
+  gpuSlots?: number | null
   board: Board | null
   /** When the last refresh landed, in milliseconds. */
   at: number

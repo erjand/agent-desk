@@ -34,10 +34,10 @@ export function announce(row: Row): string {
 export function moveToQueued(shown: Board, row: Row): Board {
   const queued: Row = { key: `queued-${row.number}`, text: row.title ?? row.text, number: row.number, url: row.url,
     title: row.title, actions: ['open'] }
-  return { ...shown, next: shown.next.filter(one => one.number !== row.number),
+  return relisted({ ...shown, next: shown.next.filter(one => one.number !== row.number),
     design: shown.design.filter(one => one.number !== row.number),
     blocked: shown.blocked.filter(one => one.number !== row.number),
-    queued: [...shown.queued.filter(one => one.key !== queued.key), queued] }
+    queued: [...shown.queued.filter(one => one.key !== queued.key), queued] })
 }
 
 /**
@@ -51,13 +51,13 @@ export function moveToOpen(shown: Board, row: Row): Board {
   const open: Row = { key: `next-${row.number}`, text: row.title ?? row.text, number: row.number, url: row.url,
     title: row.title, ...(row.labels ? { labels: row.labels } : {}),
     actions: ['open', 'ready', 'to-backlog', 'close'] }
-  return { ...shown, design: shown.design.filter(one => one.number !== row.number),
+  return relisted({ ...shown, design: shown.design.filter(one => one.number !== row.number),
     blocked: shown.blocked.filter(one => one.number !== row.number),
     backlog: shown.backlog.filter(one => one.number !== row.number),
     ideas: shown.ideas.filter(one => one.number !== row.number),
     queued: shown.queued.filter(one => one.pr || one.number !== row.number),
     designTotal: Math.max(0, shown.designTotal - (shown.design.some(one => one.number === row.number) ? 1 : 0)),
-    next: [open, ...shown.next.filter(one => one.key !== open.key)] }
+    next: [open, ...shown.next.filter(one => one.key !== open.key)] })
 }
 
 /**
@@ -67,8 +67,8 @@ export function moveToOpen(shown: Board, row: Row): Board {
 export function moveToBacklog(shown: Board, row: Row): Board {
   const later: Row = { key: `backlog-${row.number}`, text: row.title ?? row.text, number: row.number, url: row.url,
     title: row.title, ...(row.labels ? { labels: row.labels } : {}), actions: ['open', 'to-open', 'close'] }
-  return { ...shown, next: shown.next.filter(one => one.number !== row.number),
-    backlog: [later, ...shown.backlog.filter(one => one.key !== later.key)] }
+  return relisted({ ...shown, next: shown.next.filter(one => one.number !== row.number),
+    backlog: [later, ...shown.backlog.filter(one => one.key !== later.key)] })
 }
 
 /** Merging's row for a PR in the merge queue, with what it waits on, and `stopped` for one the queue stopped on. */
@@ -94,14 +94,18 @@ export function fixingRow(title: string, conflicts: boolean, ref: Pick<Row, 'num
 
 /**
  * The board with a conflicted or failing PR, or a draft whose checks fail or that conflicts with main, moved from Needs
- * You to Queued, once its agent was asked to fix it.
+ * You to Queued after the other agents sent back to their reviews and ahead of the queued issues, once its agent was
+ * asked to fix it.
  */
 export function moveToFixing(shown: Board, row: Row): Board {
   const conflicts = row.state === 'draft' ? row.conflicts === true : row.state !== 'failing'
   const queued = fixingRow(row.title ?? row.text.replace(/^(conflicts|failing|draft)\s+/, ''), conflicts,
     { number: row.number, issue: row.issue, pr: row.pr, url: row.url })
+  const rest = shown.queued.filter(one => one.key !== queued.key)
+  const issues = rest.findIndex(inOrder)
+  const at = issues < 0 ? rest.length : issues
   return { ...shown, needs: shown.needs.filter(one => one.key !== row.key),
-    queued: [...shown.queued.filter(one => one.key !== queued.key), queued] }
+    queued: [...rest.slice(0, at), queued, ...rest.slice(at)] }
 }
 
 /**
@@ -149,36 +153,54 @@ export function moveToUnpicked(shown: Board, row: Row): Board {
 export function moveToClosed(shown: Board, row: Row): Board {
   const without = (rows: Row[]) => rows.filter(one => one.key !== row.key)
   const queued = without(shown.queued)
-  const ordered = queued.filter(inOrder)
-  return { ...shown, needs: without(shown.needs), design: without(shown.design), next: without(shown.next),
+  return relisted({ ...shown, needs: without(shown.needs), design: without(shown.design), next: without(shown.next),
     blocked: without(shown.blocked), backlog: without(shown.backlog), ideas: without(shown.ideas),
-    queued: queued.length === shown.queued.length ? shown.queued : [...ordered.map((one, index) => ({ ...one,
-      actions: withOrderMoves(one.actions, index, ordered.length) })), ...queued.filter(one => !inOrder(one))] }
+    queued: queued.length === shown.queued.length ? shown.queued : inPlaces(queued, queued.filter(inOrder)) })
 }
 
-/** The moves of an issue in its project's start order: one place up, one place down, or to the top. */
-export type OrderMove = 'up' | 'down' | 'top'
-const ORDER_MOVES = new Set<RowAction>(['up', 'down', 'top'])
+/**
+ * Queued's rows with the queued and waiting issues' places filled by `ordered`, in its order, each with the moves its
+ * place among them allows. Every other row keeps its place, so the follow-ups stay ahead of the issues.
+ */
+function inPlaces(queued: Row[], ordered: Row[]): Row[] {
+  let next = 0
+  return queued.map(one => {
+    if (!inOrder(one)) {
+      return one
+    }
+    const index = next++
+    return { ...ordered[index], actions: withOrderMoves(ordered[index].actions, index, ordered.length) }
+  })
+}
+
+/** The moves of an issue in its project's start order: one place up, one place down, to the top, or to the bottom. */
+export type OrderMove = 'up' | 'down' | 'top' | 'bottom'
+const ORDER_MOVES = new Set<RowAction>(['up', 'down', 'top', 'bottom'])
 
 /** Whether a Queued row stands for an issue with a place in its project's start order: a queued or waiting one. */
 export function inOrder(row: Pick<Row, 'key'>): boolean {
   return row.key.startsWith('queued-') || row.key.startsWith('waiting-')
 }
 
+/** Whether Queued's rows hold two or more queued or waiting issues, an order a sort could change. */
+export function sortable(queued: Pick<Row, 'key'>[]): boolean {
+  return queued.filter(inOrder).length >= 2
+}
+
 /**
  * A row's actions with the moves its place in an order of `count` rows allows, after the rest: Move Up and Move to Top
- * on every row but the first, and Move Down on every row but the last.
+ * on every row but the first, and Move Down and Move to Bottom on every row but the last.
  */
 export function withOrderMoves(actions: RowAction[], index: number, count: number): RowAction[] {
   const moves: RowAction[] = [...(index > 0 ? ['up'] : []), ...(index < count - 1 ? ['down'] : []),
-    ...(index > 0 ? ['top'] : [])] as RowAction[]
+    ...(index > 0 ? ['top'] : []), ...(index < count - 1 ? ['bottom'] : [])] as RowAction[]
   return [...actions.filter(one => !ORDER_MOVES.has(one)), ...moves]
 }
 
 /**
- * The board with a queued or waiting issue moved in Queued one place up, one place down, to the top of the issues in
- * the start order, which lead Queued, or to a place among them from 1, the last for a place past the end, each with
- * the moves its new place allows.
+ * The board with a queued or waiting issue moved in Queued one place up, one place down, to the top or the bottom of
+ * the issues in the start order, or to a place among them from 1, the last for a place past the end, each with the
+ * moves its new place allows.
  */
 export function moveInOrder(shown: Board, row: Row, where: OrderMove | number): Board {
   const ordered = shown.queued.filter(inOrder)
@@ -187,9 +209,109 @@ export function moveInOrder(shown: Board, row: Row, where: OrderMove | number): 
     return shown
   }
   const to = typeof where === 'number' ? Math.max(0, Math.min(ordered.length, where) - 1)
-    : where === 'top' ? 0 : where === 'up' ? Math.max(0, at - 1) : Math.min(ordered.length - 1, at + 1)
+    : where === 'top' ? 0 : where === 'bottom' ? ordered.length - 1
+      : where === 'up' ? Math.max(0, at - 1) : Math.min(ordered.length - 1, at + 1)
   const moved = [...ordered]
   moved.splice(to, 0, ...moved.splice(at, 1))
-  return { ...shown, queued: [...moved.map((one, index) => ({ ...one,
-    actions: withOrderMoves(one.actions, index, moved.length) })), ...shown.queued.filter(one => !inOrder(one))] }
+  return { ...shown, queued: inPlaces(shown.queued, moved) }
+}
+
+/** The board's sections that list their issues in the project's list order, the one `agent-desk list order` sets. */
+export type ListSection = 'next' | 'blocked' | 'design' | 'backlog' | 'ideas'
+// Each list section's rows by the prefix of their keys. Blocked's rows that wait on a stacked PR's base take keys of
+// their own, so they hold no place in the list order.
+const LIST_KEYS: [string, ListSection][] = [['next-', 'next'], ['blocked-', 'blocked'], ['decide-', 'design'],
+  ['backlog-', 'backlog'], ['idea-', 'ideas']]
+
+/** The list section a row stands for an issue in, from its key, or null for a row with no place in the list order. */
+export function listSection(row: Pick<Row, 'key'>): ListSection | null {
+  return LIST_KEYS.find(([prefix]) => row.key.startsWith(prefix))?.[1] ?? null
+}
+
+/**
+ * A list section's rows with the moves each one's place among the section's issues in the list order allows. A row
+ * with no place in it, such as Blocked's wait on a stacked PR's base, keeps its actions.
+ */
+export function withListMoves(rows: Row[]): Row[] {
+  const count = rows.filter(one => listSection(one) !== null).length
+  let index = 0
+  return rows.map(one => (listSection(one) === null ? one
+    : { ...one, actions: withOrderMoves(one.actions, index++, count) }))
+}
+
+/** The board with each list section's rows given the moves their places allow, after a row left or joined one. */
+function relisted(shown: Board): Board {
+  return { ...shown, next: withListMoves(shown.next), blocked: withListMoves(shown.blocked),
+    design: withListMoves(shown.design), backlog: withListMoves(shown.backlog), ideas: withListMoves(shown.ideas) }
+}
+
+/** Whether a list section holds two or more issues in the list order, an order a sort could change. */
+export function listSortable(rows: Pick<Row, 'key'>[]): boolean {
+  return rows.filter(one => listSection(one) !== null).length >= 2
+}
+
+/** The issue numbers of a list section's rows that hold a place in the list order, in the section's order. */
+export function listNumbers(rows: Row[]): number[] {
+  return rows.flatMap(one => (listSection(one) !== null && one.number !== undefined ? [one.number] : []))
+}
+
+/** Where a move in the list order puts an issue: right above one issue or right below another. */
+export type ListMove = { before: number } | { after: number }
+
+/**
+ * Where a row's move in its list section puts its issue in the project's list order: Move Up right above the issue
+ * before it, Move Down right below the issue after it, Move to Top above the section's first issue, and Move to Bottom
+ * below its last. The store's order spans the project, so a section's ends are its own first and last issues. Null
+ * for a row with no place in a list section, or a move its place doesn't allow.
+ */
+export function listMoveOf(shown: Board, row: Row, where: OrderMove): ListMove | null {
+  const section = listSection(row)
+  const ordered = section === null ? [] : shown[section].filter(one => listSection(one) !== null)
+  const at = ordered.findIndex(one => one.key === row.key)
+  if (at < 0) {
+    return null
+  }
+  const target = where === 'up' ? ordered[at - 1] : where === 'down' ? ordered[at + 1]
+    : where === 'top' ? ordered[0] : ordered.at(-1)
+  if (target === undefined || target === ordered[at] || target.number === undefined) {
+    return null
+  }
+  return where === 'up' || where === 'top' ? { before: target.number } : { after: target.number }
+}
+
+/**
+ * The board with an issue moved in its list section one place up, one place down, to the top, or to the bottom of the
+ * section's issues in the list order, or right above or below another of them, as a drop on the web page puts it, each
+ * with the moves its new place allows. Rows with no place in the order keep theirs after the issues. A move beside an
+ * issue the section doesn't hold leaves the board as it was.
+ */
+export function moveInList(shown: Board, row: Row, where: OrderMove | ListMove): Board {
+  const section = listSection(row)
+  if (section === null) {
+    return shown
+  }
+  const rows = shown[section]
+  const ordered = rows.filter(one => listSection(one) !== null)
+  const at = ordered.findIndex(one => one.key === row.key)
+  if (at < 0) {
+    return shown
+  }
+  const moved = [...ordered]
+  const [moving] = moved.splice(at, 1) as [Row]
+  let to: number
+  if (typeof where === 'object') {
+    const beside = 'before' in where ? where.before : where.after
+    const index = moved.findIndex(one => one.number === beside)
+    if (index < 0) {
+      return shown
+    }
+    to = 'before' in where ? index : index + 1
+  } else {
+    to = where === 'top' ? 0 : where === 'bottom' ? moved.length
+      : where === 'up' ? Math.max(0, at - 1) : Math.min(moved.length, at + 1)
+  }
+  moved.splice(to, 0, moving)
+  let next = 0
+  const placed = rows.map(one => (listSection(one) === null ? one : moved[next++] as Row))
+  return { ...shown, [section]: withListMoves(placed) }
 }

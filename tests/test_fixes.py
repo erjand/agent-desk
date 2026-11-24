@@ -20,9 +20,10 @@ MAIN = "m1"
 BASES = {"main": MAIN, "local-desk": "l1"}
 
 
-def pr(number, branch="agent/issue-7", mergeable="CONFLICTING", draft=False, head="h1", title=None, base="main"):
+def pr(number, branch="agent/issue-7", mergeable="CONFLICTING", draft=False, head="h1", title=None, base="main",
+       base_broke=False):
     return {"number": number, "title": title or f"PR {number}", "headRefName": branch, "baseRefName": base,
-            "headRefOid": head, "isDraft": draft, "mergeable": mergeable}
+            "headRefOid": head, "isDraft": draft, "mergeable": mergeable, "baseBroke": base_broke}
 
 
 def verdicts(prs, active=(), starts=(), busy=lambda one: False, queue=None, broken=None, bases=None):
@@ -53,6 +54,16 @@ class PlanTest(unittest.TestCase):
         [(_, verdict)] = verdicts([pr(1, mergeable="MERGEABLE")], starts=[(NOW - 600, 1, "h1", MAIN)],
                                   broken={1: "h1"})
         self.assertTrue(verdict.startswith("auto-fix tried this main"), verdict)
+
+    def test_a_pr_whose_re_check_failed_after_main_moved_is_due_without_merge_or_its_turn(self):
+        broke = pr(1, mergeable="MERGEABLE", base_broke=True)
+        self.assertEqual(verdicts([broke], queue=[]), [(1, "start")])
+        self.assertEqual(verdicts([broke, pr(2)], queue=[2, 1]), [(1, "start"), (2, "start")])
+        # A draft gets no fix, and its tries count as any fix's do.
+        self.assertEqual(verdicts([pr(1, mergeable="MERGEABLE", base_broke=True, draft=True)], queue=[]), [])
+        [(_, verdict)] = verdicts([broke], starts=[(NOW - 600, 1, "h1", MAIN)], queue=[])
+        self.assertTrue(verdict.startswith("auto-fix tried this main"), verdict)
+        self.assertEqual(verdicts([broke], active=[1], queue=[]), [(1, "agent working or queued")])
 
     def test_a_pr_waits_for_merge_and_then_for_its_turn(self):
         self.assertEqual(verdicts([pr(1), pr(2), pr(3)], queue=[3, 2]),
@@ -138,6 +149,26 @@ class GatherTest(StoreCase):
         self.assertEqual(sorted((one["number"], one["headRefOid"], one["baseRefName"]) for one in prs),
                          [(one, self.sha("agent/issue-7"), "main"), (two, self.sha("agent/issue-8"), "local-desk")])
         self.assertEqual(bases, {"main": self.sha("main"), "local-desk": self.sha("local-desk")})
+
+    def test_a_head_whose_re_check_failed_after_its_retry_reads_as_broken_by_its_base(self):
+        self.desk.create(REPO, "review", "Seven", branch="agent/issue-7")
+        head = self.sha("agent/issue-7")
+
+        def broke():
+            [one] = fixes.gather(self.desk, REPO, self.checkout)[0]
+            return one["baseBroke"]
+
+        first = self.desk.check_queue(REPO, "agent/issue-7", head)
+        self.desk.check_ended(first, "passed")
+        self.assertFalse(broke())
+        again = self.desk.check_queue(REPO, "agent/issue-7", head, "main", self.sha("main"), recheck=True)
+        self.desk.check_ended(again, "failed", rerun=True)
+        # The failure stands only once its second attempt fails too.
+        self.assertFalse(broke())
+        [retry] = self.desk.checks(("queued",))
+        self.assertEqual((retry["attempt"], retry["recheck"], retry["base_sha"]), (2, 1, self.sha("main")))
+        self.desk.check_ended(retry["id"], "failed")
+        self.assertTrue(broke())
 
     def test_the_reviews_a_run_works_or_waits_to_are_active(self):
         seven = self.desk.create(REPO, "review", "Seven", branch="agent/issue-7")

@@ -4,7 +4,7 @@
 // when given a change.
 import { html } from './vendor/preact-htm.js'
 import { commentEdit, EditedMark } from './app-edit.js'
-import { Avatar, clean, Markup, Reaction } from './app-parts.js'
+import { authorName, Avatar, clean, Markup, PostingFooter, Reaction } from './app-parts.js'
 import { age, draw, post, remember, toast, ui } from './app-state.js'
 
 // What each of a review's buttons reads, and reads while its request runs.
@@ -468,12 +468,13 @@ function LineComment({ desk, pr, comment, reload }) {
   return html`<div class="line-comment">
     <${Avatar} person=${comment.author} size=${24} />
     <div class="line-comment-main">
-      <div class="line-comment-head"><strong>${comment.author.login}</strong>
+      <div class="line-comment-head"><strong>${authorName(comment.author)}</strong>
         <span class="muted"> ${age(comment.at)} ago</span><${EditedMark} at=${comment.edited} />
         ${comment.sent ? null : html` <span class="badge unsent" title="Send to Agent sends it">Not sent</span>`}
         ${editor ? null : action}
       </div>
       ${editor ?? html`<${Markup} markup=${comment.html} />`}
+      <${PostingFooter} person=${comment.author} />
       <${Reaction} run=${comment.run} />
     </div>
   </div>`

@@ -3,11 +3,12 @@
 // issue with a review shows both on one page, the issue's conversation on its Issue tab and the review's on its Review
 // tab, each with its own comment box. app-review.js draws a PR's files, line comments, and buttons.
 import { html } from './vendor/preact-htm.js'
+import { ChoreText } from './app-chore.js'
 import { Body, cleanParts } from './app-decisions.js'
 import { DeleteButton, DeleteDialog } from './app-delete.js'
 import { BodyEdit, commentEdit, EditButton, EditedMark, editing, editingLabels, LabelsButton, LabelsEdit, MarkdownBox,
   TitleEdit } from './app-edit.js'
-import { Avatar, Chip, clean, Icon, iconOf, Label, labelOf, Reaction } from './app-parts.js'
+import { authorName, Avatar, Chip, clean, Icon, iconOf, Label, labelOf, PostingFooter, Reaction } from './app-parts.js'
 import { Diffstat, Files, headerReviewButtons, Lines, markFileInView, pressReview, REVIEW_KEYS, reviewAct, ReviewButton,
   reviewButtons, scrollerOf, unsentCount } from './app-review.js'
 import { act, actionLabel, age, closeDetail, deskOf, draw, firstTab, FORWARD, itemHref, KEYS, LABELS, pickDetailTab,
@@ -219,12 +220,16 @@ function relationsOf(desk, number) {
 }
 
 /** The selected card's buttons, each with its key; one waiting for its confirm shows Confirm and Cancel. */
-function Actions({ card }) {
+export function Actions({ card }) {
   return card.actions.filter(action => LABELS[action]).map(action => {
     const main = FORWARD.has(action)
-    const kind = main ? 'primary' : ['dismiss', 'close', 'cancel'].includes(action) ? 'danger' : undefined
+    const kind = main ? 'primary' : ['dismiss', 'close', 'cancel', 'stop-command'].includes(action) ? 'danger'
+      : undefined
     if (ui.confirming?.id === card.id && ui.confirming.action === action) {
+      // Stop Command asks with the command and how long it has run.
+      const ask = action === 'stop-command' && card.stopAsk
       return html`<span class="confirm" key=${action}>
+        ${ask ? html`<span class="confirm-ask">${ask}</span>` : null}
         <button type="button" class=${kind} onClick=${() => void act(card, action)}>
           Confirm ${actionLabel(card, action)} <kbd>${KEYS[action]}</kbd></button>
         <button type="button" onClick=${() => { ui.confirming = null; draw() }}>Cancel <kbd>Esc</kbd></button>
@@ -271,11 +276,11 @@ function Comment({ author, at, edited, verb = 'commented', markup, parts, answer
   return html`<div class="timeline-item" data-anchor=${anchor}>
     <${Avatar} person=${author} />
     ${editor ?? html`<div class=${opener ? 'comment opener' : 'comment'}>
-      <div class="comment-head"><strong>${author.login}</strong> <span class="muted">${verb} ${age(at)} ago</span>
+      <div class="comment-head"><strong>${authorName(author)}</strong> <span class="muted">${verb} ${age(at)} ago</span>
         <${EditedMark} at=${edited} />
         ${action ? html`<span class="head-actions">${action}</span>` : null}</div>
       <div class="comment-body" onChange=${onTick}><${Body} markup=${markup} parts=${parts} answering=${answering} />
-        <${Reaction} run=${run} /></div>
+        <${PostingFooter} person=${author} /><${Reaction} run=${run} /></div>
     </div>`}
   </div>`
 }
@@ -568,7 +573,7 @@ export function logLines(lines, beats = []) {
 }
 
 /**
- * The agent's log for an issue, as its Actions run would show it, from the newest Claude Code session in the issue's
+ * The agent's log for an issue, from the newest Claude Code or Codex session in the issue's
  * worktree on this machine. It follows the newest line while the agent works, until the person scrolls up.
  */
 function AgentLog({ desk, number, live }) {
@@ -579,11 +584,13 @@ function AgentLog({ desk, number, live }) {
       : kept.status === 'error' ? html`<p class="error">Could not read the agent's log.</p>`
       : html`<p class="muted">Reading the agent's log…</p>`
   }
-  const resume = `cd ${log.worktree} && claude --resume ${log.session}`
+  const worktree = /^[\w./-]+$/.test(log.worktree) ? log.worktree : `'${log.worktree.replaceAll("'", "'\\''")}'`
+  const codex = log.runner === 'codex'
+  const resume = `cd ${worktree} && ${log.resumeCommand ?? `${codex ? 'codex resume' : 'claude --resume'} ${log.session}`}`
   return html`<div class="box agent-log-box">
     <div class="box-head static">
       ${live ? html`<span class="live">Live</span>` : null}
-      <span>Session <code>${log.session.slice(0, 8)}</code></span>
+      <span>${codex ? 'Codex session' : 'Claude Code session'} <code>${log.session.slice(0, 8)}</code></span>
       <span class="muted">updated ${age(log.at)} ago${log.sessions > 1 ? ` · newest of ${log.sessions} sessions` : ''}
         </span>
       <span class="head-actions">
@@ -639,6 +646,18 @@ function stampOf(stamp) {
 }
 
 /**
+ * The sentence that names a failed or stopped run's journalctl command with its Copy button, and on an issue's page
+ * points at the Agent Log tab. A card without a log shows none.
+ */
+export function RunLog({ card, issue }) {
+  return card.log ? html`<p>Read the run's log in a terminal with${' '}
+    <code>${card.log}</code>${' '}<button type="button" class="small"
+    onClick=${() => void copy(card.log)}>Copy</button>${issue !== undefined
+    ? html`, or its agent's session in the <button type="button" class="link"
+      onClick=${() => pickDetailTab('log')}>Agent Log</button> tab` : null}.</p>` : null
+}
+
+/**
  * The selected card as GitHub shows an issue or a PR, with a sidebar of where the card stands. An issue with a review
  * shows the review on its page, under the issue's title and number. Until the person picks a tab, the page shows the
  * card's first tab, as firstTab says. `visible` holds the ids of the cards the list shows, which a dependency's title
@@ -675,9 +694,9 @@ export function Detail({ card, visible }) {
     pr.commits === 1 ? '' : 's'} into`
   // On an issue's page the review's number follows its state, since the title carries the issue's.
   const meta = pr ? html`<span>${issue !== undefined ? html`<span class="muted">#${pr.number}</span> ` : null}
-      <strong>${pr.author.login}</strong> ${merging} <code class="branch">${pr.base}</code>
+      <strong>${authorName(pr.author)}</strong> ${merging} <code class="branch">${pr.base}</code>
       ${' from '}<code class="branch">${pr.head}</code></span>`
-    : item ? html`<span><strong>${item.author.login}</strong> opened this issue ${age(item.at)} ago ·
+    : item ? html`<span><strong>${authorName(item.author)}</strong> opened this issue ${age(item.at)} ago ·
       ${` ${item.commentCount} comment${item.commentCount === 1 ? '' : 's'}`}</span>`
     : card.run !== undefined ? html`<span>An agent-desk run ${card.state === 'timed out'
       ? 'ran past its time limit' : 'failed'}${card.note ? ` in ${card.note}` : ''}.</span>`
@@ -722,16 +741,12 @@ export function Detail({ card, visible }) {
     </div>
     <div class=${shownFiles ? 'gh-layout no-side' : 'gh-layout'}>
       <div class="gh-main">
-        ${card.chore ? html`<p>${card.chore.name} runs every ${card.chore.every}. Its last run: ${card.chore.last}.</p>`
-          : null}
-        ${card.state === 'timed out' ? html`<p>The dispatcher stopped the run at its unit's time limit. Its
-          worktree and any commits it made stay on this machine, and ${card.continues
+        ${card.chore ? html`<p>${card.chore.name} runs every ${card.chore.every}. Its last run: ${card.chore.last}.</p>
+          <${ChoreText} desk=${card.desk} name=${card.chore.name} />` : null}
+        ${card.state === 'timed out' || card.note === 'timed out' ? html`<p>The dispatcher stopped the run at its
+          unit's time limit. Its worktree and any commits it made stay on this machine, and ${card.continues
             ? 'Continue takes up the same agent session in them' : 'Retry starts a new agent from them'}.</p>` : null}
-        ${card.run !== undefined && card.log ? html`<p>Read the run's log in a terminal with
-          <code>${card.log}</code>${' '}<button type="button" class="small"
-          onClick=${() => void copy(card.log)}>Copy</button>${issue !== undefined
-          ? html`, or its agent's session in the <button type="button" class="link"
-            onClick=${() => pickDetailTab('log')}>Agent Log</button> tab` : null}.</p>` : null}
+        <${RunLog} card=${card} issue=${issue} />
         ${tabs.length > 0 ? html`<nav class=${ui.pinned ? 'tabnav pinned' : 'tabnav'}>${tabs.map(([id, title, count]) =>
           html`<button type="button" key=${id} aria-current=${String(id === shown)}
             onClick=${() => pickDetailTab(id)}>${title}

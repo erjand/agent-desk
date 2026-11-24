@@ -324,9 +324,29 @@ export function avatarOf(login) {
   return { initial, hue: (hash >>> 0) % AVATAR_HUES }
 }
 
-/** An author's initial in a circle of their color, hidden from screen readers since their name follows it. */
+export function authorName(person) {
+  return person.posting?.model ?? person.login
+}
+
+export function PostingFooter({ person }) {
+  const posting = person.posting
+  return posting ? html`<div class="posting-footer muted">
+    <small>${`Posted by ${posting.model} with agent-desk v${posting.version}`}</small>
+  </div>` : null
+}
+
+const PROVIDER_MARKS = { anthropic: '/anthropic.svg', openai: '/openai.svg' }
+
+/** A provider mark or an author's initial, hidden from screen readers since their name follows it. */
 export function Avatar({ person, size = 40 }) {
-  const { initial, hue } = avatarOf(person.login)
+  const provider = person.posting?.provider
+  if (Object.hasOwn(PROVIDER_MARKS, provider)) {
+    return html`<span class=${`avatar avatar-provider avatar-${provider}`} aria-hidden="true"
+      style=${{ width: size, height: size }}>
+      <img src=${PROVIDER_MARKS[provider]} alt="" />
+    </span>`
+  }
+  const { initial, hue } = avatarOf(authorName(person))
   const style = { width: `${size}px`, height: `${size}px`, fontSize: `${Math.round(size * 0.45)}px` }
   return html`<span class=${`avatar avatar-${hue}`} aria-hidden="true" style=${style}>${initial}</span>`
 }

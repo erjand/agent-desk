@@ -1,6 +1,6 @@
 // Run with: node --test web/
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -182,8 +182,8 @@ function project(name: string): Desk {
 
 /**
  * The store as the steps see it: `agent-desk review` answers from `prs`, `agent-desk worktree` adds the branch's
- * worktree the way lib/worktree.sh does, and git runs for real. `fail` makes the first step whose words start with it
- * fail, with `agent-desk` standing for the command's path.
+ * worktree the way lib/worktree.sh does, `agent-desk worktree --teardown` and git run for real. `fail` makes the first
+ * step whose words start with it fail, with `agent-desk` standing for the command's path.
  */
 function fakeStore(prs: { number: number; url: string; title: string; body: string }[], fail: string[] = []) {
   const real = steps.run
@@ -207,6 +207,12 @@ function fakeStore(prs: { number: number; url: string; title: string; body: stri
       const pr = prs.find(one => one.number === Number(argv[3]))
       Object.assign(pr ?? {}, { title: value('--title'), body: value('--body') })
       return { ok: true, out: '', err: '' }
+    }
+    if (words[0] === 'agent-desk' && words[1] === 'worktree' && words[2] === '--teardown') {
+      // The project's checkout and repository, named outright, keep the script off the projects file and the live store.
+      return new Promise(resolve => execFile(argv[0] ?? '', argv.slice(1), { cwd, env: { ...process.env,
+        AGENT_DESK_CHECKOUT: cwd, GH_REPO: 'me/teardown', XDG_STATE_HOME: join(home, 'state') } },
+      (error, out, err) => resolve({ ok: !error, out: String(out), err: String(err) })))
     }
     if (argv[1] === 'worktree' && argv[0]?.endsWith('agent-desk')) {
       const local = git(cwd, 'branch', '--list', SCHEDULE_BRANCH).trim()
@@ -282,6 +288,29 @@ test('a failed push leaves no worktree or branch behind, and says which step fai
     assert.equal(existsSync(scheduleWorktree(desk.main)), false)
     assert.equal(git(desk.main, 'branch', '--list', SCHEDULE_BRANCH), '')
     assert.equal(git(desk.main, 'ls-remote', '--heads', 'origin', SCHEDULE_BRANCH), '')
+  } finally {
+    github.restore()
+  }
+})
+
+test('a failed change runs the project\'s worktree.teardown in the schedule worktree before removing it, even when the '
+  + 'teardown fails', async () => {
+  const desk = project('teardown')
+  const torn = join(home, 'teardown-torn')
+  writeFileSync(join(desk.main, '.agent-desk.json'), CONFIG.replace('"title": "Agents",',
+    `"title": "Agents",\n  "worktree": { "teardown": "pwd >${torn}; ls .agent-desk.json >>${torn}; exit 3" },`))
+  git(desk.main, 'commit', '-q', '-am', 'Add a teardown')
+  const github = fakeStore([], ['git', 'push'])
+  try {
+    await assert.rejects(changeSchedule(desk, 'audit', { every: 3 }), /git push failed/)
+    const dest = scheduleWorktree(desk.main)
+    // The teardown ran inside the worktree while it still held its files, and its failure stopped nothing.
+    assert.equal(readFileSync(torn, 'utf8'), `${dest}\n.agent-desk.json\n`)
+    const teardown = github.ran.findIndex(argv => argv[1] === 'worktree' && argv[2] === '--teardown')
+    const removal = github.ran.findIndex(argv => argv[0] === 'git' && argv[1] === 'worktree' && argv[2] === 'remove')
+    assert.ok(teardown >= 0 && teardown < removal, `${teardown} runs before ${removal}`)
+    assert.equal(existsSync(dest), false)
+    assert.equal(git(desk.main, 'branch', '--list', SCHEDULE_BRANCH), '')
   } finally {
     github.restore()
   }

@@ -210,6 +210,8 @@ class CutoverTest(CutoverCase):
 
     def test_a_dry_run_prints_each_step_and_changes_nothing(self):
         self.hold({"state": "running"})
+        before = self.state_files()
+        self.assertNotIn("desk.sqlite", before)
         out, _ = self.cutover("--dry-run", REPO)
         self.assertIn("Would refuse now: org/game is on Auto, not Hold.", out)
         self.assertIn("Would import org/game from GitHub", out)
@@ -222,15 +224,9 @@ class CutoverTest(CutoverCase):
         self.assertIn("Would turn Issues off.", self.cutover("--dry-run", "--issues-off", REPO)[0])
         self.assertNotIn("Restarted", out)
         self.assertEqual(self.calls(), [])
-        self.assertFalse((self.state / "agent-desk" / "desk.sqlite").exists())
+        self.assertEqual(self.state_files(), before)
         self.assertEqual((self.checkout / "AGENTS.md").read_text(), AGENTS)
         self.assertNotIn("restart", (self.root / "systemctl.log").read_text())
-
-    def test_a_dry_run_without_a_store_creates_none(self):
-        before = self.state_files()
-        self.cutover("--dry-run", REPO)
-        self.assertEqual(self.state_files(), before)
-        self.assertNotIn("desk.sqlite", before)
 
     def test_a_dry_run_refuses_an_older_store_and_leaves_it_as_it_was(self):
         path = self.state / "agent-desk" / "desk.sqlite"
@@ -456,22 +452,19 @@ class CutoverTest(CutoverCase):
         self.assertIn(f"Cutting over org/game in {self.checkout}", out)
         self.assertTrue(self.github()["has_issues"])
 
-    def test_issues_off_turns_issues_off_and_the_undo_turns_them_back_on(self):
+    def test_issues_off_turns_issues_off_a_rerun_leaves_them_off_and_the_undo_turns_them_back_on(self):
         out, _ = self.cutover("--issues-off", REPO)
         self.assertFalse(self.github()["has_issues"])
         self.assertEqual(self.steps(), ALL_STEPS + ISSUES_STEPS)
         self.assertIn("- org/game: Turned Issues off", out[out.index("\nSummary"):])
-        out, _ = self.cutover("--undo", REPO)
-        self.assertIn("Turned Issues back on.", out)
-        self.assertTrue(self.github()["has_issues"])
-
-    def test_a_rerun_without_issues_off_leaves_issues_a_cutover_turned_off(self):
-        self.cutover("--issues-off", REPO)
         calls = len(self.calls())
         out, _ = self.cutover(REPO)
         self.assertIn("Left Issues as they are on GitHub.", out)
         self.assertFalse(self.github()["has_issues"])
         self.assertEqual(len(self.calls()), calls)
+        out, _ = self.cutover("--undo", REPO)
+        self.assertIn("Turned Issues back on.", out)
+        self.assertTrue(self.github()["has_issues"])
 
     def test_the_undo_after_a_kill_after_issues_went_off_turns_them_back_on(self):
         self.github(kill="has_issues=false")
@@ -484,11 +477,6 @@ class CutoverTest(CutoverCase):
         out, _ = self.cutover("--undo", REPO)
         self.assertIn("Turned Issues back on.", out)
         self.assertTrue(self.github()["has_issues"])
-
-    def test_the_undo_takes_no_issues_off(self):
-        self.cutover(REPO)
-        _, err = self.cutover("--undo", "--issues-off", REPO, status=2)
-        self.assertIn("usage: agent-desk cutover", err)
 
 
 class UndoTest(CutoverCase):
@@ -565,8 +553,10 @@ class UsageTest(CutoverCase):
         self.assertIn("unrecognized arguments: --bogus", err)
 
     def test_a_bad_combination_of_flags_prints_one_usage_prefix(self):
-        _, err = self.cutover("--all", REPO, status=2)
-        self.assert_one_prefix(err)
+        for args in (("--all", REPO), ("--undo", "--issues-off", REPO)):
+            with self.subTest(args=args):
+                _, err = self.cutover(*args, status=2)
+                self.assert_one_prefix(err)
 
 
 if __name__ == "__main__":

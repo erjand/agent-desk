@@ -38,6 +38,34 @@ class HoldCase(unittest.TestCase):
 
 
 class HoldTest(HoldCase):
+    def test_bulk_runner_changes_save_once_and_preserve_other_settings(self):
+        hold.save({"state": "manual", "account": "api", "usageLimit": {"on": True, "percent": 80},
+                   "apiBudget": {"on": True, "dollars": 200}, "issueRunners": {"org/other": "claude"}})
+        before = hold.status()
+        for choice, expected in (("codex", {"org/game": "codex", "org/site": "codex"}), ("default", {})):
+            with mock.patch.object(hold, "save", wraps=hold.save) as save:
+                hold.set_issue_runner("org/game", choice, "org/site")
+                save.assert_called_once()
+            self.assertEqual(hold.status(), {**before, "issueRunners": {**before["issueRunners"], **expected}})
+
+    def test_issue_runner_choices_survive_mode_changes_and_reset_one_project(self):
+        hold.set_issue_runner("org/game", "codex")
+        hold.set_issue_runner("org/site", "claude")
+        hold.set_state("held")
+        hold.resume()
+        saved = hold.status()
+        self.assertEqual(hold.issue_runner_override(saved, "org/game"), "codex")
+        self.assertEqual(hold.issue_runner_override(saved, "org/site"), "claude")
+        self.assertIsNone(hold.issue_runner_override(saved, "org/other"))
+
+        hold.set_issue_runner("org/game", "default")
+        self.assertEqual(hold.status()["issueRunners"], {"org/site": "claude"})
+        with self.assertRaises(ValueError):
+            hold.set_issue_runner("org/site", "other")
+        self.assertEqual(hold.issue_runner_override(hold.status(), "org/site"), "claude")
+        hold.set_issue_runner("org/site", "default")
+        self.assertNotIn("issueRunners", hold.status())
+
     def test_the_runs_working_are_the_dispatchers_running_units(self):
         path = Path(self.folder.name) / "desk.sqlite"
         with mock.patch.object(store, "DATABASE", path), mock.patch.dict(os.environ, {"AGENT_DESK_RUN": ""}):
@@ -343,11 +371,21 @@ class SlotsTest(HoldCase):
         self.slots("org/town", "benchmark=0")
         code, out = self.slots()
         self.assertEqual(code, 0)
-        self.assertEqual(out.splitlines()[0::6], ["org/game", "org/town"])
+        self.assertEqual(out.splitlines()[0::7], ["org/game", "org/town"])
         self.assertIn("  benchmark   0   config  2   override", out)
         code, out = self.slots("org/game")
         self.assertEqual(out.splitlines()[:2], ["org/game", "  agent       3   config  3"])
         self.assertEqual(self.slots("org/elsewhere")[0], 1)
+
+    def test_a_gpu_count_left_unset_prints_as_a_dash_and_an_override_sets_it_until_reset(self):
+        code, out = self.slots("org/game")
+        self.assertIn("  gpu         -   config  -\n", out)
+        code, out = self.slots("org/game", "gpu=1")
+        self.assertEqual(code, 0, out)
+        self.assertIn("  gpu         1   config  -   override\n", out)
+        self.assertEqual(self.overrides(), {"org/game": {"gpu": 1}})
+        self.slots("org/game", "--reset", "gpu")
+        self.assertIsNone(self.overrides())
 
     def test_a_kind_or_count_it_does_not_know_or_an_unknown_project_changes_nothing(self):
         for args in (["agent"], ["agents=1"], ["agent=x"], ["agent=-1"], ["agent=1", "fix"], ["--reset", "agents"]):

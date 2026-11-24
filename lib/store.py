@@ -12,7 +12,10 @@ the web server, and each pane read and write it at once. These rules hold for ev
 - Each project keeps one start order of its issues that are queued or waiting, in `items.rank`, which the dispatcher
   starts fresh starts and hands serial slots by. An issue joins the end when it enters either state, keeps its place
   as it moves between them, and leaves the order when it moves to any other state. `Store.move` moves one up, down,
-  or to the top, with a `queue-moved` event. `--json position` prints an issue's place, from 1, or null outside it.
+  to the top, or to the bottom, with a `queue-moved` event, and `Store.sort_order` sorts the whole order with a
+  `queue-sorted` one. `--json position` prints an issue's place, from 1, or null outside it.
+- Each project keeps one list order of its issues apart from the start order, in `items.list_rank`, which the board
+  lists Open, Blocked, Needs Design, Backlog, and Ideas in, as `lib/store_list.py` describes.
 - Every write goes through `Store.write`, which opens with BEGIN IMMEDIATE and appends its `events` rows in the same
   transaction. The busy timeout doesn't cover a read transaction that upgrades to a write, so no write starts as a
   read. A reader learns of every change from `events.id` alone. An import is the one exception: it writes its pages
@@ -46,8 +49,9 @@ the web server, and each pane read and write it at once. These rules hold for ev
   `comment-answered` event whose `added` names the comment's event, in the transaction that asks for the run, so
   after a restart it answers the comments since the last one.
 
-`Store` inherits its import, branch and check, run, GPU call, delete, and board methods from `lib/store_import.py`,
-`lib/store_checks.py`, `lib/store_runs.py`, `lib/store_gpu.py`, `lib/store_delete.py`, and `lib/store_board.py`. The
+`Store` inherits its import, branch and check, run, GPU call, delete, board, and list order methods from
+`lib/store_import.py`, `lib/store_checks.py`, `lib/store_runs.py`, `lib/store_gpu.py`, `lib/store_delete.py`,
+`lib/store_board.py`, and `lib/store_list.py`. The
 migrations, status values, and time format live in `lib/store_schema.py`, whose names this module imports back, so
 every caller reads them from `store`.
 """
@@ -70,7 +74,9 @@ from store_board import BoardMixin, mergeable_of, outer_state
 from store_checks import ChecksMixin
 from store_delete import DeleteMixin
 from store_gpu import GpuMixin
+from start_order import sorted_order
 from store_import import ImportMixin
+from store_list import ListOrderMixin
 from store_runs import FAILED_SECONDS, RunsMixin  # noqa: F401
 from store_schema import (CHECK_FAILURES, GPU_SCHEMA, LINK_KINDS, MIGRATIONS, ORDER_STATES,  # noqa: F401
                           RANK_SCHEMA, SCHEMA_VERSION, STATUS_LABELS, STATUSES, StoreError, epoch_of, store_time)
@@ -88,8 +94,9 @@ BUSY_MS = 5000
 ISSUE_FIELDS = ("number", "kind", "title", "body", "state", "status", "stateReason", "author", "labels", "comments",
                 "createdAt", "updatedAt", "closedAt", "parent", "subIssues", "blockedBy", "blocking", "position",
                 "duplicateOf")
-REVIEW_FIELDS = ISSUE_FIELDS + ("headRefName", "baseRefName", "headRefOid", "isDraft", "mergeCommit",
-                                "closingIssuesReferences", "checks", "mergeable")
+REVIEW_FIELDS = ISSUE_FIELDS + ("headRefName", "baseRefName", "headRefOid", "isDraft", "mergeCommit", "mergedAt",
+                                "closingIssuesReferences", "checks", "mergeable", "additions", "deletions",
+                                "changedFiles")
 # A mention that sends the agent to work, as lib/import_github.py and web/review.ts read one. A comment sent to the
 # agent without one gets `@agent ` put in front.
 MENTION = re.compile(r"(?<![\w/])@agent\b")
@@ -166,7 +173,7 @@ def make_private(folder):
         folder.chmod(0o700)
 
 
-class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMixin):
+class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMixin, ListOrderMixin):
     """
     One connection to the database. Reads call the query methods directly; every write runs inside `write`. A store
     opened with `read_only` opens the file read-only and never creates, migrates, or writes it, and reads a database
@@ -369,17 +376,19 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
                 "headRefName": review["branch"], "baseRefName": review["base"], "headRefOid": review["head_sha"],
                 "isDraft": bool(review["draft"]),
                 "mergeCommit": {"oid": review["merged_sha"]} if review["merged_sha"] else None,
+                # A merged review stays closed, so it closed when it merged.
+                "mergedAt": row["closed_at"] if review["merged_sha"] else None,
                 "closingIssuesReferences": self._linked(project, number, "fixes", outward=True),
                 "checks": checks, "mergeable": mergeable_of(checks, branch, head, review["base"]),
             })
         return shaped
 
     def items(self, project, kind, state="open", status=None, labels=(), search=None, head=None, base=None,
-              limit=30, head_prefix=None, since=None):
+              limit=30, head_prefix=None, since=None, merged_since=None):
         """
         The issues or reviews that match every filter, newest first, as `item` shapes them. `head` matches a review's
         branch whole, and `head_prefix` its start. `since` keeps the items created at or after a time as the store
-        writes it, or a date.
+        writes it, or a date, and `merged_since` the reviews merged at or after one.
         """
         where, values = ["items.project = ?", "items.kind = ?"], [project, kind]
         for label in labels:
@@ -414,6 +423,9 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
         if since:
             where.append("items.created_at >= ?")
             values.append(since)
+        if merged_since:
+            where.append("reviews.merged_sha IS NOT NULL AND items.closed_at >= ?")
+            values.append(merged_since)
         rows = self.db.execute(
             "SELECT items.number FROM items LEFT JOIN reviews ON reviews.project = items.project"
             f" AND reviews.number = items.number WHERE {' AND '.join(where)} ORDER BY items.number DESC LIMIT ?",
@@ -476,6 +488,11 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
         row = self.db.execute("SELECT branch FROM reviews WHERE project = ? AND number = ?",
                               (project, number)).fetchone()
         return row["branch"] if row else None
+
+    def review(self, project, number):
+        """Review `number`'s row of `reviews` as a dict, or None."""
+        row = self.db.execute("SELECT * FROM reviews WHERE project = ? AND number = ?", (project, number)).fetchone()
+        return dict(row) if row else None
 
     def review_merged(self, project, number):
         """Whether review `number` merged."""
@@ -566,6 +583,7 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
                             (self._last_rank(project) + 1, project, number))
         elif state not in ORDER_STATES and row["rank"] is not None:
             self.db.execute("UPDATE items SET rank = NULL WHERE project = ? AND number = ?", (project, number))
+        self._list_top(project, number)
         self._event(project, number, "state-changed", state=state, was=row["state"], reason=reason)
 
     def _last_rank(self, project):
@@ -603,6 +621,8 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
             done = self.db.execute("DELETE FROM labels WHERE project = ? AND number = ? AND name = ?",
                                    (project, number, name)).rowcount
         if done:
+            if name in ("backlog", "idea"):
+                self._list_top(project, number)
             self._event(project, number, "label-added" if add else "label-removed", label=name)
 
     def _link(self, project, from_number, to_number, kind, add=True):
@@ -620,6 +640,8 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
             done = self.db.execute("DELETE FROM links WHERE project = ? AND from_number = ? AND to_number = ?"
                                    " AND kind = ?", (project, from_number, to_number, kind)).rowcount
         if done:
+            if kind == "blocks":
+                self._list_top(project, to_number)
             self._event(project, from_number, "link-added" if add else "link-removed", kind=kind, to=to_number)
 
     def project(self, project, path=None):
@@ -647,12 +669,13 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
             self.db.execute("UPDATE projects SET next_number = MAX(next_number, ?) WHERE slug = ?",
                             (number + 1, project))
             stamp = now()
-            self.db.execute("INSERT INTO items (project, number, kind, title, body, author, created_at, updated_at)"
-                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            (project, number, kind, title, body, author(), stamp, stamp))
+            self.db.execute("INSERT INTO items (project, number, kind, title, body, author, created_at, updated_at,"
+                            " author_run) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (project, number, kind, title, body, author(), stamp, stamp, self.author_run(project)))
             if kind == "review":
                 self.db.execute("INSERT INTO reviews (project, number, branch, base, head_sha, draft)"
                                 " VALUES (?, ?, ?, ?, ?, ?)", (project, number, branch, base, head_sha, int(draft)))
+            self._list_top(project, number)
             self._event(project, number, "item-created", kind=kind, title=title)
             for label in labels:
                 self._label(project, number, label, add=True)
@@ -688,16 +711,16 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
 
     def move(self, project, number, where):
         """
-        Moves a queued or waiting issue in its project's start order, `up` one place, `down` one place, to the `top`,
-        or to a place given as a number from 1, with a `queue-moved` event naming its places before and after, and
-        returns its place, from 1. A place past the end moves it last. A move past either end, or to the place it holds,
-        leaves the order as it is and writes nothing. Raises StoreError for an issue in any other state.
+        Moves a queued or waiting issue in its project's start order, `up` one place, `down` one place, to the `top` or
+        the `bottom`, or to a place given as a number from 1, with a `queue-moved` event naming its places before and
+        after, and returns its place, from 1. A place past the end moves it last. A move past either end, or to the
+        place it holds, leaves the order as it is and writes nothing. Raises StoreError for an issue in any other state.
         """
         place = isinstance(where, int) and not isinstance(where, bool)
         if place and where < 1:
             raise StoreError(f"{where} isn't a place; the start order's places count from 1.")
-        if not place and where not in ("up", "down", "top"):
-            raise StoreError(f"{where} isn't a move; the moves are up, down, top, and a place from 1.")
+        if not place and where not in ("up", "down", "top", "bottom"):
+            raise StoreError(f"{where} isn't a move; the moves are up, down, top, bottom, and a place from 1.")
         with self.write():
             row = self._row(project, number, "issue")
             if row["state"] not in ORDER_STATES:
@@ -707,7 +730,8 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
             numbers = [one["number"] for one in self.order(project)]
             was = numbers.index(number)
             to = min(where, len(numbers)) - 1 if place else \
-                {"up": max(was - 1, 0), "down": min(was + 1, len(numbers) - 1), "top": 0}[where]
+                {"up": max(was - 1, 0), "down": min(was + 1, len(numbers) - 1), "top": 0,
+                 "bottom": len(numbers) - 1}[where]
             if to == was:
                 return was + 1
             numbers.insert(to, numbers.pop(was))
@@ -715,6 +739,36 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
                 self.db.execute("UPDATE items SET rank = ? WHERE project = ? AND number = ?", (place, project, one))
             self._event(project, number, "queue-moved", to=to + 1, was=was + 1)
         return to + 1
+
+    def sort_order(self, project):
+        """
+        Rewrites a project's start order into lib/start_order.py's sorted order, the issues that can start now first,
+        with one `queue-sorted` event naming the order before and after, and returns whether the order changed. An
+        order already sorted writes nothing.
+        """
+        with self.write():
+            self._settle_order(project)
+            was = [one["number"] for one in self.order(project)]
+            queue = [{"number": number, "labels": [{"name": name} for name in self._labels(project, number)]}
+                     for number in was]
+            rows = self.db.execute(
+                "SELECT links.to_number, links.from_number FROM links JOIN items ON items.project = links.project"
+                " AND items.number = links.from_number WHERE links.project = ? AND links.kind = 'blocks'"
+                " AND items.state != 'closed'", (project,)).fetchall()
+            blockers = {}
+            for row in rows:
+                blockers.setdefault(row["to_number"], set()).add(row["from_number"])
+            working = [{"number": row["number"], "status": "in-progress",
+                        "labels": [{"name": name} for name in self._labels(project, row["number"])]}
+                       for row in self.db.execute("SELECT number FROM items WHERE project = ? AND kind = 'issue'"
+                                                  " AND state = 'in-progress'", (project,)).fetchall()]
+            numbers = sorted_order(queue, blockers, working)
+            if numbers == was:
+                return False
+            for place, one in enumerate(numbers, start=1):
+                self.db.execute("UPDATE items SET rank = ? WHERE project = ? AND number = ?", (place, project, one))
+            self._event(project, None, "queue-sorted", order=numbers, was=was)
+        return True
 
     def link(self, project, from_number, to_number, kind, add=True):
         """Joins two items: a `parent` link from a sub-issue to its one parent, a `blocks` link from a blocker to what
@@ -746,9 +800,10 @@ class Store(ImportMixin, ChecksMixin, RunsMixin, GpuMixin, DeleteMixin, BoardMix
                                          (project, number)).fetchone()
                 head_sha = self.branch_head(project, review["branch"]) or review["head_sha"]
             comment = self.db.execute(
-                "INSERT INTO comments (project, number, author, body, path, line, head_sha, to_agent, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (project, number, author(), body, path, line, head_sha, int(to_agent), now())).lastrowid
+                "INSERT INTO comments (project, number, author, body, path, line, head_sha, to_agent, created_at,"
+                " author_run) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (project, number, author(), body, path, line, head_sha, int(to_agent), now(),
+                 self.author_run(project))).lastrowid
             for quoted in dict.fromkeys(quotes):
                 if not self.db.execute("UPDATE comments SET sent_in = ? WHERE id = ? AND project = ? AND number = ?"
                                        " AND path IS NOT NULL AND sent_in IS NULL",

@@ -48,7 +48,7 @@ PLUGIN = """{
 """
 ENTRIES = {
     "issue-10.md": "### Fixed\n\n- A fix that wraps\n  onto a second line. (#10)\n\n### Added\n\n- A command. (#10)\n",
-    "issue-9.md": "### Changed\n\n- **Workflows**: A workflow change. (#9)\n\n### Added\n\n- A pane row. (#9)\n",
+    "issue-9.md": "### Changed\n\n- **Breaking**: A label change. (#9)\n\n### Added\n\n- A pane row. (#9)\n",
     "issue-11.md": "### Security\n\n- A safer default. (#11)\n\n### Removed\n\n- An old flag. (#11)\n",
 }
 SECTION = """## [0.2.0] - 2026-11-16
@@ -60,7 +60,7 @@ SECTION = """## [0.2.0] - 2026-11-16
 
 ### Changed
 
-- **Workflows**: A workflow change. (#9)
+- **Breaking**: A label change. (#9)
 
 ### Removed
 
@@ -82,19 +82,20 @@ def items(*texts):
 
 
 class ChooseVersionTest(unittest.TestCase):
-    def test_below_one_breaking_and_workflows_bump_the_minor_number(self):
+    def test_below_one_breaking_bumps_the_minor_number(self):
         self.assertEqual(release.choose_version("0.3.4", items("**Breaking**: A label changed. (#1)")), "0.4.0")
-        self.assertEqual(release.choose_version("0.3.4", items("**Workflows**: A job changed. (#1)")), "0.4.0")
-        self.assertEqual(release.choose_version("0.3.4", items("**Breaking**: **Workflows**: Both. (#1)")), "0.4.0")
+        self.assertEqual(release.choose_version("0.3.4", items("A. (#1)", "**Breaking**: B. (#2)")), "0.4.0")
 
     def test_below_one_anything_else_bumps_the_patch_number(self):
         self.assertEqual(release.choose_version("0.3.4", items("A command. (#1)", "Another. (#2)")), "0.3.5")
 
-    def test_from_one_on_each_marker_bumps_its_own_number(self):
+    def test_from_one_on_breaking_bumps_the_major_number_and_anything_else_the_patch(self):
         self.assertEqual(release.choose_version("1.2.3", items("A. (#1)", "**Breaking**: B. (#2)")), "2.0.0")
-        self.assertEqual(release.choose_version("1.2.3", items("**Breaking**: **Workflows**: B. (#2)")), "2.0.0")
-        self.assertEqual(release.choose_version("1.2.3", items("A. (#1)", "**Workflows**: W. (#2)")), "1.3.0")
         self.assertEqual(release.choose_version("1.2.3", items("A. (#1)")), "1.2.4")
+
+    def test_the_retired_workflows_marker_picks_no_version(self):
+        self.assertEqual(release.choose_version("0.3.4", items("**Workflows**: A job changed. (#1)")), "0.3.5")
+        self.assertEqual(release.choose_version("1.2.3", items("A. (#1)", "**Workflows**: W. (#2)")), "1.2.4")
 
     def test_a_marker_counts_only_at_an_items_start(self):
         self.assertEqual(release.choose_version("1.2.3", items("Mentions **Breaking**: later. (#1)")), "1.2.4")

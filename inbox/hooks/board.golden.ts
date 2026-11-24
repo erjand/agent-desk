@@ -13,7 +13,8 @@ export const GOLDEN: StoreBoard = {
       "labels": [],
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
-      "blockedBy": []
+      "blockedBy": [],
+      "listPosition": 12
     },
     {
       "number": 2,
@@ -62,6 +63,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 11,
       "comments": [
         {
           "body": "An agent started on `agent/issue-5`.",
@@ -77,7 +79,8 @@ export const GOLDEN: StoreBoard = {
       "labels": [],
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
-      "blockedBy": []
+      "blockedBy": [],
+      "listPosition": 10
     },
     {
       "number": 7,
@@ -86,7 +89,8 @@ export const GOLDEN: StoreBoard = {
       "labels": [],
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
-      "blockedBy": []
+      "blockedBy": [],
+      "listPosition": 9
     },
     {
       "number": 8,
@@ -97,7 +101,8 @@ export const GOLDEN: StoreBoard = {
       ],
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
-      "blockedBy": []
+      "blockedBy": [],
+      "listPosition": 8
     },
     {
       "number": 9,
@@ -109,6 +114,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 7,
       "comments": [],
       "landed": null
     },
@@ -120,6 +126,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 6,
       "comments": [],
       "landed": null
     },
@@ -131,6 +138,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 5,
       "comments": [],
       "landed": null
     },
@@ -142,6 +150,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 4,
       "comments": [],
       "landed": null
     },
@@ -153,6 +162,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 3,
       "comments": [],
       "landed": null
     },
@@ -164,6 +174,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 2,
       "comments": [
         {
           "body": "An agent started on `agent/issue-18`.",
@@ -184,6 +195,7 @@ export const GOLDEN: StoreBoard = {
       "createdAt": "2026-11-10T09:00:00Z",
       "updatedAt": "2026-11-10T09:00:00Z",
       "blockedBy": [],
+      "listPosition": 1,
       "comments": [],
       "landed": {
         "base": "main",
@@ -207,10 +219,14 @@ export const GOLDEN: StoreBoard = {
           "attempt": 1,
           "log": null,
           "startedAt": null,
-          "endedAt": "2026-11-10T09:00:00Z"
+          "endedAt": "2026-11-10T09:00:00Z",
+          "base": null,
+          "baseSha": null,
+          "recheck": false
         }
       ],
-      "mergeable": "MERGEABLE"
+      "mergeable": "MERGEABLE",
+      "baseHead": null
     },
     {
       "number": 13,
@@ -227,10 +243,14 @@ export const GOLDEN: StoreBoard = {
           "attempt": 1,
           "log": "/state/checks/org__game/9.log",
           "startedAt": "2026-11-10T09:00:00Z",
-          "endedAt": "2026-11-10T09:00:00Z"
+          "endedAt": "2026-11-10T09:00:00Z",
+          "base": null,
+          "baseSha": null,
+          "recheck": false
         }
       ],
-      "mergeable": "MERGEABLE"
+      "mergeable": "MERGEABLE",
+      "baseHead": null
     },
     {
       "number": 15,
@@ -241,7 +261,8 @@ export const GOLDEN: StoreBoard = {
       "draft": false,
       "createdAt": "2026-11-10T09:00:00Z",
       "checks": [],
-      "mergeable": "CONFLICTING"
+      "mergeable": "CONFLICTING",
+      "baseHead": "main-head"
     },
     {
       "number": 17,
@@ -258,10 +279,14 @@ export const GOLDEN: StoreBoard = {
           "attempt": 1,
           "log": null,
           "startedAt": null,
-          "endedAt": "2026-11-10T09:00:00Z"
+          "endedAt": "2026-11-10T09:00:00Z",
+          "base": null,
+          "baseSha": null,
+          "recheck": false
         }
       ],
-      "mergeable": "MERGEABLE"
+      "mergeable": "MERGEABLE",
+      "baseHead": null
     },
     {
       "number": 19,
@@ -278,10 +303,14 @@ export const GOLDEN: StoreBoard = {
           "attempt": 1,
           "log": null,
           "startedAt": null,
-          "endedAt": "2026-11-10T09:00:00Z"
+          "endedAt": "2026-11-10T09:00:00Z",
+          "base": null,
+          "baseSha": null,
+          "recheck": false
         }
       ],
-      "mergeable": "MERGEABLE"
+      "mergeable": "MERGEABLE",
+      "baseHead": null
     }
   ],
   "merged": [
@@ -303,7 +332,13 @@ export const GOLDEN: StoreBoard = {
       "started_at": "2026-11-10T11:00:00Z",
       "ended_at": null,
       "benchmark": false,
-      "labelled": false
+      "labelled": false,
+      "account": "subscription",
+      "stalled": {
+        "since": "2026-11-10T11:48:00Z",
+        "tool": "Bash",
+        "summary": "cargo test --workspace"
+      }
     },
     {
       "id": 2,
@@ -314,7 +349,8 @@ export const GOLDEN: StoreBoard = {
       "started_at": "2026-11-10T11:00:00Z",
       "ended_at": "2026-11-10T11:30:00Z",
       "benchmark": false,
-      "labelled": false
+      "labelled": false,
+      "account": "subscription"
     }
   ],
   "asked": [
@@ -325,7 +361,8 @@ export const GOLDEN: StoreBoard = {
     "chore": 1,
     "fix": 1,
     "check": 2,
-    "benchmark": 2
+    "benchmark": 2,
+    "gpu": null
   },
   "checks": [
     {
@@ -365,6 +402,12 @@ export const GOLDEN: StoreBoard = {
     "Chore          Every  Last run                     Next",
     "audit          7d     done Mon Nov 9 08:41         Mon Nov 16 08:41"
   ],
+  "account": {
+    "account": "subscription",
+    "spent": 0.0,
+    "budget": null,
+    "held": false
+  },
   "backup": {
     "at": 1793361000,
     "committedAt": 1793361000,

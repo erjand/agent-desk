@@ -14,7 +14,8 @@ nothing. It pushes to `origin`, or the repository's only remote, at most once an
 warning, and the next run tries again. Before a push to github.com, `gh repo view` reads the repository's visibility,
 and the backup skips the push when the repository is public or `gh` can't say, since the store holds every project's
 issues; the next run asks again. The export leaves out runs, events, checks, and assets, which the snapshots in the
-state folder keep.
+state folder keep, and each issue's places in the start order and the list order. A restore from the repository gives
+each issue its place in the list order by number, the highest first.
 
 Each run saves how it went in `backup.json` beside the database, which the board reads: when it ran, the backup
 remote or null, when the newest backup commit was made and the last push went, whether a commit waits for the push,
@@ -433,6 +434,8 @@ def load(folder, db):
                     db.execute(f"INSERT INTO reviews (project, number, {', '.join(REVIEW_COLUMNS)})"
                                f" VALUES (?, ?{', ?' * len(REVIEW_COLUMNS)})",
                                (slug, number, *(item["review"].get(column) for column in REVIEW_COLUMNS)))
+            # The export leaves the list order out, so each issue takes its place by number, the highest first.
+            db.execute("UPDATE items SET list_rank = number WHERE project = ? AND kind = 'issue'", (slug,))
             # A project.json from before the newest item, or none at all, still leaves new numbers past every item.
             db.execute("UPDATE projects SET next_number = MAX(next_number, COALESCE((SELECT MAX(number) + 1"
                        " FROM items WHERE project = ?), 1)) WHERE slug = ?", (slug, slug))

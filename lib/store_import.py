@@ -1,7 +1,8 @@
 """
 The store's imports from a host: items, comments, links, runs from the old log, and label colors, with the label
 color writes and the cutover's steps beside them. `Store` in `lib/store.py` inherits `ImportMixin`, whose methods
-use the store's `db`, `write`, `_event`, `_project`, and `_labels`.
+use the store's `db`, `write`, `_event`, `_project`, `_labels`, `_settle_order`, `_list_top`, and
+`_settle_list`.
 """
 
 import json
@@ -25,7 +26,8 @@ class ImportMixin:
 
         Each item holds the IMPORTED_ITEM columns, its `labels`, and for a review a `review` with the IMPORTED_REVIEW
         columns. The import's labels replace the item's, and its state replaces the workflow state, which settles the
-        project's start order as `_settle_order` does."""
+        project's start order as `_settle_order` does. An issue whose state the import changes takes the top of the
+        list order, and a new one a place above the rest by number, as `_settle_list` gives it."""
         added = updated = 0
         with self.write():
             self._project(project, path)
@@ -44,6 +46,8 @@ class ImportMixin:
                     if changed:
                         self.db.execute(f"UPDATE items SET {', '.join(f'{key} = ?' for key in IMPORTED_ITEM)}"
                                         " WHERE project = ? AND number = ?", (*values, project, number))
+                    if row["state"] != item["state"]:
+                        self._list_top(project, number)
                 labels = set(item["labels"])
                 held = set(self._labels(project, number))
                 if labels != held:
@@ -68,6 +72,7 @@ class ImportMixin:
                                 (max(item["number"] for item in items) + 1, project))
             # The import writes states directly, so the start order gains the issues it queued and loses the rest.
             self._settle_order(project)
+            self._settle_list(project)
         return added, updated
 
     def import_comments(self, project, comments):

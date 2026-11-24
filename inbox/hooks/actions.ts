@@ -2,7 +2,7 @@
 // module and no Node module, so the pane and the web server share it.
 import type { Row } from '../types'
 import type { Check, Host, Pr, Project } from './board.ts'
-import { type OrderMove, prName } from './moves.ts'
+import { type ListMove, type OrderMove, prName } from './moves.ts'
 import { DESK, DISPATCH, FAILURES, HOLD, parsed, run } from './run.ts'
 
 // The ids of failed runs the person dismissed, kept across sessions in the host's store; the newest MAX_DISMISSED of
@@ -20,10 +20,15 @@ const NOTE_CHARS = 120
 // `mergeable` says, and no failed test.
 const FAILED_CHECKS = new Set(['failed', 'timed-out', 'lost'])
 
-/** A PR's failed checks, each with its name and its log, when it has one. */
-function failedChecks(checks: Check[] = []): { name: string; log?: string }[] {
+/** A PR's failed checks, each with its name, its log when it has one, and the base it merged when it names one. */
+function failedChecks(checks: Check[] = []): { name: string; log?: string; against: string }[] {
   return checks.filter(check => FAILED_CHECKS.has(check.status) && check.name !== 'merge')
-    .map(check => ({ name: check.name, ...(check.log ? { log: check.log } : {}) }))
+    .map(check => ({ name: check.name, ...(check.log ? { log: check.log } : {}), against: mergedWith(check) }))
+}
+
+/** The base a check merged, such as ` merged with main at 01840f3`, or nothing when the check names none. */
+function mergedWith(check: Check): string {
+  return check.baseSha ? ` merged with ${check.base ?? 'main'} at ${check.baseSha.slice(0, 7)}` : ''
 }
 
 /** Whether a PR has checks and every one passed; a PR with none, or with one still queued or running, hasn't. */
@@ -59,8 +64,18 @@ export async function failingNote(host: Host, project: Project, pr: Pick<Pr, 'ch
     return undefined
   }
   const [error] = first.log === undefined ? [] : await failureOf(host, project, first.log)
-  const note = `${first.name} failed${error ? `: ${error.replace(/^\S*\//, '')}` : ''}`
+  const note = `${first.name} failed${first.against}${error ? `: ${error.replace(/^\S*\//, '')}` : ''}`
   return note.length > NOTE_CHARS ? `${note.slice(0, NOTE_CHARS - 1)}…` : note
+}
+
+/**
+ * A ready PR's note when its check passed merged with an older commit of its base, such as
+ * `test passed, 2 merges behind`; undefined while it passed against the newest or hasn't passed.
+ */
+export function behindNote(checks: Check[] = []): string | undefined {
+  const [check] = checks
+  const behind = checks.length === 1 && check?.status === 'passed' ? check.behind ?? 0 : 0
+  return behind > 0 ? `${check?.name} passed, ${behind} ${behind === 1 ? 'merge' : 'merges'} behind` : undefined
 }
 
 export async function dismissedRuns(host: Host): Promise<number[]> {
@@ -108,6 +123,16 @@ export async function unqueueIssue(host: Host, project: Project, issue: number):
 export async function pauseIssue(host: Host, project: Project, issue: number): Promise<boolean> {
   return (await run(host, project, ['bash', '-c', `exec python3 -B ${DISPATCH} pause "$1"`, '_', String(issue)]))
     !== null
+}
+
+/**
+ * Stops the command an issue's agent run waits on, as `agent-desk stop-command` does: the run ends the command's
+ * processes and goes on with its failure. False when no agent run works the issue, the run waits on no command, or it
+ * doesn't answer.
+ */
+export async function stopCommand(host: Host, project: Project, issue: number): Promise<boolean> {
+  return (await run(host, project, ['bash', '-c', `exec python3 -B ${DISPATCH} stop-command "$1"`, '_',
+    String(issue)])) !== null
 }
 
 /**
@@ -214,8 +239,9 @@ export async function markDesigned(host: Host, project: Project, issue: number):
 }
 
 /**
- * Moves a queued or waiting issue in its project's start order, one place up, one place down, to the top, or to a
- * place from 1; false when the store refused, as for an issue that started or left Queued since the board's read.
+ * Moves a queued or waiting issue in its project's start order, one place up, one place down, to the top or the
+ * bottom, or to a place from 1; false when the store refused, as for an issue that started or left Queued since the
+ * board's read.
  */
 export async function moveInStartOrder(host: Host, project: Project, issue: number, where: OrderMove | number):
   Promise<boolean> {
@@ -226,6 +252,46 @@ export async function moveInStartOrder(host: Host, project: Project, issue: numb
 /** What the desk says when a move in the start order failed. */
 export function orderFailure(issue: number): string {
   return `Couldn't move #${issue} in the start order: it may have started or left Queued.`
+}
+
+/**
+ * Sorts a project's start order into its default, as `agent-desk queue order --sort` does: the issues that can start
+ * now first, blockers ahead of what they block, then by number. Given `repo`, the command names the project with
+ * `-R`; without it, the store finds the project from the checkout. False when the store refused.
+ */
+export async function sortStartOrder(host: Host, project: Project, repo?: string): Promise<boolean> {
+  return (await desk(host, project, ['queue', 'order', '--sort', ...(repo ? ['-R', repo] : [])])) !== null
+}
+
+/** What the desk says when the store refused to sort a project's start order. */
+export const SORT_FAILURE = 'Couldn\'t sort the start order; the list shows the store\'s order.'
+
+/**
+ * Moves an issue in its project's list order, the order of Open, Blocked, Needs Design, Backlog, and Ideas, right above
+ * or right below another issue; false when the store refused, as for an issue that closed or was queued since the
+ * board's read.
+ */
+export async function moveInListOrder(host: Host, project: Project, issue: number, to: ListMove): Promise<boolean> {
+  const move = 'before' in to ? ['--before', String(to.before)] : ['--after', String(to.after)]
+  return (await desk(host, project, ['list', 'order', String(issue), ...move])) !== null
+}
+
+/** What the desk says when a move in the list order failed. */
+export function listOrderFailure(issue: number): string {
+  return `Couldn't move #${issue} in the list order: it may have closed or been queued.`
+}
+
+/**
+ * Puts a section's issues back in number order, highest first, as `agent-desk list order --reset` does with their
+ * numbers: they keep the places they hold in the project's list order among them. False when the store refused.
+ */
+export async function sortListOrder(host: Host, project: Project, issues: number[]): Promise<boolean> {
+  return (await desk(host, project, ['list', 'order', '--reset', ...issues.map(String)])) !== null
+}
+
+/** What the desk says when the store refused to sort a section's issues. */
+export function listSortFailure(section: string): string {
+  return `Couldn't sort ${section}; the list shows the store's order.`
 }
 
 /** Takes idea off an issue in Ideas, which moves it to Open; false when agent-desk couldn't. */

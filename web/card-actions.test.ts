@@ -202,6 +202,71 @@ test('Unpick shows Start on a picked card at once, and puts the card back before
   }
 })
 
+test('a move in Backlog runs list order beside the card it passes and moves the card at once, a refused one puts it '
+  + 'back, and a move in Queued still runs queue order', async () => {
+  const later = (number: number, actions: RowAction[]): Row => ({ key: `backlog-${number}`, text: `Issue ${number}`,
+    number, title: `Issue ${number}`, actions: ['open', 'to-open', 'close', ...actions] })
+  const first = later(72, ['down', 'bottom'])
+  const second = later(73, ['up', 'down', 'top', 'bottom'])
+  const third = later(74, ['up', 'top'])
+  const waiting: Row = { key: 'waiting-45', text: 'Model trail food', number: 45, actions: ['open', 'down', 'bottom'] }
+  const board: Board = { at: '', runners: [], needs: [], merging: [], design: [], designTotal: 0,
+    queued: [waiting, { key: 'queued-46', text: 'Pave', number: 46, actions: ['open', 'up', 'top'] }], next: [],
+    blocked: [], backlog: [first, second, third], ideas: [], merged: [], chores: [], error: null }
+  const desk = { id: 'game', repo: 'me/game', owner: 'me', title: 'Game', main: TEST_HOME, chores: [], board, at: 0,
+    refreshing: false, starting: new Map(), labels: {}, models: {}, chorePrs: {}, modelsFor: '',
+    schedulePr: null, known: null, refreshes: 0, commands: 0 } as Desk
+  // The board read waits for the test, so each check sees the board the move left before the read after lands.
+  let reading = gate<void>()
+  let moving = gate<string | null>()
+  const asked: string[][] = []
+  const real = host.run
+  host.run = async argv => {
+    if (argv[2] === `exec "${DESK}" board --json`) {
+      await reading.done
+      return null
+    }
+    // Only the order's commands count; a read after a move asks the store for more.
+    if (argv[4] === 'list' || argv[4] === 'queue') {
+      asked.push(argv.slice(4))
+    }
+    return moving.done
+  }
+  const keys = () => desk.board?.backlog.map(row => [row.key, row.actions.slice(3)])
+  try {
+    const moved = act(loop, desk, third, 'top')
+    assert.deepEqual(keys(), [['backlog-74', ['down', 'bottom']], ['backlog-72', ['up', 'down', 'top', 'bottom']],
+      ['backlog-73', ['up', 'top']]])
+    moving.open('')
+    reading.open()
+    await moved
+    assert.deepEqual(asked, [['list', 'order', '74', '--before', '72']])
+
+    // A move the store refuses puts the cards back.
+    desk.board = board
+    asked.length = 0
+    reading = gate()
+    moving = gate()
+    const refused = act(loop, desk, second, 'down')
+    assert.deepEqual(desk.board?.backlog.map(row => row.key), ['backlog-72', 'backlog-74', 'backlog-73'])
+    moving.open(null)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(desk.board, board)
+    reading.open()
+    await refused
+    assert.deepEqual(asked, [['list', 'order', '73', '--after', '74']])
+
+    // Queued's moves keep the start order's command.
+    asked.length = 0
+    moving = gate()
+    moving.open('')
+    await act(loop, desk, waiting, 'bottom')
+    assert.deepEqual(asked, [['queue', 'order', '45', '--bottom']])
+  } finally {
+    host.run = real
+  }
+})
+
 test('the read after each button that writes the store shows its row where the store puts it, Fix\'s PR in Queued '
   + 'from the comment the dispatcher hasn\'t answered', async () => {
   type Item = Record<string, unknown> & { number: number }
@@ -295,3 +360,38 @@ test('the read after each button that writes the store shows its row where the s
     host.run = real
   }
 })
+
+test('Stop Command on a stalled agent\'s card asks the run working its issue, and says why when it stopped nothing',
+  async () => {
+    const stalled: Row = { key: 'unit-4', text: 'agent     Fix', number: 30, issue: 9, pr: true, title: 'Fix',
+      state: 'working', stalled: true, stopAsk: 'Stop Bash: cargo test after 12 min? The agent goes on with its '
+        + 'failure.', actions: ['open', 'stop-command', 'pause'] }
+    const board: Board = { at: '', runners: [stalled], needs: [], merging: [], design: [], designTotal: 0, queued: [],
+      next: [], blocked: [], backlog: [], ideas: [], merged: [], chores: [], error: null }
+    const desk = { id: 'game', repo: 'me/game', owner: 'me', title: 'Game', main: TEST_HOME, chores: [], board,
+      at: 0, refreshing: false, starting: new Map(), labels: {}, models: {}, chorePrs: {}, modelsFor: '',
+      schedulePr: null, known: null, refreshes: 0, commands: 0 } as Desk
+    const asked: string[][] = []
+    const failures: string[] = []
+    let answer: string | null = 'Stopped it.'
+    const real = { run: host.run, fail: loop.fail, refresh: loop.refresh }
+    host.run = async argv => {
+      asked.push(argv)
+      return answer
+    }
+    loop.fail = (_desk, text) => { failures.push(text) }
+    loop.refresh = async () => {}
+    try {
+      await act(loop, desk, stalled, 'stop-command')
+      // The card names the review, and the command takes the issue the run works.
+      assert.ok(asked.some(argv => argv[2]?.endsWith(' stop-command "$1"') && argv[4] === '9'), JSON.stringify(asked))
+      assert.deepEqual(failures, [])
+      answer = null
+      await act(loop, desk, stalled, 'stop-command')
+      assert.deepEqual(failures, ['Couldn\'t stop #9\'s command: its run waits on none.'])
+    } finally {
+      host.run = real.run
+      loop.fail = real.fail
+      loop.refresh = real.refresh
+    }
+  })

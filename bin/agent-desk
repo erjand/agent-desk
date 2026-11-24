@@ -19,7 +19,10 @@ usage: agent-desk <command> [args]
   start <n>                     claim issue n for this session, create its worktree, and post the session
   serial claim <n> | release    take or hand on the slot one serial issue works in at a time
   worktree <slug> [base]        create ../<repo>-<slug> on agent/<slug> from the local base or main, set up
+  worktree --teardown <slug>    run worktree.teardown in ../<repo>-<slug> before you remove it yourself
   clean <agent/slug> <merged>   clean up after an agent review merges or closes, as the dispatcher does
+  sweep                         remove the finished agent worktrees and saved agent branches, as the dispatcher
+                                does each hour
   release <n> <cancelled|failure> [--discussion]
                                 hand issue n back after its run ended without a report, as the dispatcher does
   chores [status | tick]        show the project's chores, or start the most overdue one
@@ -42,17 +45,22 @@ usage: agent-desk <command> [args]
                                 set them machine-wide
   gpu status                    print what gpu slots prints, then the last day's waits by checkout
   issue <verb> [args]           file, view, list, comment on, edit, close, reopen, or delete an issue in the local store
-  review <verb> [args]          open, view, list, comment on, edit, ready, close, or merge a review in the local store
+  review <verb> [args]          open, view, list, diff, comment on, edit, ready, close, or merge a review in the local store
   label edit <name> --color <hex> | list   set a label's color in the local store, or list the colors
-  queue order [<n> --up | --down | --top | --to <place>]
-                                print the order queued and waiting issues start in, or move issue n up, down, to
-                                the top, or to a place from 1
+  queue order [<n> --up | --down | --top | --bottom | --to <place> | --sort]
+                                print the order queued and waiting issues start in, move issue n up, down, to the
+                                top or bottom, or to a place from 1, or --sort it: the issues that can start now, then the rest
+  list order [<n> --before <m> | --after <m> | --top | --bottom | --reset <n>...]
+                                print the hand-set order of the open issues outside the start order, move issue n
+                                right above or below issue m or to the top or bottom, or deal the places of the
+                                issues named back out among them by number
   board [--json]                print everything the inbox's board shows of the project, without asking GitHub
   import <owner/repo>           copy a GitHub project's issues, PRs, comments, labels, and links into the local store
   cutover [--dry-run] [--issues-off] <owner/repo> | --all
                                 move a project, or every project, from GitHub to the local store for good
   cutover --undo [--dry-run] <owner/repo>
                                 turn GitHub back on for a project and list what was filed locally since
+  project list [--json]         print each project on this machine's desk and its main checkout, a line each
   project rename [--dry-run] <owner/repo> <new owner/repo>
                                 move a project's issues, reviews, state, checkout origin, and backup to a new name
   project remove [--dry-run] <owner/repo>
@@ -68,6 +76,9 @@ usage: agent-desk <command> [args]
   pause <n> | unpause <n> [-R <owner/repo>]
                                 stop the agent run on issue n and put the issue on hold, or queue a held issue
                                 again at the top of the start order, where its next run takes up the session
+  stop-command <n> [-R <owner/repo>]
+                                end the command issue n's agent run waits on, and leave the run going with the
+                                command's failure
   web [on | off | status | run [<owner/repo>...]]
                                 serve every project's inbox to a browser at http://127.0.0.1:7480, or with run
                                 only the projects named
@@ -83,6 +94,11 @@ usage: agent-desk <command> [args]
                                 agent, chore, fix, check, or benchmark slots, or drop the overrides
   usage-limit [<0-100> | on | off]
                                 show the weekly plan-usage limit that holds new runs on every project, or set it
+  account [subscription | api]  show both accounts' usage and which one every Claude process the desk starts bills,
+                                or switch it between the Claude plan and the desk's Anthropic API key
+  account key [--clear]         save the API key, read from a prompt or standard input, or remove it
+  account budget [<dollars> | on | off]
+                                show the monthly API budget that holds new runs on every project, or set it
 USAGE
         exit 2
     }
@@ -99,6 +115,7 @@ USAGE
         serial) exec "$lib/serial.sh" "$@" ;;
         worktree) exec "$lib/worktree.sh" "$@" ;;
         clean) exec "$lib/clean.sh" "$@" ;;
+        sweep) exec "$lib/sweep.sh" "$@" ;;
         release) exec python3 -B "$lib/release.py" "$@" ;;
         chores)
             case ${1:-status} in
@@ -115,6 +132,7 @@ USAGE
         slots) exec python3 -B "$lib/hold.py" slots "$@" ;;
         resume) exec python3 -B "$lib/hold.py" resume ;;
         usage-limit) exec python3 -B "$lib/usage.py" "$@" ;;
+        account) exec python3 -B "$lib/account.py" "$@" ;;
         run-chore) exec "$lib/run-chore.sh" "$@" ;;
         work-pr) exec "$lib/work-pr.sh" "$@" ;;
         fixes) exec "$lib/fixes.sh" "$@" ;;
@@ -123,7 +141,7 @@ USAGE
         pushes) exec "$lib/pushes.sh" "$@" ;;
         shots) exec "$lib/shots.sh" "$@" ;;
         gpu) exec "$lib/gpu.sh" "$@" ;;
-        issue | review | label | queue) exec python3 -B "$lib/store_cli.py" "$command" "$@" ;;
+        issue | review | label | queue | list) exec python3 -B "$lib/store_cli.py" "$command" "$@" ;;
         board) exec python3 -B "$lib/board.py" "$@" ;;
         import) exec python3 -B "$lib/import_github.py" "$@" ;;
         cutover) exec python3 -B "$lib/cutover.py" "$@" ;;
@@ -137,7 +155,7 @@ USAGE
         restore) exec python3 -B "$lib/backup.py" restore "$@" ;;
         web) exec "$lib/web.sh" "$@" ;;
         dispatch) exec "$lib/dispatch.sh" "$@" ;;
-        pause | unpause) exec python3 -B "$lib/dispatch.py" "$command" "$@" ;;
+        pause | unpause | stop-command) exec python3 -B "$lib/dispatch.py" "$command" "$@" ;;
         request) if [[ ${1:-} == --cancel ]]; then shift; exec python3 -B "$lib/dispatch.py" cancel "$@"; fi
             exec python3 -B "$lib/dispatch.py" request "$@" ;;
         *) usage ;;

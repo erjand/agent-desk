@@ -2,6 +2,7 @@
 temporary store, a real origin and main checkout, a stand-in for gh that serves lib/serial.sh, and a stand-in for
 systemctl that logs the units the cleanup stops."""
 
+import json
 import subprocess
 import sys
 import unittest
@@ -61,6 +62,10 @@ class CleanCase(Desk):
     def has_local(self, branch):
         return bool(git("branch", "--list", branch, cwd=self.main))
 
+    def teardown(self, command):
+        config = self.main / ".agent-desk.json"
+        config.write_text(json.dumps({**json.loads(config.read_text()), "worktree": {"teardown": command}}))
+
 
 class MergedTest(CleanCase):
     def test_a_merge_into_main_closes_the_issue_with_a_note_and_removes_the_branch_and_worktree(self):
@@ -103,24 +108,6 @@ class MergedTest(CleanCase):
         self.assertEqual(self.notes(stacked),
                          [("desk", f"Landed on main with #{review}, which holds #{stacked_review}.{SIGNED}")])
 
-    def test_a_merge_into_another_base_leaves_the_issue_open_and_main_where_it_was(self):
-        git("push", "-q", "origin", "main:refs/heads/local-desk", cwd=self.main)
-        issue = self.issue(labels=["base:local-desk"])
-        slug = f"issue-{issue}"
-        dest = self.branch(slug, base="local-desk")
-        review = self.open_review(slug, base="local-desk", fixes=issue)
-        before = git("rev-parse", "HEAD", cwd=self.main)
-        self.land(review, slug, into="local-desk")
-
-        self.clean(f"agent/{slug}", merged=True)
-        self.assertEqual(self.item(issue)["state"], "OPEN")
-        self.assertEqual(self.item(issue)["status"], "open")
-        self.assertEqual(self.notes(issue), [])
-        self.assertFalse(dest.exists())
-        self.assertFalse(self.on_origin(f"agent/{slug}"))
-        self.assertEqual(git("rev-parse", "HEAD", cwd=self.main), before)
-
-
     def test_a_merge_whose_issue_and_review_the_store_lacks_still_cleans_up(self):
         dest = self.branch("issue-40")
         git("push", "-q", "origin", "agent/issue-40:main", cwd=dest)
@@ -131,19 +118,28 @@ class MergedTest(CleanCase):
 
 
 class ClosedTest(CleanCase):
-    def test_a_review_closed_without_merging_frees_the_issue_and_keeps_the_branch_on_origin(self):
+    def test_a_closed_review_frees_the_issue_pushes_the_branch_and_tears_the_worktree_down_before_removing_it(self):
+        # The teardown leaves a file behind in the worktree, which doesn't keep it.
+        self.teardown(f'pwd >"{self.root}/torn"; touch left-behind; echo dropped the db')
         issue = self.issue()
         slug = f"issue-{issue}"
         dest = self.branch(slug)
+        # The agent's last commit lands after the push queue's last tick, so origin lacks it when the review closes.
+        git("commit", "-q", "--allow-empty", "-m", "last words", cwd=dest)
+        head = git("rev-parse", "HEAD", cwd=dest)
         review = self.open_review(slug, fixes=issue)
         self.store.set_state(REPO, review, "closed", "closed")
 
-        self.clean(f"agent/{slug}", merged=False)
+        out = self.clean(f"agent/{slug}", merged=False)
         self.assertEqual(self.item(issue)["status"], "open")
         self.assertEqual(self.notes(issue), [])
+        self.assertIn(f"Pushed agent/{slug} to origin.", out)
+        self.assertEqual(git("ls-remote", "--heads", "origin", f"agent/{slug}", cwd=self.main).split()[0], head)
+        self.assertIn("dropped the db", out)
+        self.assertEqual((self.root / "torn").read_text(), f"{dest}\n")
+        self.assertIn(f"Removed {dest}.", out)
         self.assertFalse(dest.exists())
         self.assertFalse(self.has_local(f"agent/{slug}"))
-        self.assertTrue(self.on_origin(f"agent/{slug}"))
 
     def test_a_worktree_in_use_stays(self):
         issue = self.issue()
@@ -155,7 +151,7 @@ class ClosedTest(CleanCase):
         self.addCleanup(worker.kill)
 
         out = self.clean(f"agent/{slug}", merged=False)
-        self.assertIn(f"Kept {dest}: a process is working in it.", out)
+        self.assertIn(f"Kept {dest}: a process is working in it: {worker.pid} sleep 30", out)
         self.assertTrue(dest.is_dir())
         self.assertTrue(self.has_local(f"agent/{slug}"))
         self.assertEqual(self.item(issue)["status"], "open")
@@ -184,39 +180,31 @@ class ClosedTest(CleanCase):
         self.assertEqual(len(self.notes(issue)), 1)
 
     def unpushed(self, slug):
-        """agent/<slug> with one commit only this machine holds, its worktree removed by hand."""
+        """agent/<slug> in its worktree, with one commit only this machine holds."""
         dest = self.worktree(slug)
         git("worktree", "add", "-q", "-b", f"agent/{slug}", str(dest), "origin/main", cwd=self.main)
         git("commit", "-q", "--allow-empty", "-m", f"work on {slug}", cwd=dest)
-        git("worktree", "remove", str(dest), cwd=self.main)
-        return git("rev-parse", f"agent/{slug}", cwd=self.main)
+        return dest
 
-    def test_a_branch_never_pushed_keeps_its_commits_when_its_worktree_is_gone(self):
+    def test_a_branch_origin_cannot_take_keeps_its_commits_and_loses_its_worktree(self):
         issue = self.issue()
         slug = f"issue-{issue}"
-        head = self.unpushed(slug)
+        dest = self.unpushed(slug)
+        head = git("rev-parse", f"agent/{slug}", cwd=self.main)
         self.store.set_state(REPO, self.open_review(slug), "closed", "not-planned")
+        self.lose_origin()
 
         out = self.clean(f"agent/{slug}", merged=False)
+        self.assertIn(f"Couldn't push agent/{slug} to origin", out)
+        self.assertIn(f"Removed {dest}.", out)
         self.assertIn(f"Kept local agent/{slug}: it has commits that aren't on origin or main.", out)
+        self.assertFalse(dest.exists())
         self.assertEqual(git("rev-parse", f"agent/{slug}", cwd=self.main), head)
         self.assertEqual(self.item(issue)["status"], "open")
 
-    def test_a_branch_never_pushed_goes_once_its_base_holds_its_commits(self):
-        issue = self.issue()
-        slug = f"issue-{issue}"
-        self.unpushed(slug)
-        review = self.open_review(slug, fixes=issue)
-        # The merge happens on this machine alone, into the local main.
-        git("merge", "-q", "--ff-only", f"agent/{slug}", cwd=self.main)
-        self.store.merge(REPO, review, git("rev-parse", "HEAD", cwd=self.main))
-
-        out = self.clean(f"agent/{slug}", merged=True)
-        self.assertIn(f"Deleted local agent/{slug}.", out)
-        self.assertFalse(self.has_local(f"agent/{slug}"))
-
-    def test_a_merge_into_a_local_base_cleans_up_with_origin_out_of_reach(self):
+    def test_a_merge_into_a_local_base_leaves_the_issue_open_and_cleans_up_with_origin_out_of_reach(self):
         git("branch", "local-desk", "main", cwd=self.main)
+        before = git("rev-parse", "HEAD", cwd=self.main)
         issue = self.issue(labels=["base:local-desk"])
         slug = f"issue-{issue}"
         self.unpushed(slug)
@@ -234,12 +222,30 @@ class ClosedTest(CleanCase):
         self.assertIn(f"Deleted local agent/{slug}.", out)
         self.assertIn(f"Couldn't delete agent/{slug} on origin.", out)
         self.assertFalse(self.has_local(f"agent/{slug}"))
+        # The issue waits open, with no note, for the base's own merge into main.
         self.assertEqual(self.item(issue)["status"], "open")
+        self.assertEqual(self.notes(issue), [])
+        self.assertEqual(git("rev-parse", "HEAD", cwd=self.main), before)
 
     def test_a_branch_outside_agent_is_refused(self):
         result = self.run_lib("clean.sh", "feature/menu", "true")
         self.assertEqual(result.returncode, 2)
         self.assertIn("Only agent/* branches are cleaned", result.stderr)
+
+
+class TeardownTest(CleanCase):
+    def test_a_worktree_with_uncommitted_changes_stays_with_its_branch_and_runs_no_teardown(self):
+        self.teardown(f'touch "{self.root}/torn"')
+        slug = f"issue-{self.issue()}"
+        dest = self.branch(slug)
+        self.store.set_state(REPO, self.open_review(slug), "closed", "closed")
+        (dest / "notes.txt").write_text("unsaved")
+
+        out = self.clean(f"agent/{slug}", merged=False)
+        self.assertIn(f"Kept {dest}: it has uncommitted changes.", out)
+        self.assertFalse((self.root / "torn").exists())
+        self.assertTrue((dest / "notes.txt").is_file())
+        self.assertTrue(self.has_local(f"agent/{slug}"))
 
 
 class SourceTest(unittest.TestCase):

@@ -295,3 +295,62 @@ class ExcerptModeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailedTestsTest(unittest.TestCase):
+    def test_each_runner_names_its_failed_tests(self):
+        lines = {
+            "        FAIL [   3.054s] (113/241) gameplay::reload a_session_reloads": "gameplay::reload a_session_reloads",
+            "        TIMEOUT [  60.001s] gpu::frame draws": "gpu::frame draws",
+            "test compare::one_run ... FAILED": "compare::one_run",
+            "FAIL: test_x (test_doctor.ProjectTest.test_x)": "test_doctor.ProjectTest.test_x",
+            "ERROR: test_y (test_doctor.ProjectTest)": "test_doctor.ProjectTest.test_y",
+            "FAILED tests/test_a.py::test_b[one] - AssertionError: 1 != 2": "tests/test_a.py::test_b[one]",
+            "    --- FAIL: TestParse (0.00s)": "TestParse",
+            "  Failed Game.Tests.FileLengthLimitTests.Docs [9 ms]": "Game.Tests.FileLengthLimitTests.Docs",
+            "(fail) board > sorts the rows [1.20ms]": "board > sorts the rows",
+            "✖ the pane shows a stop (3.1ms)": "the pane shows a stop",
+            "FAIL report a problem: waited 10s for the note": "report a problem",
+        }
+        for line, name in lines.items():
+            self.assertEqual(failures.failed_tests(line), [name], line)
+
+    def test_lines_that_name_no_failed_test_give_none(self):
+        log = "\n".join(["        PASS [   0.002s] (1/9) gpu fails_cleanly", "FAILED (failures=1)", "✖ failing tests:",
+                         "test result: FAILED. 0 passed; 1 failed", "error: test run failed"])
+        self.assertEqual(failures.failed_tests(log), [])
+
+    def test_a_test_named_twice_or_in_short_counts_once(self):
+        log = "\n".join([
+            "        FAIL [   3.054s] (113/241) gameplay::reload a_session_reloads",
+            "    test a_session_reloads ... FAILED",
+            "        FAIL [   3.161s] (114/241) gameplay::reload a_watch",
+            "     Summary [  10.935s] 144/241 tests run: 142 passed, 2 failed",
+            "        FAIL [   3.054s] (113/241) gameplay::reload a_session_reloads",
+        ])
+        self.assertEqual(failures.failed_tests(log), ["gameplay::reload a_session_reloads", "gameplay::reload a_watch"])
+        self.assertEqual(failures.failed_tests("test a::b ... FAILED\nFAIL [ 1.0s] (1/2) crate::bin a::b"),
+                         ["crate::bin a::b"])
+
+
+class SummaryTest(unittest.TestCase):
+    def test_the_first_tests_show_while_they_fit_and_the_rest_are_counted(self):
+        self.assertEqual(failures.summary("--- FAIL: TestA\n--- FAIL: TestB\n--- FAIL: TestC\n"),
+                         "TestA, TestB, TestC")
+        long = "test gameplay::reload::a_session_reads_changed_data_again_and_keeps_the_last ... FAILED"
+        self.assertEqual(failures.summary(f"{long}\n--- FAIL: TestB\n"),
+                         "gameplay::reload::a_session_reads_changed_data_agai… and 1 more")
+        self.assertEqual(len(failures.summary(long)), failures.SUMMARY_WIDTH)
+
+    def test_a_log_naming_no_test_gives_its_first_failing_line_or_none(self):
+        self.assertEqual(failures.summary("ok\nerror[E0425]: cannot find value `x`\n"),
+                         "error[E0425]: cannot find value `x`")
+        self.assertIsNone(failures.summary(""))
+
+    def test_a_check_whose_log_is_gone_gives_none(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "7.log"
+            path.write_text("== Test: just test\n--- FAIL: TestA (0.00s)\nThe check failed.\n")
+            self.assertEqual(failures.check_summary({"id": 7, "log_path": str(path)}), "TestA")
+            self.assertIsNone(failures.check_summary({"id": 7, "log_path": str(Path(folder) / "gone.log")}))
+            self.assertIsNone(failures.check_summary({"id": 7, "log_path": None}))

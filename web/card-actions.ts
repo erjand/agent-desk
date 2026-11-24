@@ -1,13 +1,16 @@
 // What a card's buttons and a review page's buttons do: each moves its card at once where the button moves one, runs
 // its command through agent-desk, and reaches the server's event stream and board reads through a Loop.
 import type { Board, Row, RowAction } from '../inbox/types'
-import { askToFix, cancelRequest, closeIssue, closeReview, dismissRun, labelBacklog, labelReady, markDesigned,
-  markReady, moveBacklogToOpen, moveIdeaToOpen, moveInStartOrder, orderFailure, pauseIssue, queueMerge, queuedName,
-  queuedNote, restartIssue, retryRun, startRow, unblockIssue, unpauseIssue, unpickFailure, unpickIssue,
-  unqueueFailure, unqueueIssue } from '../inbox/hooks/actions.ts'
+import { askToFix, cancelRequest, closeIssue, closeReview, dismissRun, labelBacklog, labelReady, listOrderFailure,
+  listSortFailure, markDesigned, markReady, moveBacklogToOpen, moveIdeaToOpen, moveInListOrder, moveInStartOrder,
+  orderFailure, pauseIssue, queueMerge, queuedName, queuedNote, restartIssue, retryRun, SORT_FAILURE, sortListOrder,
+  sortStartOrder, startRow, stopCommand, unblockIssue, unpauseIssue, unpickFailure, unpickIssue, unqueueFailure,
+  unqueueIssue } from '../inbox/hooks/actions.ts'
 import type { CloseReason } from '../inbox/hooks/actions.ts'
-import { moveInOrder, moveToBacklog, moveToClosed, moveToFixing, moveToMerging, moveToOpen, moveToQueued,
-  moveToRestarted, moveToRetried, moveToReview, moveToUnpicked, prName } from '../inbox/hooks/moves.ts'
+import { listMoveOf, listNumbers, listSection, moveInList, moveInOrder, moveToBacklog, moveToClosed, moveToFixing,
+  moveToMerging, moveToOpen, moveToQueued, moveToRestarted, moveToRetried, moveToReview, moveToUnpicked, prName }
+  from '../inbox/hooks/moves.ts'
+import type { ListMove, ListSection } from '../inbox/hooks/moves.ts'
 import { NOTHING_TO_SEND, sendToAgent } from './review.ts'
 import { host } from './state.ts'
 import type { Desk, Loop } from './state.ts'
@@ -113,6 +116,59 @@ export async function place(loop: Loop, desk: Desk, row: Row, to: number): Promi
 }
 
 /**
+ * Sorts the project's start order, as the Queued heading's Sort button asks: the issues that can start now first,
+ * blockers ahead of what they block, then by number. The list shows the new order once the read after the command
+ * lands; a sort the store refuses toasts, and the read shows the store's order.
+ */
+export async function sortOrder(loop: Loop, desk: Desk): Promise<boolean> {
+  const project = { root: desk.main, main: desk.main }
+  const done = await move(loop, desk, board => board, () => sortStartOrder(host, project, desk.repo))
+  if (!done) {
+    loop.fail(desk, SORT_FAILURE)
+  }
+  await loop.refresh(desk)
+  return done
+}
+
+/** Each list section's group on the page, as a card's stage names it, and its heading. */
+export const LIST_GROUPS: Record<string, [ListSection, string]> = { open: ['next', 'Open'],
+  blocked: ['blocked', 'Blocked'], design: ['design', 'Needs Design'], backlog: ['backlog', 'Backlog'],
+  idea: ['ideas', 'Ideas'] }
+
+/**
+ * Moves an issue's card in Open, Blocked, Needs Design, Backlog, or Ideas right above or below another issue of its
+ * section, as a drop on the page does: at once on the board, then in the project's list order. A move the store
+ * refuses puts the card back and toasts.
+ */
+export async function listPlace(loop: Loop, desk: Desk, row: Row, to: ListMove): Promise<boolean> {
+  const project = { root: desk.main, main: desk.main }
+  const number = row.number ?? 0
+  const done = await move(loop, desk, board => moveInList(board, row, to),
+    () => moveInListOrder(host, project, number, to))
+  if (!done) {
+    loop.fail(desk, listOrderFailure(number))
+  }
+  await loop.refresh(desk)
+  return done
+}
+
+/**
+ * Puts a list section's issues back in number order, highest first, as its group's Sort button on the page asks. The
+ * list shows the new order once the read after the command lands; a sort the store refuses toasts, and the read shows
+ * the store's order.
+ */
+export async function sortList(loop: Loop, desk: Desk, section: ListSection, title: string): Promise<boolean> {
+  const project = { root: desk.main, main: desk.main }
+  const numbers = listNumbers(desk.board?.[section] ?? [])
+  const done = await move(loop, desk, board => board, () => sortListOrder(host, project, numbers))
+  if (!done) {
+    loop.fail(desk, listSortFailure(title))
+  }
+  await loop.refresh(desk)
+  return done
+}
+
+/**
  * Carries out a card's button, toasts when its command fails, and reads the project's board again. A button that
  * moves its card moves it at once, and the move takes the place of a message when the command works.
  */
@@ -161,7 +217,18 @@ export async function act(loop: Loop, desk: Desk, row: Row, action: RowAction): 
   } else if (action === 'to-open') {
     done = await move(loop, desk, board => moveToOpen(board, row), () => unqueueIssue(host, project, number))
     failure = unqueueFailure(number)
-  } else if (action === 'up' || action === 'down' || action === 'top') {
+  } else if ((action === 'up' || action === 'down' || action === 'top' || action === 'bottom')
+    && listSection(row) !== null) {
+    // A card in Open, Blocked, Needs Design, Backlog, or Ideas moves beside the card its move passes, or to its
+    // group's end, in the project's list order.
+    const to = desk.board && listMoveOf(desk.board, row, action)
+    if (!to) {
+      return
+    }
+    done = await move(loop, desk, board => moveInList(board, row, action),
+      () => moveInListOrder(host, project, number, to))
+    failure = listOrderFailure(number)
+  } else if (action === 'up' || action === 'down' || action === 'top' || action === 'bottom') {
     done = await move(loop, desk, board => moveInOrder(board, row, action),
       () => moveInStartOrder(host, project, number, action))
     failure = orderFailure(number)
@@ -175,6 +242,10 @@ export async function act(loop: Loop, desk: Desk, row: Row, action: RowAction): 
     const issue = row.issue ?? number
     done = await pauseIssue(host, project, issue)
     failure = `Couldn't pause #${issue}: no agent run works it.`
+  } else if (action === 'stop-command') {
+    const issue = row.issue ?? number
+    done = await stopCommand(host, project, issue)
+    failure = `Couldn't stop #${issue}'s command: its run waits on none.`
   } else if (action === 'unpause') {
     done = await unpauseIssue(host, project, number)
     failure = `Couldn't resume #${number}: it isn't on hold.`

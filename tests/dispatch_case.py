@@ -124,12 +124,15 @@ class DispatchCase(unittest.TestCase):
         self.time = 1_000_000.0
         self.said = []
         self.hold = {"state": "running", "picked": []}
+        # The project's sweep ran as the test starts, so a test that sweeps nothing starts no sweep unit.
+        (self.folder / "sweeps.json").write_text(json.dumps({REPO: self.time}))
         self.dispatcher = self.new_dispatcher()
 
     def new_dispatcher(self):
         dispatcher = dispatch.Dispatcher(self.store, run=self.systemd, gate=self.memory, clock=lambda: self.time,
                                          say=self.said.append, mode=lambda: self.hold,
-                                         mode_stamp=lambda: json.dumps(self.hold, sort_keys=True))
+                                         mode_stamp=lambda: json.dumps(self.hold, sort_keys=True),
+                                         sweeps=self.folder / "sweeps.json")
         dispatcher.rebuild()
         return dispatcher
 

@@ -1,9 +1,10 @@
-// The page's header: its name, when the boards last read, Refresh, the buttons that set which new runs the runners
-// take, app-usage.js's weekly usage limit, a row at the right end with the machine's gauges in a pill, the History,
-// Runners, and Chat buttons, and the help button, the restart notice under that row, then the notices and the project
-// tabs. The gauges pill opens app-resources.js's Resources view in the panel, and the row's New Issue button opens
-// app-new-issue.js's form there.
+// The page's header: its name with the restart notice under it, when the boards last read, Refresh, the buttons that
+// set which new runs the runners take, app-usage.js's account control, a row at the right end with the machine's
+// gauges in a pill, the History, Runners, Chat, and GitHub buttons, and the help button, then the notices and the
+// project tabs. The gauges pill opens app-resources.js's Resources view in the panel, and the row's New Issue button
+// opens app-new-issue.js's form there.
 import { html } from './vendor/preact-htm.js'
+import { githubFailing } from './app-github.js'
 import { openNewIssue } from './app-new-issue.js'
 import { hueOf, Icon } from './app-parts.js'
 import { toggleResources } from './app-resources.js'
@@ -105,7 +106,7 @@ function HoldControls() {
  * The notices under the header's bar, each text once with its tone. A store the server can't read says why, since no
  * change shows until it can. A project's board that couldn't be read says why. A project's notice rows, such as a
  * merge queue stopped on uncommitted changes in Needs You or main ahead of origin in Merging, follow in their tone. A
- * server that runs older code than its checkout holds says so under the gauges' row instead.
+ * server that runs older code than its checkout holds says so under the page's name instead.
  */
 export function headerNotices(shown) {
   return new Map([
@@ -126,11 +127,15 @@ export function Header({ selected } = {}) {
   const total = desks.reduce((sum, desk) => sum + (ready(desk) ? desk.board.needs.length : 0), 0)
   document.title = `${total > 0 ? `(${total}) ` : ''}agent-desk`
   const notices = headerNotices(shown)
+  const failing = githubFailing()
   const tabs = [{ id: 'all', title: 'All', count: 0 },
     ...desks.map(desk => ({ id: desk.id, title: desk.title, count: ready(desk) ? desk.board.needs.length : 0 }))]
   return html`<header>
     <div class="bar">
-      <strong class="name">agent-desk</strong>
+      <span class="brand">
+        <strong class="name">agent-desk</strong>
+        ${ui.server?.code ? html`<span class="code-notice warning" role="status">${ui.server.code}</span>` : null}
+      </span>
       <button type="button" class=${busy ? 'refresh spinning' : 'refresh'} aria-label="Refresh" data-tip="Refresh"
         disabled=${busy || !ui.connected}
         onClick=${() => void post('/api/refresh', ui.tab === 'all' ? {} : { desk: ui.tab })}>
@@ -155,10 +160,14 @@ export function Header({ selected } = {}) {
             title="Show or hide the chat with Claude Code about the desk"
             onClick=${() => { toggleSide('chat'); draw() }}>
             Chat <kbd>${'`'}</kbd></button>
+          <button type="button" aria-pressed=${String(ui.side === 'github')}
+            title="Show or hide the GitHub column, with how each push to GitHub last went"
+            onClick=${() => { toggleSide('github'); draw() }}>
+            GitHub${failing > 0 ? html`<span class="counter warning" title=${`${failing} failing`}>${failing}</span>`
+              : null} <kbd>g</kbd></button>
           <button type="button" class="help-button" title="Keyboard shortcuts" aria-label="Keyboard shortcuts"
             onClick=${() => { ui.help = !ui.help; draw() }}>?</button>
         </span>
-        ${ui.server?.code ? html`<span class="code-notice warning" role="status">${ui.server.code}</span>` : null}
       </span>
     </div>
     ${[...notices].map(([text, kind]) => html`<p key=${text} class=${`notice ${kind}`}>${text}</p>`)}

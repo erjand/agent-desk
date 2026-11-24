@@ -11,11 +11,17 @@
 # reading from nvidia-smi, it takes slot 1 only. --exclusive holds every slot whatever VRAM is free, for timed
 # benchmarks: slots 1 to the count and every other slot's lock file in the lock folder, so a caller that still counts
 # more slots can't render beside it. The command's exit status becomes this script's. `agent-desk gpu slots` prints
-# the count, the VRAM threshold with the VRAM free now, and who holds each slot.
+# the count, the VRAM threshold with the VRAM free now, and who holds each slot, whether exclusive or shared, and for
+# how long, marking an exclusive hold past 45 minutes or a shared one past 30 as long.
 #
 # Each slot is a lock file in $XDG_RUNTIME_DIR/agent-desk/, shared by every project and checkout. Every command passes
 # through the queue lock to reach the slots, and keeps the queue until it holds its slots, so commands that start while
-# an exclusive one waits line up behind it instead of keeping a slot busy forever.
+# an exclusive one waits line up behind it instead of keeping a slot busy forever. A call that holds its slots writes
+# when it took them and whether it is exclusive to gpu.held.<pid> beside the locks, and removes the file as it exits.
+# A call that waits says so once, then again with each holder's hold time every 15 minutes it still waits, or every
+# AGENT_DESK_GPU_LONG_WAIT seconds when that is set, for tests. A shared call that waits for a slot tries the slots
+# again each second, and reads the VRAM again every 3 seconds, or each AGENT_DESK_GPU_POLL seconds when that is set,
+# for tests.
 #
 # The command runs as a child with the lock descriptors closed, and this script holds the locks until it exits, so a
 # daemon the command leaves behind keeps no slot. Killing this script outright frees the slot while the command runs on.
@@ -53,6 +59,17 @@ gpu_main() {
         return
     fi
     asked=$EPOCHREALTIME
+    since=$EPOCHSECONDS
+    long_wait=${AGENT_DESK_GPU_LONG_WAIT:-900}
+    valid "$long_wait" || long_wait=900
+    slot_poll=1
+    vram_poll=3
+    if [[ ${AGENT_DESK_GPU_POLL:-} =~ ^[0-9]*\.?[0-9]+$ ]]; then
+        slot_poll=$AGENT_DESK_GPU_POLL
+        vram_poll=$AGENT_DESK_GPU_POLL
+    fi
+    next_note=$((since + long_wait))
+    held_file=
     call=
     exclusive=false
     while (($#)); do
@@ -113,12 +130,13 @@ gpu_main() {
     for fd in "${slots[@]}"; do
         [[ " ${held[*]} " == *" $fd "* ]] || exec {fd}>&-
     done
+    trap released EXIT
+    mark_held
     if [[ -n $call ]]; then
         note got "$call" "$EPOCHREALTIME"
     else
         asked=$EPOCHREALTIME
         call=$(note asked "$PWD" "$exclusive" "$asked" --got "$asked")
-        [[ -z $call ]] || trap released EXIT
     fi
 
     status=0
@@ -169,6 +187,8 @@ slots_main() {
         *) echo "GPU slots: $count, set in $from" ;;
     esac
     read_min
+    local locked_now
+    locked_now=$(locked)
     local where=", set in $min_from"
     [[ $min_from == default ]] && where=", the default"
     if ((min_mib == 0)); then
@@ -180,14 +200,14 @@ slots_main() {
             "only slot 1 opens"
     fi
     for ((i = 1; i <= count; i++)); do
-        holder=$(holders "$locks/gpu.slot$i")
+        holder=$(holders -t "$locks/gpu.slot$i")
         [[ $holder == nobody ]] && holder=free
         echo "slot $i: $holder"
     done
     # A caller that still counts more slots may hold one past the count.
     while read -r i; do
         ((i > count)) || continue
-        holder=$(holders "$locks/gpu.slot$i")
+        holder=$(holders -t "$locks/gpu.slot$i")
         [[ $holder == nobody ]] || echo "slot $i: $holder, past the count"
     done < <(present)
     ahead=$(holders "$locks/gpu.queue")
@@ -304,17 +324,24 @@ lock() {
     )
 }
 
-# Takes a lock at once if it is free, and otherwise says what it waits for and blocks until it gets it.
+# Takes a lock at once if it is free, and otherwise says what it waits for and blocks until it gets it, waking when
+# the wait has gone long to say so.
 take() {
+    local status
     lock -n "$@" && return
     waiting
-    lock "$@"
+    while :; do
+        status=0
+        lock -E 3 -w "$((next_note > EPOCHSECONDS ? next_note - EPOCHSECONDS : 1))" "$@" || status=$?
+        ((status == 3)) || return "$status"
+        still_waiting
+    done
 }
 
 # Takes the first free slot and sets got to its descriptor. A slot past the first opens only while the card has the
 # VRAM free that read_min sets, which it reads only when slot 1 is held. While every open slot is held, it blocks on
-# each open slot for a second in turn and tries them all again, so it takes whichever slot frees first. While only
-# slot 1 is open, it blocks on slot 1 for three seconds at a time and reads the VRAM again between them.
+# each open slot for slot_poll seconds in turn and tries them all again, so it takes whichever slot frees first. While
+# only slot 1 is open, it blocks on slot 1 for vram_poll seconds at a time and reads the VRAM again between them.
 take_any() {
     local i=0 j open
     while :; do
@@ -328,11 +355,13 @@ take_any() {
         done
         if ((open == 1 && ${#slots[@]} > 1)); then
             waiting vram
-            lock -w 3 -x "${slots[0]}" && { got=${slots[0]}; return; }
+            still_waiting
+            lock -w "$vram_poll" -x "${slots[0]}" && { got=${slots[0]}; return; }
         else
             waiting
+            still_waiting
             i=$((i % open))
-            lock -w 1 -x "${slots[i]}" && { got=${slots[i]}; return; }
+            lock -w "$slot_poll" -x "${slots[i]}" && { got=${slots[i]}; return; }
             i=$((i + 1))
         fi
     done
@@ -342,9 +371,10 @@ take_any() {
 # what it waits for and behind whom. With vram, it waits for slot 1 or for the VRAM to open another slot. It says each
 # of the two once.
 waiting() {
-    local kind=${1:-slots} behind ahead
+    local kind=${1:-slots} behind ahead locked_now
     [[ " $told " == *" $kind "* ]] && return
     told+=" $kind"
+    locked_now=$(locked)
     if [[ $kind == vram ]]; then
         behind=$(holders "${paths[0]}")
     else
@@ -368,10 +398,42 @@ waiting() {
     fi
 }
 
-# Records that the call released its slots, or stopped waiting for them, as the script exits.
+# Once the call has waited long_wait seconds, and again each time it waits that long more, says on stderr who holds
+# the slots it waits for, with each holder's hold time, and who is next in line.
+still_waiting() {
+    ((EPOCHSECONDS >= next_note)) || return 0
+    local behind ahead locked_now
+    while ((next_note <= EPOCHSECONDS)); do
+        next_note=$((next_note + long_wait))
+    done
+    locked_now=$(locked)
+    behind=$(holders -t "${paths[@]}")
+    ahead=$(holders "$locks/gpu.queue")
+    [[ $ahead == nobody ]] || behind+="; next in line: $ahead"
+    echo "agent-desk gpu: still waiting for $what after $(span $((EPOCHSECONDS - since))), held by: $behind" >&2
+}
+
+# Writes when the call took its slots, in epoch seconds, and whether it is exclusive to gpu.held.<pid> in the lock
+# folder, where holders reads the hold's length, and removes the files of processes that have exited. A file it can't
+# write leaves the call's holders unnamed by their hold time, and the command runs as before.
+mark_held() {
+    local path pid
+    for path in "$locks"/gpu.held.*; do
+        pid=${path##*/gpu.held.}
+        if valid "$pid" && [[ ! -e /proc/$pid ]]; then
+            rm -f "$path" 2>/dev/null || true
+        fi
+    done
+    held_file=$locks/gpu.held.$$
+    write "$held_file" "$EPOCHSECONDS $exclusive" 2>/dev/null || held_file=
+}
+
+# Removes the call's gpu.held.<pid> file and records that the call released its slots, or stopped waiting for them,
+# as the script exits.
 # shellcheck disable=SC2329 # The EXIT trap runs it.
 released() {
-    note released "$call" "$EPOCHREALTIME"
+    [[ -z $call ]] || note released "$call" "$EPOCHREALTIME"
+    [[ -z $held_file ]] || rm -f "$held_file" 2>/dev/null || true
 }
 
 # Runs lib/gpu_log.py with every lock descriptor closed, so it holds no slot, and prints what it prints. A record that
@@ -385,42 +447,92 @@ note() {
     ) 2>/dev/null || true
 }
 
-# Names the checkouts whose commands hold the given lock files, by the folder each holder runs in, or "nobody".
-# It reads each process's /proc/<pid>/fdinfo, which lists the locks the process holds and leaves out one it waits for,
-# and matches each locked descriptor to a lock file with -ef, which compares device and inode. lslocks reads
-# /proc/locks, which the kernel prints in pieces, and skips a held lock when another process takes or releases a lock
-# between two pieces. It needs neither grep nor stat, so it works under a PATH that lacks them. Every caller runs this
-# in a command substitution, a copy of the script that shares its locks, so it closes its copies of the lock descriptors
-# and skips the script's own process.
+# Names the checkouts whose commands hold the given lock files, by the folder each holder runs in, or "nobody". With
+# -t, follows each name with what hold prints for its process, such as "game-issue-12, exclusive, 18m", and separates
+# the holders with "; ".
+# It matches each descriptor in locked_now, the reading of the locks the caller took with locked, to a lock file with
+# -ef, which compares device and inode, so every holder a message names comes from the same reading.
 holders() {
-    local fd pid path cwd
+    local fd pid path cwd name joined times=false
     local -A pids=() seen=()
-    for fd in "${queue:-}" "${slots[@]}"; do
-        [[ -z $fd ]] || exec {fd}>&-
-    done
+    if [[ ${1:-} == -t ]]; then
+        times=true
+        shift
+    fi
     while read -r pid fd; do
         [[ -z ${pids[$pid]:-} ]] || continue
         for path in "$@"; do
             [[ /proc/$pid/fd/$fd -ef $path ]] || continue
             pids[$pid]=1
-            cwd=$(readlink "/proc/$pid/cwd") && seen[$(basename "$cwd")]=1
+            cwd=$(readlink "/proc/$pid/cwd") || break
+            name=$(basename "$cwd")
+            [[ $times == false ]] || name+=$(hold "$pid")
+            seen[$name]=1
             break
         done
-    done < <(
-        printf '%s\n' /proc/[0-9]*/fdinfo/* | awk -v me="$$" '
-            {
-                split($0, part, "/")
-                if (part[3] == me) next
-                while ((getline line < $0) > 0)
-                    if (line ~ /^lock:/ && line !~ /->/) { print part[3], part[5]; break }
-                close($0)
-            }
-        '
-    )
+    done < <([[ -z $locked_now ]] || printf '%s\n' "$locked_now")
     if ((${#seen[@]} == 0)); then
         echo nobody
+    elif [[ $times == true ]]; then
+        joined=
+        while read -r name; do
+            joined+=${joined:+; }$name
+        done < <(printf '%s\n' "${!seen[@]}" | sort)
+        echo "$joined"
     else
         printf '%s\n' "${!seen[@]}" | sort | paste -sd ' '
+    fi
+}
+
+# Prints "<pid> <descriptor>" for each locked descriptor of every process but the script's own, from each process's
+# /proc/<pid>/fdinfo, which lists the locks the process holds and leaves out one it waits for. lslocks reads
+# /proc/locks, which the kernel prints in pieces, and skips a held lock when another process takes or releases a lock
+# between two pieces. It needs neither grep nor stat, so it works under a PATH that lacks them. A process that shares
+# a lock's descriptor lists the lock too, so it runs in a subshell, a copy of the script that shares its locks, closes
+# that copy's lock descriptors, and skips the script's own process.
+locked() {
+    local fd
+    for fd in "${queue:-}" "${slots[@]}"; do
+        [[ -z $fd ]] || exec {fd}>&-
+    done
+    printf '%s\n' /proc/[0-9]*/fdinfo/* | awk -v me="$$" '
+        {
+            split($0, part, "/")
+            if (part[3] == me) next
+            while ((getline line < $0) > 0)
+                if (line ~ /^lock:/ && line !~ /->/) { print part[3], part[5]; break }
+            close($0)
+        }
+    '
+}
+
+# Prints ", exclusive" or ", shared" and how long the process with the given pid has held its slots, from its
+# gpu.held.<pid> file, followed by ", long" for an exclusive hold past 45 minutes or a shared one past 30. Prints
+# nothing for a process without the file, such as an exclusive call still taking its slots.
+hold() {
+    local got kind age limit
+    { read -r got kind <"$locks/gpu.held.$1"; } 2>/dev/null || return 0
+    valid "$got" || return 0
+    age=$((EPOCHSECONDS - got))
+    ((age >= 0)) || age=0
+    if [[ $kind == true ]]; then
+        kind=exclusive limit=$((45 * 60))
+    else
+        kind=shared limit=$((30 * 60))
+    fi
+    printf ', %s, %s' "$kind" "$(span "$age")"
+    ((age <= limit)) || printf ', long'
+}
+
+# Prints a number of seconds as the seconds under a minute, the whole minutes under an hour, then hours and minutes,
+# such as 40s, 18m, or 1h05m.
+span() {
+    if (($1 < 60)); then
+        echo "$1s"
+    elif (($1 < 3600)); then
+        echo "$(($1 / 60))m"
+    else
+        printf '%dh%02dm\n' $(($1 / 3600)) $(($1 % 3600 / 60))
     fi
 }
 
